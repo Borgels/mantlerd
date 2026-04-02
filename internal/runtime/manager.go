@@ -64,6 +64,30 @@ func (m *Manager) InstalledRuntimes() []string {
 	return runtimes
 }
 
+func (m *Manager) RuntimeVersion(runtimeName string) string {
+	switch runtimeName {
+	case "ollama":
+		cmd := exec.Command("ollama", "--version")
+		output, err := cmd.Output()
+		if err != nil {
+			return ""
+		}
+		return strings.TrimSpace(string(output))
+	case "vllm":
+		cmd := exec.Command("python3", "-m", "pip", "show", "vllm")
+		output, err := cmd.Output()
+		if err != nil {
+			return ""
+		}
+		for _, line := range strings.Split(string(output), "\n") {
+			if strings.HasPrefix(strings.ToLower(line), "version:") {
+				return strings.TrimSpace(strings.TrimPrefix(line, "Version:"))
+			}
+		}
+	}
+	return ""
+}
+
 func (m *Manager) PullModel(modelID string) error {
 	if modelID == "" {
 		return fmt.Errorf("model ID is required")

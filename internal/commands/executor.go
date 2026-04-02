@@ -3,18 +3,23 @@ package commands
 import (
 	"encoding/json"
 	"fmt"
+	"os/exec"
+	"strings"
 
+	"github.com/Borgels/clawcontrol-agent/internal/config"
 	"github.com/Borgels/clawcontrol-agent/internal/runtime"
 	"github.com/Borgels/clawcontrol-agent/internal/types"
 )
 
 type Executor struct {
 	runtimeManager *runtime.Manager
+	cfg            config.Config
 }
 
-func NewExecutor(runtimeManager *runtime.Manager) *Executor {
+func NewExecutor(runtimeManager *runtime.Manager, cfg config.Config) *Executor {
 	return &Executor{
 		runtimeManager: runtimeManager,
+		cfg:            cfg,
 	}
 }
 
@@ -75,8 +80,16 @@ func (e *Executor) Execute(command types.AgentCommand) (string, error) {
 	case "restart_runtime":
 		return "", e.runtimeManager.RestartRuntime()
 	case "update_agent":
-		// Reserved for future signed self-update flow.
-		return "", nil
+		version := "latest"
+		if rawVersion, ok := command.Params["version"]; ok {
+			if parsedVersion, ok := rawVersion.(string); ok && strings.TrimSpace(parsedVersion) != "" {
+				version = strings.TrimSpace(parsedVersion)
+			}
+		}
+		if err := e.startAgentUpdate(version); err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("Agent update started (target version: %s)", version), nil
 	default:
 		return "", fmt.Errorf("unsupported command type: %s", command.Type)
 	}
@@ -135,4 +148,29 @@ func intParam(params map[string]interface{}, key string, fallback int) int {
 	default:
 		return fallback
 	}
+}
+
+func (e *Executor) startAgentUpdate(version string) error {
+	installer := "https://raw.githubusercontent.com/Borgels/clawcontrol-agent/master/scripts/install.sh"
+	commandParts := []string{
+		"curl", "-fsSL", shellQuote(installer), "|", "sh", "-s", "--",
+		"--token", shellQuote(e.cfg.Token),
+		"--machine", shellQuote(e.cfg.MachineID),
+		"--server", shellQuote(e.cfg.ServerURL),
+		"--version", shellQuote(version),
+	}
+	if e.cfg.Insecure {
+		commandParts = append(commandParts, "--insecure")
+	}
+
+	commandLine := strings.Join(commandParts, " ")
+	cmd := exec.Command("sh", "-c", commandLine)
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("start agent update: %w", err)
+	}
+	return nil
+}
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
