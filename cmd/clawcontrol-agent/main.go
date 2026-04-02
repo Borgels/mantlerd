@@ -68,7 +68,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("create api client: %v", err)
 	}
-	executor := commands.NewExecutor(runtime.NewManager())
+	runtimeManager := runtime.NewManager()
+	executor := commands.NewExecutor(runtimeManager)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
@@ -81,6 +82,7 @@ func main() {
 			Addresses:       report.Addresses,
 			HardwareSummary: report.HardwareSummary,
 			AgentVersion:    agentVersion,
+			InstalledRuntimeTypes: toRuntimeTypes(runtimeManager.InstalledRuntimes()),
 		}
 
 		resp, err := client.Retry(ctx, 3, func() (types.CheckinResponse, error) {
@@ -89,6 +91,12 @@ func main() {
 		if err != nil {
 			log.Printf("checkin error: %v", err)
 			return
+		}
+
+		for _, runtimeType := range resp.DesiredConfig.Runtimes {
+			if err := runtimeManager.EnsureRuntime(string(runtimeType)); err != nil {
+				log.Printf("failed to ensure runtime %s: %v", runtimeType, err)
+			}
 		}
 
 		for _, command := range resp.Commands {
@@ -130,4 +138,12 @@ func main() {
 			runOnce()
 		}
 	}
+}
+
+func toRuntimeTypes(values []string) []types.RuntimeType {
+	result := make([]types.RuntimeType, 0, len(values))
+	for _, value := range values {
+		result = append(result, types.RuntimeType(value))
+	}
+	return result
 }

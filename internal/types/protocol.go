@@ -37,6 +37,7 @@ type CheckinRequest struct {
 	AgentVersion    string           `json:"agentVersion,omitempty"`
 	RuntimeStatus   RuntimeStatus    `json:"runtimeStatus,omitempty"`
 	RuntimeType     RuntimeType      `json:"runtimeType,omitempty"`
+	InstalledRuntimeTypes []RuntimeType   `json:"installedRuntimeTypes,omitempty"`
 	RuntimeVersion  string           `json:"runtimeVersion,omitempty"`
 	InstalledModels []InstalledModel `json:"installedModels,omitempty"`
 	Uptime          int64            `json:"uptime,omitempty"`
@@ -52,7 +53,13 @@ type AgentCommand struct {
 type CheckinResponse struct {
 	Ack        bool           `json:"ack"`
 	ServerTime string         `json:"serverTime"`
+	DesiredConfig DesiredConfig `json:"desiredConfig"`
 	Commands   []AgentCommand `json:"commands"`
+}
+
+type DesiredConfig struct {
+	Runtimes []RuntimeType `json:"runtimes"`
+	Models   []string      `json:"models"`
 }
 
 type AckRequest struct {

@@ -38,3 +38,29 @@ Config is persisted by default at:
 make build
 make release
 ```
+
+## Linux installer (recommended)
+
+```bash
+curl -fsSL https://install.clawcontrol.dev | sh -s -- \
+  --token YOUR_MACHINE_TOKEN \
+  --machine MACHINE_ID \
+  --server https://control.example.com
+```
+
+Installer behavior:
+
+- Linux-only (systemd target)
+- Requires root privileges (or passwordless sudo)
+- Downloads release binary from GitHub Releases
+- Verifies SHA-256 using `<asset>.sha256`
+- Installs binary to `/usr/local/bin/clawcontrol-agent`
+- Writes config to `/etc/clawcontrol/agent.json` (`0600`)
+- Creates/updates and restarts `clawcontrol-agent.service`
+
+Required release assets:
+
+- `clawcontrol-agent-linux-amd64`
+- `clawcontrol-agent-linux-amd64.sha256`
+- `clawcontrol-agent-linux-arm64`
+- `clawcontrol-agent-linux-arm64.sha256`
