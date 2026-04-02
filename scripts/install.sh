@@ -137,8 +137,8 @@ case "$SERVER_URL" in
   http://*)
     if [ "$INSECURE" != "true" ]; then
       INSECURE="true"
-      log "Detected non-HTTPS server URL. Enabling insecure mode automatically."
     fi
+    log "Detected non-HTTPS server URL. Insecure mode is enabled for agent transport."
     ;;
 esac
 
@@ -207,6 +207,14 @@ SHA_ACTUAL="$($SHA256_CMD "$BIN_TMP" | awk '{print $1}')"
 log "Installing binary to ${INSTALL_DIR}/${BINARY_NAME}"
 $SUDO install -d -m 0755 "$INSTALL_DIR"
 $SUDO install -m 0755 "$BIN_TMP" "${INSTALL_DIR}/${BINARY_NAME}"
+
+HEALTH_URL="${SERVER_URL%/}/api/health"
+log "Preflight: checking server reachability at ${HEALTH_URL}"
+if curl --silent --show-error --location --max-time 8 --output /dev/null "$HEALTH_URL"; then
+  log "Preflight: server is reachable."
+else
+  log "Preflight warning: server not reachable right now. Agent will retry in background."
+fi
 
 log "Writing config to ${CONFIG_PATH}"
 $SUDO install -d -m 0755 "$CONFIG_DIR"

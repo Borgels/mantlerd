@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -26,8 +27,18 @@ func New(serverURL, token string, insecure bool) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("invalid server url: %w", err)
 	}
-	if parsed.Scheme != "https" && !insecure {
-		return nil, fmt.Errorf("refusing non-https server without --insecure")
+	switch parsed.Scheme {
+	case "https":
+		// secure by default
+	case "http":
+		if !insecure {
+			// Hardened fallback for local/private deployments: avoid crash-looping
+			// when installer/config missed insecure mode.
+			fmt.Fprintf(os.Stderr, "warning: non-HTTPS server detected; enabling insecure mode automatically\n")
+			insecure = true
+		}
+	default:
+		return nil, fmt.Errorf("unsupported server url scheme: %s", parsed.Scheme)
 	}
 
 	transport := http.DefaultTransport.(*http.Transport).Clone()

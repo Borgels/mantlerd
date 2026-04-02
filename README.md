@@ -60,6 +60,7 @@ Installer behavior:
 - Writes `ollama.service` systemd override with `OLLAMA_HOST=0.0.0.0:11434` (configurable)
 - Runs post-install service health checks and prints diagnostics on failure
 - Auto-enables insecure mode for `http://` server URLs (or use `--insecure`)
+- Agent runtime also auto-enables insecure mode for `http://` server URLs as a safety fallback
 
 Required release assets:
 
