@@ -99,8 +99,19 @@ func main() {
 				log.Printf("failed to ensure runtime %s: %v", runtimeType, err)
 			}
 		}
+		modelsHandled := map[string]bool{}
+		for _, target := range resp.DesiredConfig.ModelTargets {
+			modelsHandled[target.ModelID] = true
+			flags := target.FeatureFlags
+			if err := runtimeManager.EnsureModelWithFlags(target.ModelID, &flags); err != nil {
+				log.Printf("failed to ensure model target %s: %v", target.ModelID, err)
+			}
+		}
 		for _, modelID := range resp.DesiredConfig.Models {
-			if err := runtimeManager.EnsureModel(modelID); err != nil {
+			if modelsHandled[modelID] {
+				continue
+			}
+			if err := runtimeManager.EnsureModelWithFlags(modelID, nil); err != nil {
 				log.Printf("failed to ensure model %s: %v", modelID, err)
 			}
 		}

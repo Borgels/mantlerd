@@ -57,6 +57,7 @@ Installer behavior:
 - Installs binary to `/usr/local/bin/clawcontrol-agent`
 - Writes config to `/etc/clawcontrol/agent.json` (`0600`)
 - Creates/updates and restarts `clawcontrol-agent.service`
+- Writes `ollama.service` systemd override with `OLLAMA_HOST=0.0.0.0:11434` (configurable)
 
 Required release assets:
 
