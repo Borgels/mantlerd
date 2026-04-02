@@ -77,12 +77,13 @@ func main() {
 	runOnce := func() {
 		report := discovery.Collect()
 		payload := types.CheckinRequest{
-			MachineID:       cfg.MachineID,
-			Hostname:        report.Hostname,
-			Addresses:       report.Addresses,
-			HardwareSummary: report.HardwareSummary,
-			AgentVersion:    agentVersion,
+			MachineID:             cfg.MachineID,
+			Hostname:              report.Hostname,
+			Addresses:             report.Addresses,
+			HardwareSummary:       report.HardwareSummary,
+			AgentVersion:          agentVersion,
 			InstalledRuntimeTypes: toRuntimeTypes(runtimeManager.InstalledRuntimes()),
+			InstalledModels:       toInstalledModels(runtimeManager.ListModels()),
 		}
 
 		resp, err := client.Retry(ctx, 3, func() (types.CheckinResponse, error) {
@@ -96,6 +97,11 @@ func main() {
 		for _, runtimeType := range resp.DesiredConfig.Runtimes {
 			if err := runtimeManager.EnsureRuntime(string(runtimeType)); err != nil {
 				log.Printf("failed to ensure runtime %s: %v", runtimeType, err)
+			}
+		}
+		for _, modelID := range resp.DesiredConfig.Models {
+			if err := runtimeManager.EnsureModel(modelID); err != nil {
+				log.Printf("failed to ensure model %s: %v", modelID, err)
 			}
 		}
 
@@ -144,6 +150,17 @@ func toRuntimeTypes(values []string) []types.RuntimeType {
 	result := make([]types.RuntimeType, 0, len(values))
 	for _, value := range values {
 		result = append(result, types.RuntimeType(value))
+	}
+	return result
+}
+
+func toInstalledModels(values []string) []types.InstalledModel {
+	result := make([]types.InstalledModel, 0, len(values))
+	for _, value := range values {
+		result = append(result, types.InstalledModel{
+			ModelID: value,
+			Status:  types.ModelReady,
+		})
 	}
 	return result
 }
