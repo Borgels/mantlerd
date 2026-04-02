@@ -17,7 +17,7 @@ import (
 	"github.com/Borgels/clawcontrol-agent/internal/types"
 )
 
-const agentVersion = "0.1.0"
+var agentVersion = "0.1.3"
 
 func main() {
 	cfgPath := flag.String("config", config.DefaultConfigPath(), "Path to config file")
@@ -69,20 +69,32 @@ func main() {
 		log.Fatalf("create api client: %v", err)
 	}
 	runtimeManager := runtime.NewManager()
-	executor := commands.NewExecutor(runtimeManager)
+	executor := commands.NewExecutor(runtimeManager, cfg)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
 	runOnce := func() {
 		report := discovery.Collect()
+		installedRuntimeTypes := toRuntimeTypes(runtimeManager.InstalledRuntimes())
+		runtimeStatus := types.RuntimeNotInstalled
+		runtimeType := types.RuntimeType("")
+		runtimeVersion := ""
+		if len(installedRuntimeTypes) > 0 {
+			runtimeStatus = types.RuntimeReady
+			runtimeType = installedRuntimeTypes[0]
+			runtimeVersion = runtimeManager.RuntimeVersion(string(runtimeType))
+		}
 		payload := types.CheckinRequest{
 			MachineID:             cfg.MachineID,
 			Hostname:              report.Hostname,
 			Addresses:             report.Addresses,
 			HardwareSummary:       report.HardwareSummary,
 			AgentVersion:          agentVersion,
-			InstalledRuntimeTypes: toRuntimeTypes(runtimeManager.InstalledRuntimes()),
+			RuntimeStatus:         runtimeStatus,
+			RuntimeType:           runtimeType,
+			RuntimeVersion:        runtimeVersion,
+			InstalledRuntimeTypes: installedRuntimeTypes,
 			InstalledModels:       toInstalledModels(runtimeManager.ListModels()),
 		}
 

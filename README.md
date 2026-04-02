@@ -10,6 +10,12 @@ Lightweight machine agent for ClawControl.
 - Executes allowlisted commands (`install_runtime`, `pull_model`, `remove_model`, `restart_runtime`, `health_check`, `update_agent`)
 - Acknowledges command result to `POST /api/agent/ack`
 
+`update_agent` command notes:
+
+- Starts an in-place agent update using the official installer script.
+- Accepts optional `params.version` (`latest` by default).
+- Agent reports the installed version via `agentVersion` on subsequent check-ins.
+
 `health_check` command notes:
 
 - When `params.scope` is `"model_benchmark"`, the agent runs a real Ollama benchmark via `/api/generate`.
