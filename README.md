@@ -58,6 +58,8 @@ Installer behavior:
 - Writes config to `/etc/clawcontrol/agent.json` (`0600`)
 - Creates/updates and restarts `clawcontrol-agent.service`
 - Writes `ollama.service` systemd override with `OLLAMA_HOST=0.0.0.0:11434` (configurable)
+- Runs post-install service health checks and prints diagnostics on failure
+- Auto-enables insecure mode for `http://` server URLs (or use `--insecure`)
 
 Required release assets:
 

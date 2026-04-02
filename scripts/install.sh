@@ -29,7 +29,7 @@ SHA_EXPECTED=""
 
 usage() {
   cat <<EOF
-Usage: install.sh --token <token> --machine <machine-id> --server <server-url> [--version <tag|latest>]
+Usage: install.sh --token <token> --machine <machine-id> --server <server-url> [--version <tag|latest>] [--insecure]
 
 Environment overrides:
   CLAWCONTROL_AGENT_VERSION      Release tag (default: latest)
@@ -62,6 +62,21 @@ require_cmd() {
   command -v "$1" >/dev/null 2>&1 || fatal "Required command not found: $1"
 }
 
+wait_for_service() {
+  service="$1"
+  retries="${2:-12}"
+  i=0
+  while [ "$i" -lt "$retries" ]; do
+    state="$($SUDO systemctl is-active "$service" 2>/dev/null || true)"
+    if [ "$state" = "active" ]; then
+      return 0
+    fi
+    sleep 1
+    i=$((i + 1))
+  done
+  return 1
+}
+
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --token)
@@ -84,6 +99,10 @@ while [ "$#" -gt 0 ]; do
       VERSION="$2"
       shift 2
       ;;
+    --insecure)
+      INSECURE="true"
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -103,6 +122,23 @@ case "$SERVER_URL" in
     ;;
   *)
     fatal "Server URL must include scheme (https://... or http://...)"
+    ;;
+esac
+
+case "$INSECURE" in
+  true|false)
+    ;;
+  *)
+    fatal "CLAWCONTROL_AGENT_INSECURE must be true or false"
+    ;;
+esac
+
+case "$SERVER_URL" in
+  http://*)
+    if [ "$INSECURE" != "true" ]; then
+      INSECURE="true"
+      log "Detected non-HTTPS server URL. Enabling insecure mode automatically."
+    fi
     ;;
 esac
 
@@ -234,8 +270,18 @@ EOF"
     log "Skipping ollama remote bind override (CLAWCONTROL_OLLAMA_CONFIGURE_REMOTE=${OLLAMA_CONFIGURE_REMOTE})."
   fi
 
-  $SUDO systemctl --no-pager --full status "$SERVICE_NAME" | sed -n '1,8p'
-  log "Install complete. Service ${SERVICE_NAME} is enabled and restarted."
+  if wait_for_service "$SERVICE_NAME" 15; then
+    log "Service ${SERVICE_NAME} is active."
+    $SUDO systemctl --no-pager --full status "$SERVICE_NAME" | sed -n '1,8p'
+    log "Install complete. Service ${SERVICE_NAME} is enabled and restarted."
+  else
+    log "Service ${SERVICE_NAME} failed to become active. Showing diagnostics:"
+    $SUDO systemctl --no-pager --full status "$SERVICE_NAME" || true
+    if command -v journalctl >/dev/null 2>&1; then
+      $SUDO journalctl -u "$SERVICE_NAME" -n 40 --no-pager || true
+    fi
+    fatal "Agent service is not healthy. Check server URL/reachability and token."
+  fi
 else
   log "systemd not detected. Start manually:"
   log "${INSTALL_DIR}/${BINARY_NAME} --config ${CONFIG_PATH}"
