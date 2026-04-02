@@ -19,6 +19,8 @@ Lightweight machine agent for ClawControl.
 `health_check` command notes:
 
 - When `params.scope` is `"model_benchmark"`, the agent runs a real Ollama benchmark via `/api/generate`.
+- Supports benchmark profiles via params (`quick`, `standard`, `deep`) by varying token sizes and run count.
+- Sends interim `in_progress` acknowledgements with rolling benchmark progress and partial metrics.
 - Ack `details` includes benchmark JSON under `benchmark`:
   - `ttftMs`
   - `outputTokensPerSec`
