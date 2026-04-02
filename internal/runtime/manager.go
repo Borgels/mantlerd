@@ -59,6 +59,48 @@ func (m *Manager) PullModel(modelID string) error {
 	return m.run("ollama", "pull", modelID)
 }
 
+func (m *Manager) ListModels() []string {
+	cmd := exec.Command("ollama", "list")
+	output, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	if len(lines) <= 1 {
+		return nil
+	}
+
+	models := make([]string, 0, len(lines)-1)
+	for _, line := range lines[1:] {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		models = append(models, fields[0])
+	}
+	return models
+}
+
+func (m *Manager) HasModel(modelID string) bool {
+	for _, model := range m.ListModels() {
+		if model == modelID {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *Manager) EnsureModel(modelID string) error {
+	if modelID == "" {
+		return fmt.Errorf("model ID is required")
+	}
+	if m.HasModel(modelID) {
+		return nil
+	}
+	return m.PullModel(modelID)
+}
+
 func (m *Manager) RemoveModel(modelID string) error {
 	if modelID == "" {
 		return fmt.Errorf("model ID is required")
