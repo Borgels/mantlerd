@@ -9,10 +9,14 @@ INSTALL_DIR="/usr/local/bin"
 CONFIG_DIR="/etc/clawcontrol"
 CONFIG_PATH="${CONFIG_DIR}/agent.json"
 SYSTEMD_UNIT_PATH="/etc/systemd/system/${SERVICE_NAME}.service"
+OLLAMA_OVERRIDE_DIR="/etc/systemd/system/ollama.service.d"
+OLLAMA_OVERRIDE_PATH="${OLLAMA_OVERRIDE_DIR}/override.conf"
 INTERVAL_MS="${CLAWCONTROL_AGENT_INTERVAL_MS:-30000}"
 LOG_LEVEL="${CLAWCONTROL_AGENT_LOG_LEVEL:-info}"
 INSECURE="${CLAWCONTROL_AGENT_INSECURE:-false}"
 VERSION="${CLAWCONTROL_AGENT_VERSION:-latest}"
+OLLAMA_CONFIGURE_REMOTE="${CLAWCONTROL_OLLAMA_CONFIGURE_REMOTE:-true}"
+OLLAMA_HOST="${CLAWCONTROL_OLLAMA_HOST:-0.0.0.0:11434}"
 
 TOKEN=""
 MACHINE_ID=""
@@ -32,6 +36,8 @@ Environment overrides:
   CLAWCONTROL_AGENT_INTERVAL_MS  Poll interval in milliseconds (default: 30000)
   CLAWCONTROL_AGENT_LOG_LEVEL    Log level (default: info)
   CLAWCONTROL_AGENT_INSECURE     true|false (default: false)
+  CLAWCONTROL_OLLAMA_CONFIGURE_REMOTE  true|false (default: true)
+  CLAWCONTROL_OLLAMA_HOST        Ollama bind host:port (default: 0.0.0.0:11434)
 EOF
 }
 
@@ -208,6 +214,26 @@ EOF"
   $SUDO systemctl daemon-reload
   $SUDO systemctl enable "$SERVICE_NAME" >/dev/null
   $SUDO systemctl restart "$SERVICE_NAME"
+
+  if [ "$OLLAMA_CONFIGURE_REMOTE" = "true" ]; then
+    log "Configuring ollama systemd override (OLLAMA_HOST=${OLLAMA_HOST})"
+    $SUDO install -d -m 0755 "$OLLAMA_OVERRIDE_DIR"
+    $SUDO sh -c "cat > \"$OLLAMA_OVERRIDE_PATH\" <<EOF
+[Service]
+Environment=\"OLLAMA_HOST=${OLLAMA_HOST}\"
+EOF"
+    $SUDO chmod 0644 "$OLLAMA_OVERRIDE_PATH"
+    $SUDO systemctl daemon-reload
+    if $SUDO systemctl status ollama >/dev/null 2>&1; then
+      $SUDO systemctl restart ollama
+      log "Restarted ollama service with remote bind override."
+    else
+      log "ollama service not detected yet. Override was written and will apply once installed."
+    fi
+  else
+    log "Skipping ollama remote bind override (CLAWCONTROL_OLLAMA_CONFIGURE_REMOTE=${OLLAMA_CONFIGURE_REMOTE})."
+  fi
+
   $SUDO systemctl --no-pager --full status "$SERVICE_NAME" | sed -n '1,8p'
   log "Install complete. Service ${SERVICE_NAME} is enabled and restarted."
 else

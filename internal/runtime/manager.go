@@ -1,9 +1,14 @@
 package runtime
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
+
+	"github.com/Borgels/clawcontrol-agent/internal/types"
 )
 
 type Manager struct{}
@@ -101,6 +106,16 @@ func (m *Manager) EnsureModel(modelID string) error {
 	return m.PullModel(modelID)
 }
 
+func (m *Manager) EnsureModelWithFlags(modelID string, flags *types.ModelFeatureFlags) error {
+	if err := m.EnsureModel(modelID); err != nil {
+		return err
+	}
+	if flags == nil {
+		return nil
+	}
+	return m.upsertModelFlags(modelID, *flags)
+}
+
 func (m *Manager) RemoveModel(modelID string) error {
 	if modelID == "" {
 		return fmt.Errorf("model ID is required")
@@ -121,6 +136,40 @@ func (m *Manager) run(name string, args ...string) error {
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("%s %s failed: %w (%s)", name, strings.Join(args, " "), err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
+func (m *Manager) modelFlagsPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return filepath.Join("/var/lib/clawcontrol-agent", "model-flags.json")
+	}
+	return filepath.Join(home, ".config", "clawcontrol-agent", "model-flags.json")
+}
+
+func (m *Manager) upsertModelFlags(modelID string, flags types.ModelFeatureFlags) error {
+	path := m.modelFlagsPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create model flags directory: %w", err)
+	}
+
+	current := map[string]types.ModelFeatureFlags{}
+	if raw, err := os.ReadFile(path); err == nil && len(raw) > 0 {
+		_ = json.Unmarshal(raw, &current)
+	}
+
+	if existing, ok := current[modelID]; ok && existing == flags {
+		return nil
+	}
+	current[modelID] = flags
+
+	payload, err := json.MarshalIndent(current, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode model flags: %w", err)
+	}
+	if err := os.WriteFile(path, append(payload, '\n'), 0o600); err != nil {
+		return fmt.Errorf("write model flags: %w", err)
 	}
 	return nil
 }

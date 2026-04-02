@@ -34,7 +34,8 @@ func (e *Executor) Execute(command types.AgentCommand) error {
 		if err != nil {
 			return err
 		}
-		return e.runtimeManager.PullModel(modelID)
+		flags := modelFeatureFlagsParam(command.Params)
+		return e.runtimeManager.EnsureModelWithFlags(modelID, flags)
 	case "remove_model":
 		modelID, err := stringParam(command.Params, "modelId")
 		if err != nil {
@@ -63,4 +64,26 @@ func stringParam(params map[string]interface{}, key string) (string, error) {
 		return "", fmt.Errorf("invalid %s param", key)
 	}
 	return value, nil
+}
+
+func modelFeatureFlagsParam(params map[string]interface{}) *types.ModelFeatureFlags {
+	raw, ok := params["featureFlags"]
+	if !ok {
+		return nil
+	}
+	obj, ok := raw.(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	flags := &types.ModelFeatureFlags{
+		Streaming: true,
+		Thinking:  false,
+	}
+	if streaming, ok := obj["streaming"].(bool); ok {
+		flags.Streaming = streaming
+	}
+	if thinking, ok := obj["thinking"].(bool); ok {
+		flags.Thinking = thinking
+	}
+	return flags
 }
