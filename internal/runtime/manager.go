@@ -23,6 +23,35 @@ func (m *Manager) InstallRuntime(runtimeName string) error {
 	}
 }
 
+func (m *Manager) IsRuntimeInstalled(runtimeName string) bool {
+	switch runtimeName {
+	case "vllm":
+		return m.run("python3", "-m", "pip", "show", "vllm") == nil
+	case "ollama":
+		return m.run("sh", "-c", "command -v ollama") == nil
+	default:
+		return false
+	}
+}
+
+func (m *Manager) EnsureRuntime(runtimeName string) error {
+	if m.IsRuntimeInstalled(runtimeName) {
+		return nil
+	}
+	return m.InstallRuntime(runtimeName)
+}
+
+func (m *Manager) InstalledRuntimes() []string {
+	runtimes := make([]string, 0, 2)
+	if m.IsRuntimeInstalled("vllm") {
+		runtimes = append(runtimes, "vllm")
+	}
+	if m.IsRuntimeInstalled("ollama") {
+		runtimes = append(runtimes, "ollama")
+	}
+	return runtimes
+}
+
 func (m *Manager) PullModel(modelID string) error {
 	if modelID == "" {
 		return fmt.Errorf("model ID is required")
