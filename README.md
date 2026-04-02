@@ -10,6 +10,16 @@ Lightweight machine agent for ClawControl.
 - Executes allowlisted commands (`install_runtime`, `pull_model`, `remove_model`, `restart_runtime`, `health_check`, `update_agent`)
 - Acknowledges command result to `POST /api/agent/ack`
 
+`health_check` command notes:
+
+- When `params.scope` is `"model_benchmark"`, the agent runs a real Ollama benchmark via `/api/generate`.
+- Ack `details` includes benchmark JSON under `benchmark`:
+  - `ttftMs`
+  - `outputTokensPerSec`
+  - `totalLatencyMs`
+  - `promptTokensPerSec`
+  - `p95TtftMsAtSmallConcurrency`
+
 ## Quick start
 
 ```bash

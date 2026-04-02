@@ -1,12 +1,19 @@
 package runtime
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
+	"math"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/Borgels/clawcontrol-agent/internal/types"
 )
@@ -87,6 +94,30 @@ func (m *Manager) ListModels() []string {
 	return models
 }
 
+type BenchmarkResult struct {
+	TTFTMs                      float64
+	OutputTokensPerSec          float64
+	TotalLatencyMs              float64
+	PromptTokensPerSec          float64
+	P95TTFTMsAtSmallConcurrency float64
+}
+
+type ollamaGenerateRequest struct {
+	Model   string         `json:"model"`
+	Prompt  string         `json:"prompt"`
+	Stream  bool           `json:"stream"`
+	Options map[string]int `json:"options,omitempty"`
+}
+
+type ollamaGenerateResponse struct {
+	TotalDuration      int64 `json:"total_duration"`
+	LoadDuration       int64 `json:"load_duration"`
+	PromptEvalCount    int64 `json:"prompt_eval_count"`
+	PromptEvalDuration int64 `json:"prompt_eval_duration"`
+	EvalCount          int64 `json:"eval_count"`
+	EvalDuration       int64 `json:"eval_duration"`
+}
+
 func (m *Manager) HasModel(modelID string) bool {
 	for _, model := range m.ListModels() {
 		if model == modelID {
@@ -94,6 +125,173 @@ func (m *Manager) HasModel(modelID string) bool {
 		}
 	}
 	return false
+}
+
+func (m *Manager) BenchmarkModel(modelID string, samplePromptTokens int, sampleOutputTokens int, concurrency int) (BenchmarkResult, error) {
+	if modelID == "" {
+		return BenchmarkResult{}, fmt.Errorf("model ID is required")
+	}
+	if !m.HasModel(modelID) {
+		return BenchmarkResult{}, fmt.Errorf("model not installed: %s", modelID)
+	}
+	if samplePromptTokens <= 0 {
+		samplePromptTokens = 256
+	}
+	if sampleOutputTokens <= 0 {
+		sampleOutputTokens = 128
+	}
+	if concurrency <= 0 {
+		concurrency = 2
+	}
+	if concurrency > 4 {
+		concurrency = 4
+	}
+
+	runs := concurrency * 2
+	if runs < 4 {
+		runs = 4
+	}
+
+	prompt := makeBenchmarkPrompt(samplePromptTokens)
+	results := make([]ollamaGenerateResponse, 0, runs)
+	errs := make([]error, 0)
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	semaphore := make(chan struct{}, concurrency)
+
+	for i := 0; i < runs; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			semaphore <- struct{}{}
+			defer func() { <-semaphore }()
+
+			resp, err := m.benchmarkOnce(modelID, prompt, sampleOutputTokens)
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				errs = append(errs, err)
+				return
+			}
+			results = append(results, resp)
+		}()
+	}
+
+	wg.Wait()
+	if len(errs) > 0 {
+		return BenchmarkResult{}, errs[0]
+	}
+	if len(results) == 0 {
+		return BenchmarkResult{}, fmt.Errorf("benchmark produced no results")
+	}
+
+	ttftValues := make([]float64, 0, len(results))
+	var sumTTFT, sumOutputTPS, sumPromptTPS, sumLatency float64
+	for _, item := range results {
+		ttftMs := float64(item.LoadDuration+item.PromptEvalDuration) / 1_000_000.0
+		if ttftMs <= 0 {
+			ttftMs = float64(item.TotalDuration) / 1_000_000.0
+		}
+		ttftValues = append(ttftValues, ttftMs)
+		sumTTFT += ttftMs
+		sumLatency += float64(item.TotalDuration) / 1_000_000.0
+
+		promptSeconds := float64(item.PromptEvalDuration) / 1_000_000_000.0
+		if promptSeconds > 0 {
+			sumPromptTPS += float64(item.PromptEvalCount) / promptSeconds
+		}
+
+		outputSeconds := float64(item.EvalDuration) / 1_000_000_000.0
+		if outputSeconds > 0 {
+			sumOutputTPS += float64(item.EvalCount) / outputSeconds
+		}
+	}
+
+	sort.Float64s(ttftValues)
+	p95Index := int(math.Ceil(float64(len(ttftValues))*0.95)) - 1
+	if p95Index < 0 {
+		p95Index = 0
+	}
+	if p95Index >= len(ttftValues) {
+		p95Index = len(ttftValues) - 1
+	}
+	count := float64(len(results))
+	return BenchmarkResult{
+		TTFTMs:                      roundTo(sumTTFT / count, 2),
+		OutputTokensPerSec:          roundTo(sumOutputTPS / count, 2),
+		TotalLatencyMs:              roundTo(sumLatency / count, 2),
+		PromptTokensPerSec:          roundTo(sumPromptTPS / count, 2),
+		P95TTFTMsAtSmallConcurrency: roundTo(ttftValues[p95Index], 2),
+	}, nil
+}
+
+func (m *Manager) benchmarkOnce(modelID string, prompt string, sampleOutputTokens int) (ollamaGenerateResponse, error) {
+	requestBody := ollamaGenerateRequest{
+		Model:  modelID,
+		Prompt: prompt,
+		Stream: false,
+		Options: map[string]int{
+			"num_predict": sampleOutputTokens,
+		},
+	}
+	raw, err := json.Marshal(requestBody)
+	if err != nil {
+		return ollamaGenerateResponse{}, fmt.Errorf("encode benchmark request: %w", err)
+	}
+	req, err := http.NewRequest(http.MethodPost, m.ollamaBaseURL()+"/api/generate", bytes.NewReader(raw))
+	if err != nil {
+		return ollamaGenerateResponse{}, fmt.Errorf("create benchmark request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 90 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return ollamaGenerateResponse{}, fmt.Errorf("benchmark request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		return ollamaGenerateResponse{}, fmt.Errorf("ollama benchmark failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	var parsed ollamaGenerateResponse
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return ollamaGenerateResponse{}, fmt.Errorf("decode benchmark response: %w", err)
+	}
+	return parsed, nil
+}
+
+func (m *Manager) ollamaBaseURL() string {
+	base := strings.TrimSpace(os.Getenv("OLLAMA_HOST"))
+	if base == "" {
+		base = "http://127.0.0.1:11434"
+	}
+	if !strings.HasPrefix(base, "http://") && !strings.HasPrefix(base, "https://") {
+		base = "http://" + base
+	}
+	if strings.Contains(base, "://0.0.0.0") {
+		base = strings.Replace(base, "://0.0.0.0", "://127.0.0.1", 1)
+	}
+	return strings.TrimRight(base, "/")
+}
+
+func makeBenchmarkPrompt(tokenCount int) string {
+	if tokenCount < 32 {
+		tokenCount = 32
+	}
+	var builder strings.Builder
+	builder.WriteString("Summarize this synthetic benchmark context in concise bullet points.\n")
+	for i := 0; i < tokenCount; i++ {
+		builder.WriteString("token ")
+	}
+	return builder.String()
+}
+
+func roundTo(value float64, decimals int) float64 {
+	pow := math.Pow10(decimals)
+	return math.Round(value*pow) / pow
 }
 
 func (m *Manager) EnsureModel(modelID string) error {

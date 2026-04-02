@@ -117,9 +117,8 @@ func main() {
 		}
 
 		for _, command := range resp.Commands {
-			err := executor.Execute(command)
+			details, err := executor.Execute(command)
 			status := "success"
-			details := ""
 			if err != nil {
 				status = "failed"
 				details = err.Error()
