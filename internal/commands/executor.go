@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"encoding/json"
 	"fmt"
 
 	"github.com/Borgels/clawcontrol-agent/internal/runtime"
@@ -17,40 +18,67 @@ func NewExecutor(runtimeManager *runtime.Manager) *Executor {
 	}
 }
 
-func (e *Executor) Execute(command types.AgentCommand) error {
+func (e *Executor) Execute(command types.AgentCommand) (string, error) {
 	switch command.Type {
 	case "install_runtime":
 		rawRuntime, ok := command.Params["runtime"]
 		if !ok {
-			return fmt.Errorf("missing runtime param")
+			return "", fmt.Errorf("missing runtime param")
 		}
 		runtimeName, ok := rawRuntime.(string)
 		if !ok || runtimeName == "" {
-			return fmt.Errorf("invalid runtime param")
+			return "", fmt.Errorf("invalid runtime param")
 		}
-		return e.runtimeManager.InstallRuntime(runtimeName)
+		return "", e.runtimeManager.InstallRuntime(runtimeName)
 	case "pull_model":
 		modelID, err := stringParam(command.Params, "modelId")
 		if err != nil {
-			return err
+			return "", err
 		}
 		flags := modelFeatureFlagsParam(command.Params)
-		return e.runtimeManager.EnsureModelWithFlags(modelID, flags)
+		return "", e.runtimeManager.EnsureModelWithFlags(modelID, flags)
 	case "remove_model":
 		modelID, err := stringParam(command.Params, "modelId")
 		if err != nil {
-			return err
+			return "", err
 		}
-		return e.runtimeManager.RemoveModel(modelID)
+		return "", e.runtimeManager.RemoveModel(modelID)
 	case "health_check":
-		return nil
+		scope, _ := command.Params["scope"].(string)
+		if scope != "model_benchmark" {
+			return "", nil
+		}
+		modelID, err := stringParam(command.Params, "modelId")
+		if err != nil {
+			return "", err
+		}
+		samplePromptTokens := intParam(command.Params, "samplePromptTokens", 256)
+		sampleOutputTokens := intParam(command.Params, "sampleOutputTokens", 128)
+		concurrency := intParam(command.Params, "concurrency", 2)
+		metrics, err := e.runtimeManager.BenchmarkModel(modelID, samplePromptTokens, sampleOutputTokens, concurrency)
+		if err != nil {
+			return "", err
+		}
+		details, err := json.Marshal(map[string]any{
+			"benchmark": types.ModelBenchmarkMetrics{
+				TTFTMs:                      metrics.TTFTMs,
+				OutputTokensPerSec:          metrics.OutputTokensPerSec,
+				TotalLatencyMs:              metrics.TotalLatencyMs,
+				PromptTokensPerSec:          metrics.PromptTokensPerSec,
+				P95TTFTMsAtSmallConcurrency: metrics.P95TTFTMsAtSmallConcurrency,
+			},
+		})
+		if err != nil {
+			return "", fmt.Errorf("encode benchmark metrics: %w", err)
+		}
+		return string(details), nil
 	case "restart_runtime":
-		return e.runtimeManager.RestartRuntime()
+		return "", e.runtimeManager.RestartRuntime()
 	case "update_agent":
 		// Reserved for future signed self-update flow.
-		return nil
+		return "", nil
 	default:
-		return fmt.Errorf("unsupported command type: %s", command.Type)
+		return "", fmt.Errorf("unsupported command type: %s", command.Type)
 	}
 }
 
@@ -86,4 +114,25 @@ func modelFeatureFlagsParam(params map[string]interface{}) *types.ModelFeatureFl
 		flags.Thinking = thinking
 	}
 	return flags
+}
+
+func intParam(params map[string]interface{}, key string, fallback int) int {
+	raw, ok := params[key]
+	if !ok {
+		return fallback
+	}
+	switch value := raw.(type) {
+	case float64:
+		if value <= 0 {
+			return fallback
+		}
+		return int(value)
+	case int:
+		if value <= 0 {
+			return fallback
+		}
+		return value
+	default:
+		return fallback
+	}
 }
