@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -17,7 +18,7 @@ import (
 	"github.com/Borgels/clawcontrol-agent/internal/types"
 )
 
-var agentVersion = "0.1.3"
+var agentVersion = "0.1.4"
 
 func main() {
 	cfgPath := flag.String("config", config.DefaultConfigPath(), "Path to config file")
@@ -69,7 +70,19 @@ func main() {
 		log.Fatalf("create api client: %v", err)
 	}
 	runtimeManager := runtime.NewManager()
-	executor := commands.NewExecutor(runtimeManager, cfg)
+	executor := commands.NewExecutor(runtimeManager, cfg, func(commandID string, details string) {
+		if strings.TrimSpace(commandID) == "" || strings.TrimSpace(details) == "" {
+			return
+		}
+		ackErr := cl.Ack(context.Background(), types.AckRequest{
+			CommandID: commandID,
+			Status:    "in_progress",
+			Details:   details,
+		})
+		if ackErr != nil {
+			log.Printf("progress ack failed for %s: %v", commandID, ackErr)
+		}
+	})
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()

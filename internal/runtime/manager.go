@@ -126,6 +126,15 @@ type BenchmarkResult struct {
 	P95TTFTMsAtSmallConcurrency float64
 }
 
+type BenchmarkProgress struct {
+	RunsCompleted   int
+	RunsTotal       int
+	SuccessfulRuns  int
+	FailedRuns      int
+	LastRunLatencyMs float64
+	Benchmark       *BenchmarkResult
+}
+
 type ollamaGenerateRequest struct {
 	Model   string         `json:"model"`
 	Prompt  string         `json:"prompt"`
@@ -151,7 +160,14 @@ func (m *Manager) HasModel(modelID string) bool {
 	return false
 }
 
-func (m *Manager) BenchmarkModel(modelID string, samplePromptTokens int, sampleOutputTokens int, concurrency int) (BenchmarkResult, error) {
+func (m *Manager) BenchmarkModel(
+	modelID string,
+	samplePromptTokens int,
+	sampleOutputTokens int,
+	concurrency int,
+	runs int,
+	onProgress func(BenchmarkProgress),
+) (BenchmarkResult, error) {
 	if modelID == "" {
 		return BenchmarkResult{}, fmt.Errorf("model ID is required")
 	}
@@ -159,10 +175,10 @@ func (m *Manager) BenchmarkModel(modelID string, samplePromptTokens int, sampleO
 		return BenchmarkResult{}, fmt.Errorf("model not installed: %s", modelID)
 	}
 	if samplePromptTokens <= 0 {
-		samplePromptTokens = 256
+		samplePromptTokens = 640
 	}
 	if sampleOutputTokens <= 0 {
-		sampleOutputTokens = 128
+		sampleOutputTokens = 256
 	}
 	if concurrency <= 0 {
 		concurrency = 2
@@ -171,9 +187,14 @@ func (m *Manager) BenchmarkModel(modelID string, samplePromptTokens int, sampleO
 		concurrency = 4
 	}
 
-	runs := concurrency * 2
+	if runs <= 0 {
+		runs = concurrency * 4
+	}
 	if runs < 4 {
 		runs = 4
+	}
+	if runs > 16 {
+		runs = 16
 	}
 
 	prompt := makeBenchmarkPrompt(samplePromptTokens)
@@ -191,13 +212,32 @@ func (m *Manager) BenchmarkModel(modelID string, samplePromptTokens int, sampleO
 			defer func() { <-semaphore }()
 
 			resp, err := m.benchmarkOnce(modelID, prompt, sampleOutputTokens)
+			var progress *BenchmarkProgress
 			mu.Lock()
-			defer mu.Unlock()
 			if err != nil {
 				errs = append(errs, err)
-				return
+			} else {
+				results = append(results, resp)
 			}
-			results = append(results, resp)
+			completedRuns := len(results) + len(errs)
+			next := BenchmarkProgress{
+				RunsCompleted:  completedRuns,
+				RunsTotal:      runs,
+				SuccessfulRuns: len(results),
+				FailedRuns:     len(errs),
+			}
+			if err == nil {
+				next.LastRunLatencyMs = roundTo(float64(resp.TotalDuration)/1_000_000.0, 2)
+			}
+			if len(results) > 0 {
+				partial := summarizeBenchmarkResults(results)
+				next.Benchmark = &partial
+			}
+			progress = &next
+			mu.Unlock()
+			if onProgress != nil && progress != nil {
+				onProgress(*progress)
+			}
 		}()
 	}
 
@@ -209,6 +249,11 @@ func (m *Manager) BenchmarkModel(modelID string, samplePromptTokens int, sampleO
 		return BenchmarkResult{}, fmt.Errorf("benchmark produced no results")
 	}
 
+	final := summarizeBenchmarkResults(results)
+	return final, nil
+}
+
+func summarizeBenchmarkResults(results []ollamaGenerateResponse) BenchmarkResult {
 	ttftValues := make([]float64, 0, len(results))
 	var sumTTFT, sumOutputTPS, sumPromptTPS, sumLatency float64
 	for _, item := range results {
@@ -246,7 +291,7 @@ func (m *Manager) BenchmarkModel(modelID string, samplePromptTokens int, sampleO
 		TotalLatencyMs:              roundTo(sumLatency / count, 2),
 		PromptTokensPerSec:          roundTo(sumPromptTPS / count, 2),
 		P95TTFTMsAtSmallConcurrency: roundTo(ttftValues[p95Index], 2),
-	}, nil
+	}
 }
 
 func (m *Manager) benchmarkOnce(modelID string, prompt string, sampleOutputTokens int) (ollamaGenerateResponse, error) {

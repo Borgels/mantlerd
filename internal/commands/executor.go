@@ -14,12 +14,14 @@ import (
 type Executor struct {
 	runtimeManager *runtime.Manager
 	cfg            config.Config
+	progress       func(commandID string, details string)
 }
 
-func NewExecutor(runtimeManager *runtime.Manager, cfg config.Config) *Executor {
+func NewExecutor(runtimeManager *runtime.Manager, cfg config.Config, progress func(commandID string, details string)) *Executor {
 	return &Executor{
 		runtimeManager: runtimeManager,
 		cfg:            cfg,
+		progress:       progress,
 	}
 }
 
@@ -57,10 +59,52 @@ func (e *Executor) Execute(command types.AgentCommand) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		samplePromptTokens := intParam(command.Params, "samplePromptTokens", 256)
-		sampleOutputTokens := intParam(command.Params, "sampleOutputTokens", 128)
+		samplePromptTokens := intParam(command.Params, "samplePromptTokens", 640)
+		sampleOutputTokens := intParam(command.Params, "sampleOutputTokens", 256)
 		concurrency := intParam(command.Params, "concurrency", 2)
-		metrics, err := e.runtimeManager.BenchmarkModel(modelID, samplePromptTokens, sampleOutputTokens, concurrency)
+		runs := intParam(command.Params, "runs", 8)
+		metrics, err := e.runtimeManager.BenchmarkModel(
+			modelID,
+			samplePromptTokens,
+			sampleOutputTokens,
+			concurrency,
+			runs,
+			func(progress runtime.BenchmarkProgress) {
+				if e.progress == nil {
+					return
+				}
+				payload := map[string]any{
+					"progress": map[string]any{
+						"scope":           "model_benchmark",
+						"runsCompleted":   progress.RunsCompleted,
+						"runsTotal":       progress.RunsTotal,
+						"successfulRuns":  progress.SuccessfulRuns,
+						"failedRuns":      progress.FailedRuns,
+						"lastRunLatencyMs": progress.LastRunLatencyMs,
+					},
+				}
+				if progress.Benchmark != nil {
+					payload["progress"] = map[string]any{
+						"scope":                         "model_benchmark",
+						"runsCompleted":                 progress.RunsCompleted,
+						"runsTotal":                     progress.RunsTotal,
+						"successfulRuns":                progress.SuccessfulRuns,
+						"failedRuns":                    progress.FailedRuns,
+						"lastRunLatencyMs":              progress.LastRunLatencyMs,
+						"ttftMs":                        progress.Benchmark.TTFTMs,
+						"outputTokensPerSec":            progress.Benchmark.OutputTokensPerSec,
+						"totalLatencyMs":                progress.Benchmark.TotalLatencyMs,
+						"promptTokensPerSec":            progress.Benchmark.PromptTokensPerSec,
+						"p95TtftMsAtSmallConcurrency":   progress.Benchmark.P95TTFTMsAtSmallConcurrency,
+					}
+				}
+				raw, err := json.Marshal(payload)
+				if err != nil {
+					return
+				}
+				e.progress(command.ID, string(raw))
+			},
+		)
 		if err != nil {
 			return "", err
 		}
