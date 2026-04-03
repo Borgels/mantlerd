@@ -52,22 +52,27 @@ func (d *vllmDriver) Install() error {
 }
 
 func (d *vllmDriver) IsInstalled() bool {
-	return runCommand(vllmPythonPath, "-m", "pip", "show", "vllm") == nil
+	if runCommand(vllmPythonPath, "-c", "import vllm") == nil {
+		return true
+	}
+	// Backward compatibility for legacy installs outside the managed venv.
+	return runCommand("python3", "-c", "import vllm") == nil
 }
 
 func (d *vllmDriver) Version() string {
-	cmd := exec.Command(vllmPythonPath, "-m", "pip", "show", "vllm")
-	output, err := cmd.Output()
-	if err != nil {
-		return ""
-	}
-	for _, line := range strings.Split(string(output), "\n") {
-		lower := strings.ToLower(line)
-		if strings.HasPrefix(lower, "version:") {
-			parts := strings.SplitN(line, ":", 2)
-			if len(parts) == 2 {
-				return strings.TrimSpace(parts[1])
-			}
+	for _, pythonPath := range []string{vllmPythonPath, "python3"} {
+		cmd := exec.Command(
+			pythonPath,
+			"-c",
+			"import importlib.metadata as m; print(m.version('vllm'))",
+		)
+		output, err := cmd.Output()
+		if err != nil {
+			continue
+		}
+		version := strings.TrimSpace(string(output))
+		if version != "" {
+			return version
 		}
 	}
 	return ""

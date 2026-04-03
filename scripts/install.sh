@@ -248,6 +248,8 @@ $SUDO sh -c "cat > \"$CONFIG_PATH\" <<EOF
 }
 EOF"
 $SUDO chmod 600 "$CONFIG_PATH"
+$SUDO install -d -m 0755 "${CONFIG_DIR}/.config"
+$SUDO install -d -m 0755 "${CONFIG_DIR}/.config/clawcontrol-agent"
 
 if command -v systemctl >/dev/null 2>&1; then
   log "Installing systemd unit ${SYSTEMD_UNIT_PATH}"
@@ -263,6 +265,8 @@ ExecStart=${INSTALL_DIR}/${BINARY_NAME} --config ${CONFIG_PATH}
 Restart=always
 RestartSec=5
 User=root
+Environment=HOME=${CONFIG_DIR}
+Environment=XDG_CONFIG_HOME=${CONFIG_DIR}/.config
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
