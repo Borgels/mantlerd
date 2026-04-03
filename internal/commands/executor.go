@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"syscall"
@@ -235,6 +236,7 @@ func (e *Executor) startAgentUpdate(version string) (string, error) {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "sh", "-c", commandLine)
+	cmd.Env = append(os.Environ(), "CLAWCONTROL_AGENT_SELF_UPDATE=true")
 	output, err := cmd.CombinedOutput()
 	details := strings.TrimSpace(string(output))
 	if details == "" {

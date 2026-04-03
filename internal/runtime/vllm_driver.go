@@ -24,6 +24,7 @@ const (
 	vllmVenvPath   = "/opt/clawcontrol/vllm-venv"
 	vllmPythonPath = "/opt/clawcontrol/vllm-venv/bin/python3"
 	vllmReadyTimeout = 180 * time.Second
+	vllmRestartCooldown = 90 * time.Second
 )
 
 type vllmConfig struct {
@@ -32,6 +33,11 @@ type vllmConfig struct {
 }
 
 type vllmDriver struct{}
+
+var (
+	vllmRestartMu         sync.Mutex
+	lastVLLMRestartAt     time.Time
+)
 
 func newVLLMDriver() Driver {
 	return &vllmDriver{}
@@ -59,6 +65,10 @@ func (d *vllmDriver) Install() error {
 			return retryErr
 		}
 	}
+	_ = d.ensureCudaRuntimeLibraries()
+	if err := d.validateVLLMRuntimeCompatibility(); err != nil {
+		return err
+	}
 	if err := d.ensureServiceUnit(); err != nil {
 		return err
 	}
@@ -76,7 +86,7 @@ func (d *vllmDriver) Install() error {
 	if port <= 0 {
 		port = 8000
 	}
-	if err := d.startOrRestartService(cfg.Model, port); err != nil {
+	if err := d.startOrRestartService(cfg.Model, port, false); err != nil {
 		return fmt.Errorf("vllm install completed but configured model failed to start: %w", err)
 	}
 	return nil
@@ -116,7 +126,7 @@ func (d *vllmDriver) EnsureModelWithFlags(modelID string, _ *types.ModelFeatureF
 	if err := d.writeConfig(vllmConfig{Model: modelID, Port: 8000}); err != nil {
 		return err
 	}
-	return d.startOrRestartService(modelID, 8000)
+	return d.startOrRestartService(modelID, 8000, false)
 }
 
 func (d *vllmDriver) ListModels() []string {
@@ -339,14 +349,16 @@ func (d *vllmDriver) benchmarkOnce(modelID string, prompt string, sampleOutputTo
 }
 
 func (d *vllmDriver) RestartRuntime() error {
+	cfg, cfgErr := d.readConfig()
+	if cfgErr == nil && strings.TrimSpace(cfg.Model) != "" {
+		port := cfg.Port
+		if port <= 0 {
+			port = 8000
+		}
+		return d.startOrRestartService(cfg.Model, port, true)
+	}
 	if err := runCommand("systemctl", "restart", "vllm"); err == nil {
-		cfg, cfgErr := d.readConfig()
-		if cfgErr != nil || strings.TrimSpace(cfg.Model) == "" {
-			return nil
-		}
-		if readyErr := d.waitForAPIReady(vllmReadyTimeout); readyErr == nil {
-			return nil
-		}
+		return nil
 	}
 	return runCommand("systemctl", "restart", "clawcontrol-runtime")
 }
@@ -375,7 +387,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 EnvironmentFile=-` + vllmEnvPath + `
-ExecStart=/bin/sh -c '` + vllmPythonPath + ` -m vllm.entrypoints.openai.api_server --model "${VLLM_MODEL}" --host 0.0.0.0 --port "${VLLM_PORT:-8000}" --gpu-memory-utilization "${VLLM_GPU_MEMORY_UTILIZATION:-0.9}"'
+ExecStart=/bin/sh -c 'LD_LIBRARY_PATH="${VLLM_LD_LIBRARY_PATH:-}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"; EXTRA_ARGS="${VLLM_EXTRA_ARGS:-}"; if [ "${VLLM_TRUST_REMOTE_CODE:-false}" = "true" ]; then EXTRA_ARGS="${EXTRA_ARGS} --trust-remote-code"; fi; exec ` + vllmPythonPath + ` -m vllm.entrypoints.openai.api_server --model "${VLLM_MODEL}" --host 0.0.0.0 --port "${VLLM_PORT:-8000}" --gpu-memory-utilization "${VLLM_GPU_MEMORY_UTILIZATION:-0.9}" ${EXTRA_ARGS}'
 Restart=always
 RestartSec=5
 User=root
@@ -413,7 +425,10 @@ func (d *vllmDriver) ensureVirtualEnv() error {
 	return nil
 }
 
-func (d *vllmDriver) startOrRestartService(modelID string, port int) error {
+func (d *vllmDriver) startOrRestartService(modelID string, port int, force bool) error {
+	if err := d.validateVLLMRuntimeCompatibility(); err != nil {
+		return err
+	}
 	if err := d.ensureServiceUnit(); err != nil {
 		return err
 	}
@@ -421,22 +436,56 @@ func (d *vllmDriver) startOrRestartService(modelID string, port int) error {
 		return fmt.Errorf("create vllm env directory: %w", err)
 	}
 	safeModelID := strings.ReplaceAll(strings.TrimSpace(modelID), "\n", " ")
-	envContent := fmt.Sprintf("VLLM_MODEL=%s\nVLLM_PORT=%d\nVLLM_GPU_MEMORY_UTILIZATION=0.9\n", safeModelID, port)
+	libraryPath := d.detectVLLMLibraryPath()
+	existingEnv := d.readEnvConfigMap()
+	trustRemoteCode := strings.TrimSpace(existingEnv["VLLM_TRUST_REMOTE_CODE"])
+	if trustRemoteCode == "" {
+		trustRemoteCode = "false"
+	}
+	extraArgs := strings.TrimSpace(existingEnv["VLLM_EXTRA_ARGS"])
+	if existingLibrary := strings.TrimSpace(existingEnv["VLLM_LD_LIBRARY_PATH"]); existingLibrary != "" {
+		libraryPath = existingLibrary
+	}
+	envContent := fmt.Sprintf(
+		"VLLM_MODEL=%q\nVLLM_PORT=%d\nVLLM_GPU_MEMORY_UTILIZATION=0.9\nVLLM_LD_LIBRARY_PATH=%q\nVLLM_TRUST_REMOTE_CODE=%s\nVLLM_EXTRA_ARGS=%q\n",
+		safeModelID,
+		port,
+		libraryPath,
+		trustRemoteCode,
+		extraArgs,
+	)
 	if err := os.WriteFile(vllmEnvPath, []byte(envContent), 0o600); err != nil {
 		return fmt.Errorf("write vllm env config: %w", err)
 	}
 	if err := runCommand("systemctl", "enable", "vllm"); err != nil {
 		return err
 	}
+	if !force {
+		if throttled, remaining := throttleVLLMRestart(); throttled {
+			// Avoid restart storms when the endpoint is repeatedly unavailable.
+			if err := d.waitForAPIReady(6 * time.Second); err == nil {
+				return nil
+			}
+			diagnostics := d.vllmDiagnosticsTail()
+			if diagnostics == "" {
+				return fmt.Errorf("skipping vllm restart due to cooldown (%s remaining) and API is still not reachable", remaining.Round(time.Second))
+			}
+			return fmt.Errorf("skipping vllm restart due to cooldown (%s remaining) and API is still not reachable; %s", remaining.Round(time.Second), diagnostics)
+		}
+	}
+	markVLLMRestart()
 	if err := runCommand("systemctl", "restart", "vllm"); err != nil {
 		return err
 	}
 	if err := d.waitForAPIReady(vllmReadyTimeout); err != nil {
-		status := d.systemdUnitStatusTail()
-		if status == "" {
+		diagnostics := d.vllmDiagnosticsTail()
+		if hint := d.classifyKnownStartupFailure(diagnostics); hint != "" {
+			return fmt.Errorf("vllm service restarted but API not reachable yet: %w; %s; %s", err, diagnostics, hint)
+		}
+		if diagnostics == "" {
 			return fmt.Errorf("vllm service restarted but API not reachable yet: %w", err)
 		}
-		return fmt.Errorf("vllm service restarted but API not reachable yet: %w; systemd: %s", err, status)
+		return fmt.Errorf("vllm service restarted but API not reachable yet: %w; %s", err, diagnostics)
 	}
 	return nil
 }
@@ -537,4 +586,195 @@ func (d *vllmDriver) systemdUnitStatusTail() string {
 		lines = lines[:8]
 	}
 	return strings.Join(lines, " | ")
+}
+
+func (d *vllmDriver) systemdUnitJournalTail() string {
+	out, err := exec.Command("journalctl", "-u", "vllm", "-n", "25", "--no-pager").CombinedOutput()
+	if err != nil && len(out) == 0 {
+		return ""
+	}
+	trimmed := strings.TrimSpace(string(out))
+	if trimmed == "" {
+		return ""
+	}
+	lines := strings.Split(trimmed, "\n")
+	if len(lines) > 12 {
+		lines = lines[len(lines)-12:]
+	}
+	return strings.Join(lines, " | ")
+}
+
+func (d *vllmDriver) vllmDiagnosticsTail() string {
+	parts := make([]string, 0, 2)
+	if status := d.systemdUnitStatusTail(); status != "" {
+		parts = append(parts, "systemd: "+status)
+	}
+	if journal := d.systemdUnitJournalTail(); journal != "" {
+		parts = append(parts, "journal: "+journal)
+	}
+	return strings.Join(parts, "; ")
+}
+
+func throttleVLLMRestart() (bool, time.Duration) {
+	vllmRestartMu.Lock()
+	defer vllmRestartMu.Unlock()
+	if lastVLLMRestartAt.IsZero() {
+		return false, 0
+	}
+	elapsed := time.Since(lastVLLMRestartAt)
+	if elapsed >= vllmRestartCooldown {
+		return false, 0
+	}
+	return true, vllmRestartCooldown - elapsed
+}
+
+func markVLLMRestart() {
+	vllmRestartMu.Lock()
+	lastVLLMRestartAt = time.Now()
+	vllmRestartMu.Unlock()
+}
+
+func (d *vllmDriver) detectVLLMLibraryPath() string {
+	pySnippet := strings.Join([]string{
+		"import glob",
+		"import os",
+		"import site",
+		"paths = []",
+		"for base in site.getsitepackages():",
+		"    for pat in ('nvidia/*/lib', 'torch/lib'):",
+		"        for p in glob.glob(os.path.join(base, pat)):",
+		"            if os.path.isdir(p):",
+		"                paths.append(p)",
+		"seen = set()",
+		"ordered = []",
+		"for p in paths:",
+		"    if p in seen:",
+		"        continue",
+		"    seen.add(p)",
+		"    ordered.append(p)",
+		"print(':'.join(ordered))",
+	}, "\n")
+	out, err := exec.Command(vllmPythonPath, "-c", pySnippet).Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func (d *vllmDriver) readEnvConfigMap() map[string]string {
+	values := map[string]string{}
+	raw, err := os.ReadFile(vllmEnvPath)
+	if err != nil {
+		return values
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		parts := strings.SplitN(trimmed, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key := strings.TrimSpace(parts[0])
+		val := strings.TrimSpace(parts[1])
+		if key == "" {
+			continue
+		}
+		if len(val) >= 2 {
+			if (strings.HasPrefix(val, "\"") && strings.HasSuffix(val, "\"")) ||
+				(strings.HasPrefix(val, "'") && strings.HasSuffix(val, "'")) {
+				val = val[1 : len(val)-1]
+			}
+		}
+		values[key] = val
+	}
+	return values
+}
+
+func (d *vllmDriver) hasLibcudart() bool {
+	pySnippet := strings.Join([]string{
+		"import ctypes",
+		"import sys",
+		"try:",
+		"    ctypes.CDLL('libcudart.so.12')",
+		"    sys.exit(0)",
+		"except Exception:",
+		"    sys.exit(1)",
+	}, "\n")
+	return exec.Command(vllmPythonPath, "-c", pySnippet).Run() == nil
+}
+
+func (d *vllmDriver) ensureCudaRuntimeLibraries() error {
+	if d.hasLibcudart() {
+		return nil
+	}
+	// Some systems (including ARM builds) may miss CUDA runtime shared libs
+	// even when vLLM itself installs successfully.
+	if err := runCommand(vllmPythonPath, "-m", "pip", "install", "--upgrade", "nvidia-cuda-runtime-cu12"); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (d *vllmDriver) validateVLLMRuntimeCompatibility() error {
+	pySnippet := strings.Join([]string{
+		"import json",
+		"import sys",
+		"out = {}",
+		"try:",
+		"    import torch",
+		"    out['torchVersion'] = getattr(torch, '__version__', '')",
+		"    out['torchCudaVersion'] = getattr(getattr(torch, 'version', None), 'cuda', None)",
+		"except Exception as e:",
+		"    out['torchError'] = str(e)",
+		"try:",
+		"    import vllm._C  # noqa: F401",
+		"    out['vllmImportOk'] = True",
+		"except Exception as e:",
+		"    out['vllmImportOk'] = False",
+		"    out['vllmImportError'] = str(e)",
+		"print(json.dumps(out))",
+	}, "\n")
+	out, err := exec.Command(vllmPythonPath, "-c", pySnippet).CombinedOutput()
+	raw := strings.TrimSpace(string(out))
+	if err != nil {
+		if strings.Contains(raw, "\"torchCudaVersion\": null") ||
+			strings.Contains(strings.ToLower(raw), "+cpu") {
+			return fmt.Errorf(
+				"incompatible torch build for vllm (cpu-only torch detected). install a CUDA-enabled torch matching vllm; details: %s",
+				raw,
+			)
+		}
+		if raw != "" {
+			return fmt.Errorf("vllm runtime compatibility check failed: %s", raw)
+		}
+		return fmt.Errorf("vllm runtime compatibility check failed: %w", err)
+	}
+	if strings.Contains(raw, "\"vllmImportOk\": false") {
+		if strings.Contains(raw, "undefined symbol") {
+			return fmt.Errorf(
+				"vllm binary compatibility check failed (likely torch/vllm ABI mismatch). reinstall matching torch+vllm builds; details: %s",
+				raw,
+			)
+		}
+		return fmt.Errorf("vllm import check failed: %s", raw)
+	}
+	return nil
+}
+
+func (d *vllmDriver) classifyKnownStartupFailure(diagnostics string) string {
+	text := strings.ToLower(diagnostics)
+	switch {
+	case strings.Contains(text, "libcudart.so.12"):
+		return "hint: CUDA runtime libraries are missing from loader path; install nvidia-cuda-runtime-cu12 and set VLLM_LD_LIBRARY_PATH"
+	case strings.Contains(text, "libtorch_cuda.so"):
+		return "hint: CUDA-enabled torch is missing/incompatible; ensure torch is not +cpu and matches vLLM wheel CUDA variant"
+	case strings.Contains(text, "undefined symbol") && strings.Contains(text, "vllm/_c"):
+		return "hint: torch/vllm ABI mismatch detected; reinstall matching torch and vllm versions from the same CUDA wheel family"
+	case strings.Contains(text, "modelopt currently only supports") && strings.Contains(text, "mixed_precision"):
+		return "hint: this model uses ModelOpt MIXED_PRECISION not supported by current vLLM build; upgrade vLLM container/wheel variant"
+	default:
+		return ""
+	}
 }
