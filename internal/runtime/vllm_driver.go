@@ -59,7 +59,27 @@ func (d *vllmDriver) Install() error {
 			return retryErr
 		}
 	}
-	return d.ensureServiceUnit()
+	if err := d.ensureServiceUnit(); err != nil {
+		return err
+	}
+
+	// If a model is already configured, treat runtime install as an end-to-end
+	// recovery action and verify the API is actually serving afterwards.
+	cfg, err := d.readConfig()
+	if err != nil {
+		return nil
+	}
+	if strings.TrimSpace(cfg.Model) == "" {
+		return nil
+	}
+	port := cfg.Port
+	if port <= 0 {
+		port = 8000
+	}
+	if err := d.startOrRestartService(cfg.Model, port); err != nil {
+		return fmt.Errorf("vllm install completed but configured model failed to start: %w", err)
+	}
+	return nil
 }
 
 func (d *vllmDriver) IsInstalled() bool {
@@ -101,11 +121,6 @@ func (d *vllmDriver) EnsureModelWithFlags(modelID string, _ *types.ModelFeatureF
 
 func (d *vllmDriver) ListModels() []string {
 	set := map[string]struct{}{}
-	cfg, err := d.readConfig()
-	if err == nil && cfg.Model != "" {
-		set[cfg.Model] = struct{}{}
-	}
-
 	remoteModels, _ := d.fetchRemoteModels()
 	for _, model := range remoteModels {
 		if strings.TrimSpace(model) != "" {
@@ -325,7 +340,13 @@ func (d *vllmDriver) benchmarkOnce(modelID string, prompt string, sampleOutputTo
 
 func (d *vllmDriver) RestartRuntime() error {
 	if err := runCommand("systemctl", "restart", "vllm"); err == nil {
-		return nil
+		cfg, cfgErr := d.readConfig()
+		if cfgErr != nil || strings.TrimSpace(cfg.Model) == "" {
+			return nil
+		}
+		if readyErr := d.waitForAPIReady(vllmReadyTimeout); readyErr == nil {
+			return nil
+		}
 	}
 	return runCommand("systemctl", "restart", "clawcontrol-runtime")
 }
