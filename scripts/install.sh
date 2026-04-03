@@ -26,6 +26,9 @@ VLLM_CONFIGURE="${CLAWCONTROL_VLLM_CONFIGURE:-true}"
 VLLM_PREINSTALL="${CLAWCONTROL_VLLM_PREINSTALL:-true}"
 VLLM_PORT="${CLAWCONTROL_VLLM_PORT:-8000}"
 VLLM_GPU_MEMORY_UTILIZATION="${CLAWCONTROL_VLLM_GPU_MEMORY_UTILIZATION:-0.9}"
+VLLM_TRUST_REMOTE_CODE="${CLAWCONTROL_VLLM_TRUST_REMOTE_CODE:-false}"
+VLLM_EXTRA_ARGS="${CLAWCONTROL_VLLM_EXTRA_ARGS:-}"
+SELF_UPDATE_MODE="${CLAWCONTROL_AGENT_SELF_UPDATE:-false}"
 
 TOKEN=""
 MACHINE_ID=""
@@ -51,6 +54,8 @@ Environment overrides:
   CLAWCONTROL_VLLM_PREINSTALL    true|false (default: true)
   CLAWCONTROL_VLLM_PORT          vLLM OpenAI API port (default: 8000)
   CLAWCONTROL_VLLM_GPU_MEMORY_UTILIZATION GPU memory utilization fraction (default: 0.9)
+  CLAWCONTROL_VLLM_TRUST_REMOTE_CODE true|false (default: false)
+  CLAWCONTROL_VLLM_EXTRA_ARGS    extra CLI args appended to vLLM serve
 EOF
 }
 
@@ -159,6 +164,22 @@ case "$VLLM_PREINSTALL" in
     ;;
   *)
     fatal "CLAWCONTROL_VLLM_PREINSTALL must be true or false"
+    ;;
+esac
+
+case "$VLLM_TRUST_REMOTE_CODE" in
+  true|false)
+    ;;
+  *)
+    fatal "CLAWCONTROL_VLLM_TRUST_REMOTE_CODE must be true or false"
+    ;;
+esac
+
+case "$SELF_UPDATE_MODE" in
+  true|false)
+    ;;
+  *)
+    fatal "CLAWCONTROL_AGENT_SELF_UPDATE must be true or false"
     ;;
 esac
 
@@ -289,6 +310,13 @@ EOF"
 
   $SUDO systemctl daemon-reload
   $SUDO systemctl enable "$SERVICE_NAME" >/dev/null
+  if [ "$SELF_UPDATE_MODE" = "true" ]; then
+    log "Self-update mode detected. Triggering non-blocking service restart."
+    $SUDO systemctl --no-block restart "$SERVICE_NAME"
+    log "Self-update restart triggered; installer exiting without in-process health wait."
+    exit 0
+  fi
+
   $SUDO systemctl restart "$SERVICE_NAME"
 
   if [ "$OLLAMA_CONFIGURE_REMOTE" = "true" ]; then
@@ -333,6 +361,9 @@ EOF"
 VLLM_MODEL=
 VLLM_PORT=${VLLM_PORT}
 VLLM_GPU_MEMORY_UTILIZATION=${VLLM_GPU_MEMORY_UTILIZATION}
+VLLM_LD_LIBRARY_PATH=
+VLLM_TRUST_REMOTE_CODE=${VLLM_TRUST_REMOTE_CODE}
+VLLM_EXTRA_ARGS="${VLLM_EXTRA_ARGS}"
 EOF"
     $SUDO chmod 600 "$VLLM_ENV_PATH"
 
@@ -345,7 +376,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 EnvironmentFile=-${VLLM_ENV_PATH}
-ExecStart=/bin/sh -c '${VLLM_PYTHON} -m vllm.entrypoints.openai.api_server --model \"\${VLLM_MODEL}\" --host 0.0.0.0 --port \"\${VLLM_PORT:-8000}\" --gpu-memory-utilization \"\${VLLM_GPU_MEMORY_UTILIZATION:-0.9}\"'
+ExecStart=/bin/sh -c 'LD_LIBRARY_PATH=\"\${VLLM_LD_LIBRARY_PATH:-}\${LD_LIBRARY_PATH:+:\${LD_LIBRARY_PATH}}\"; EXTRA_ARGS=\"\${VLLM_EXTRA_ARGS:-}\"; if [ \"\${VLLM_TRUST_REMOTE_CODE:-false}\" = \"true\" ]; then EXTRA_ARGS=\"\${EXTRA_ARGS} --trust-remote-code\"; fi; exec ${VLLM_PYTHON} -m vllm.entrypoints.openai.api_server --model \"\${VLLM_MODEL}\" --host 0.0.0.0 --port \"\${VLLM_PORT:-8000}\" --gpu-memory-utilization \"\${VLLM_GPU_MEMORY_UTILIZATION:-0.9}\" \${EXTRA_ARGS}'
 Restart=always
 RestartSec=5
 User=root
@@ -375,6 +406,19 @@ EOF"
           if ! $SUDO "$VLLM_PYTHON" -m pip install --upgrade vllm; then
             log "vLLM preinstall warning: pip install vllm failed. Agent self-heal/runtime install will retry."
           else
+            if ! $SUDO "$VLLM_PYTHON" -c 'import ctypes; ctypes.CDLL("libcudart.so.12")' >/dev/null 2>&1; then
+              log "vLLM preinstall: libcudart.so.12 missing; trying nvidia-cuda-runtime-cu12 wheel."
+              $SUDO "$VLLM_PYTHON" -m pip install --upgrade nvidia-cuda-runtime-cu12 || true
+            fi
+            VLLM_LIB_PATHS="$($SUDO "$VLLM_PYTHON" -c 'import glob, os, site; paths=[]; [paths.append(p) for b in site.getsitepackages() for pat in ("nvidia/*/lib","torch/lib") for p in glob.glob(os.path.join(b, pat)) if os.path.isdir(p)]; seen=set(); ordered=[]; [ordered.append(p) for p in paths if not (p in seen or seen.add(p))]; print(":".join(ordered))' 2>/dev/null || true)"
+            if [ -n "$VLLM_LIB_PATHS" ]; then
+              $SUDO sh -c "awk 'BEGIN{written=0} /^VLLM_LD_LIBRARY_PATH=/{print \"VLLM_LD_LIBRARY_PATH=${VLLM_LIB_PATHS}\"; written=1; next} {print} END{if(!written) print \"VLLM_LD_LIBRARY_PATH=${VLLM_LIB_PATHS}\"}' \"$VLLM_ENV_PATH\" > \"$VLLM_ENV_PATH.tmp\" && mv \"$VLLM_ENV_PATH.tmp\" \"$VLLM_ENV_PATH\""
+              $SUDO chmod 600 "$VLLM_ENV_PATH"
+            fi
+            if [ "${VLLM_TRUST_REMOTE_CODE}" = "true" ]; then
+              $SUDO sh -c "awk 'BEGIN{written=0} /^VLLM_TRUST_REMOTE_CODE=/{print \"VLLM_TRUST_REMOTE_CODE=true\"; written=1; next} {print} END{if(!written) print \"VLLM_TRUST_REMOTE_CODE=true\"}' \"$VLLM_ENV_PATH\" > \"$VLLM_ENV_PATH.tmp\" && mv \"$VLLM_ENV_PATH.tmp\" \"$VLLM_ENV_PATH\""
+              $SUDO chmod 600 "$VLLM_ENV_PATH"
+            fi
             log "vLLM preinstall complete."
           fi
         else
