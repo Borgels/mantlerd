@@ -314,11 +314,9 @@ func (d *ollamaDriver) RestartRuntime() error {
 }
 
 func (d *ollamaDriver) modelFlagsPath() string {
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
-		return filepath.Join("/var/lib/clawcontrol-agent", "model-flags.json")
-	}
-	return filepath.Join(home, ".config", "clawcontrol-agent", "model-flags.json")
+	// Service-safe path: avoid relying on $HOME when systemd hardening
+	// restricts /root access (e.g. ProtectHome=true).
+	return filepath.Join("/etc", "clawcontrol", "model-flags.json")
 }
 
 func (d *ollamaDriver) upsertModelFlags(modelID string, flags types.ModelFeatureFlags) error {

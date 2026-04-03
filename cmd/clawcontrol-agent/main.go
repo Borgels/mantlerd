@@ -18,7 +18,7 @@ import (
 	"github.com/Borgels/clawcontrol-agent/internal/types"
 )
 
-var agentVersion = "0.1.7"
+var agentVersion = "0.1.8"
 
 func main() {
 	cfgPath := flag.String("config", config.DefaultConfigPath(), "Path to config file")
