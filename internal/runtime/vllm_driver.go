@@ -23,6 +23,7 @@ const (
 	vllmUnitPath   = "/etc/systemd/system/vllm.service"
 	vllmVenvPath   = "/opt/clawcontrol/vllm-venv"
 	vllmPythonPath = "/opt/clawcontrol/vllm-venv/bin/python3"
+	vllmReadyTimeout = 180 * time.Second
 )
 
 type vllmConfig struct {
@@ -46,7 +47,17 @@ func (d *vllmDriver) Install() error {
 		return err
 	}
 	if err := runCommand(vllmPythonPath, "-m", "pip", "install", "--upgrade", "vllm"); err != nil {
-		return err
+		// Best-effort recovery: recreate the managed venv and retry once.
+		_ = os.RemoveAll(vllmVenvPath)
+		if retryErr := d.ensureVirtualEnv(); retryErr != nil {
+			return fmt.Errorf("install vllm failed and venv recovery failed: %w", retryErr)
+		}
+		if retryErr := runCommand(vllmPythonPath, "-m", "pip", "install", "--upgrade", "pip"); retryErr != nil {
+			return retryErr
+		}
+		if retryErr := runCommand(vllmPythonPath, "-m", "pip", "install", "--upgrade", "vllm"); retryErr != nil {
+			return retryErr
+		}
 	}
 	return d.ensureServiceUnit()
 }
@@ -95,26 +106,10 @@ func (d *vllmDriver) ListModels() []string {
 		set[cfg.Model] = struct{}{}
 	}
 
-	req, err := http.NewRequest(http.MethodGet, d.baseURL()+"/v1/models", nil)
-	if err == nil {
-		resp, reqErr := (&http.Client{Timeout: 10 * time.Second}).Do(req)
-		if reqErr == nil {
-			defer resp.Body.Close()
-			if resp.StatusCode < 400 {
-				body, _ := io.ReadAll(resp.Body)
-				var parsed struct {
-					Data []struct {
-						ID string `json:"id"`
-					} `json:"data"`
-				}
-				if json.Unmarshal(body, &parsed) == nil {
-					for _, item := range parsed.Data {
-						if strings.TrimSpace(item.ID) != "" {
-							set[item.ID] = struct{}{}
-						}
-					}
-				}
-			}
+	remoteModels, _ := d.fetchRemoteModels()
+	for _, model := range remoteModels {
+		if strings.TrimSpace(model) != "" {
+			set[model] = struct{}{}
 		}
 	}
 
@@ -123,6 +118,49 @@ func (d *vllmDriver) ListModels() []string {
 		models = append(models, model)
 	}
 	sort.Strings(models)
+	return models
+}
+
+func (d *vllmDriver) InstalledModels() []types.InstalledModel {
+	models := make([]types.InstalledModel, 0)
+	cfg, _ := d.readConfig()
+	configuredModel := strings.TrimSpace(cfg.Model)
+	remoteModels, err := d.fetchRemoteModels()
+	seen := map[string]struct{}{}
+	if err == nil {
+		for _, modelID := range remoteModels {
+			trimmed := strings.TrimSpace(modelID)
+			if trimmed == "" {
+				continue
+			}
+			seen[trimmed] = struct{}{}
+			models = append(models, types.InstalledModel{
+				ModelID: trimmed,
+				Runtime: types.RuntimeVLLM,
+				Status:  types.ModelReady,
+			})
+		}
+		if configuredModel != "" {
+			if _, ok := seen[configuredModel]; !ok {
+				models = append(models, types.InstalledModel{
+					ModelID: configuredModel,
+					Runtime: types.RuntimeVLLM,
+					Status:  types.ModelInstalling,
+				})
+			}
+		}
+		return models
+	}
+
+	// Endpoint unreachable: preserve configured model but mark failed so server/UI
+	// can show actionable state instead of a false-ready model.
+	if configuredModel != "" {
+		models = append(models, types.InstalledModel{
+			ModelID: configuredModel,
+			Runtime: types.RuntimeVLLM,
+			Status:  types.ModelFailed,
+		})
+	}
 	return models
 }
 
@@ -338,6 +376,17 @@ func (d *vllmDriver) ensureVirtualEnv() error {
 		return fmt.Errorf("create vllm virtualenv directory: %w", err)
 	}
 	if err := runCommand("python3", "-m", "venv", vllmVenvPath); err != nil {
+		// Debian/Ubuntu often needs python3-venv explicitly installed.
+		if os.Geteuid() == 0 {
+			_ = runCommand(
+				"sh",
+				"-c",
+				"DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y python3-venv python3-pip",
+			)
+			if retryErr := runCommand("python3", "-m", "venv", vllmVenvPath); retryErr == nil {
+				return nil
+			}
+		}
 		return fmt.Errorf("create vllm virtualenv: %w", err)
 	}
 	return nil
@@ -350,14 +399,25 @@ func (d *vllmDriver) startOrRestartService(modelID string, port int) error {
 	if err := os.MkdirAll(filepath.Dir(vllmEnvPath), 0o755); err != nil {
 		return fmt.Errorf("create vllm env directory: %w", err)
 	}
-	envContent := fmt.Sprintf("VLLM_MODEL=%s\nVLLM_PORT=%d\nVLLM_GPU_MEMORY_UTILIZATION=0.9\n", modelID, port)
+	safeModelID := strings.ReplaceAll(strings.TrimSpace(modelID), "\n", " ")
+	envContent := fmt.Sprintf("VLLM_MODEL=%s\nVLLM_PORT=%d\nVLLM_GPU_MEMORY_UTILIZATION=0.9\n", safeModelID, port)
 	if err := os.WriteFile(vllmEnvPath, []byte(envContent), 0o600); err != nil {
 		return fmt.Errorf("write vllm env config: %w", err)
 	}
 	if err := runCommand("systemctl", "enable", "vllm"); err != nil {
 		return err
 	}
-	return runCommand("systemctl", "restart", "vllm")
+	if err := runCommand("systemctl", "restart", "vllm"); err != nil {
+		return err
+	}
+	if err := d.waitForAPIReady(vllmReadyTimeout); err != nil {
+		status := d.systemdUnitStatusTail()
+		if status == "" {
+			return fmt.Errorf("vllm service restarted but API not reachable yet: %w", err)
+		}
+		return fmt.Errorf("vllm service restarted but API not reachable yet: %w; systemd: %s", err, status)
+	}
+	return nil
 }
 
 func (d *vllmDriver) readConfig() (vllmConfig, error) {
@@ -390,4 +450,70 @@ func (d *vllmDriver) writeConfig(cfg vllmConfig) error {
 		return err
 	}
 	return os.WriteFile(vllmConfigPath, append(payload, '\n'), 0o600)
+}
+
+func (d *vllmDriver) fetchRemoteModels() ([]string, error) {
+	req, err := http.NewRequest(http.MethodGet, d.baseURL()+"/v1/models", nil)
+	if err != nil {
+		return nil, fmt.Errorf("create vllm models request: %w", err)
+	}
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("vllm models endpoint failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	var parsed struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return nil, fmt.Errorf("decode vllm models response: %w", err)
+	}
+	models := make([]string, 0, len(parsed.Data))
+	for _, item := range parsed.Data {
+		if strings.TrimSpace(item.ID) != "" {
+			models = append(models, item.ID)
+		}
+	}
+	return models, nil
+}
+
+func (d *vllmDriver) waitForAPIReady(timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		_, err := d.fetchRemoteModels()
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		time.Sleep(2 * time.Second)
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("timed out waiting for vllm API")
+	}
+	return lastErr
+}
+
+func (d *vllmDriver) systemdUnitStatusTail() string {
+	out, err := exec.Command("systemctl", "--no-pager", "--full", "status", "vllm").CombinedOutput()
+	if err != nil && len(out) == 0 {
+		return ""
+	}
+	trimmed := strings.TrimSpace(string(out))
+	if trimmed == "" {
+		return ""
+	}
+	lines := strings.Split(trimmed, "\n")
+	if len(lines) > 8 {
+		lines = lines[:8]
+	}
+	return strings.Join(lines, " | ")
 }

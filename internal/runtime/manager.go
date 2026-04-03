@@ -117,18 +117,48 @@ func (m *Manager) preferredDriverForModel(modelID string) (Driver, error) {
 }
 
 func (m *Manager) EnsureModelWithFlags(modelID string, flags *types.ModelFeatureFlags) error {
-	driver, err := m.preferredDriverForModel(modelID)
+	trimmedModel := strings.TrimSpace(modelID)
+	if trimmedModel == "" {
+		return fmt.Errorf("model ID is required")
+	}
+
+	// If the model format strongly implies a runtime, make sure that runtime is
+	// installed first so UI-driven "add model" can self-heal missing runtimes.
+	if strings.Contains(trimmedModel, "/") {
+		if err := m.EnsureRuntime("vllm"); err != nil {
+			return fmt.Errorf("ensure vllm runtime: %w", err)
+		}
+		driver, err := m.driverFor("vllm")
+		if err != nil {
+			return err
+		}
+		return driver.EnsureModelWithFlags(trimmedModel, flags)
+	}
+	if strings.Contains(trimmedModel, ":") {
+		if err := m.EnsureRuntime("ollama"); err == nil {
+			driver, drvErr := m.driverFor("ollama")
+			if drvErr == nil {
+				return driver.EnsureModelWithFlags(trimmedModel, flags)
+			}
+		}
+	}
+
+	driver, err := m.preferredDriverForModel(trimmedModel)
 	if err != nil {
 		return err
 	}
-	return driver.EnsureModelWithFlags(modelID, flags)
+	return driver.EnsureModelWithFlags(trimmedModel, flags)
 }
 
 func (m *Manager) EnsureModelWithRuntime(modelID string, runtimeName string, flags *types.ModelFeatureFlags) error {
 	if strings.TrimSpace(runtimeName) == "" {
 		return m.EnsureModelWithFlags(modelID, flags)
 	}
-	driver, err := m.driverFor(runtimeName)
+	normalizedRuntime := strings.ToLower(strings.TrimSpace(runtimeName))
+	if err := m.EnsureRuntime(normalizedRuntime); err != nil {
+		return fmt.Errorf("ensure runtime %s: %w", normalizedRuntime, err)
+	}
+	driver, err := m.driverFor(normalizedRuntime)
 	if err != nil {
 		return err
 	}
@@ -212,4 +242,19 @@ func (m *Manager) RestartRuntime() error {
 		return lastErr
 	}
 	return fmt.Errorf("no installed runtime to restart")
+}
+
+func (m *Manager) RestartRuntimeNamed(runtimeName string) error {
+	normalizedRuntime := strings.ToLower(strings.TrimSpace(runtimeName))
+	if normalizedRuntime == "" {
+		return fmt.Errorf("runtime name is required")
+	}
+	if err := m.EnsureRuntime(normalizedRuntime); err != nil {
+		return fmt.Errorf("ensure runtime %s: %w", normalizedRuntime, err)
+	}
+	driver, err := m.driverFor(normalizedRuntime)
+	if err != nil {
+		return err
+	}
+	return driver.RestartRuntime()
 }
