@@ -18,7 +18,7 @@ import (
 	"github.com/Borgels/clawcontrol-agent/internal/types"
 )
 
-var agentVersion = "0.1.8"
+var agentVersion = "0.1.9"
 
 func main() {
 	cfgPath := flag.String("config", config.DefaultConfigPath(), "Path to config file")
@@ -152,7 +152,7 @@ func main() {
 			} else {
 				log.Printf("command %s (%s) completed", command.ID, command.Type)
 			}
-			ackErr := cl.Ack(ctx, types.AckRequest{
+			ackErr := ackCommandWithRetry(cl, types.AckRequest{
 				CommandID: command.ID,
 				Status:    status,
 				Details:   details,
@@ -210,4 +210,19 @@ func toInstalledModels(runtimeManager *runtime.Manager) []types.InstalledModel {
 		}
 	}
 	return result
+}
+
+func ackCommandWithRetry(cl *client.Client, payload types.AckRequest) error {
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		ackCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err := cl.Ack(ackCtx, payload)
+		cancel()
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		time.Sleep(300 * time.Millisecond)
+	}
+	return lastErr
 }
