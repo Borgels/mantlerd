@@ -192,9 +192,28 @@ func toRuntimeTypes(values []string) []types.RuntimeType {
 
 func toInstalledModels(runtimeManager *runtime.Manager) []types.InstalledModel {
 	result := make([]types.InstalledModel, 0)
+	seen := map[string]struct{}{}
+	type installedModelsProvider interface {
+		InstalledModels() []types.InstalledModel
+	}
 	for _, runtimeName := range runtimeManager.InstalledRuntimes() {
 		driver, err := runtimeManager.DriverFor(runtimeName)
 		if err != nil {
+			continue
+		}
+		if provider, ok := driver.(installedModelsProvider); ok {
+			for _, model := range provider.InstalledModels() {
+				modelID := strings.TrimSpace(model.ModelID)
+				if modelID == "" {
+					continue
+				}
+				key := runtimeName + "::" + modelID
+				if _, exists := seen[key]; exists {
+					continue
+				}
+				seen[key] = struct{}{}
+				result = append(result, model)
+			}
 			continue
 		}
 		for _, modelID := range driver.ListModels() {
@@ -202,6 +221,11 @@ func toInstalledModels(runtimeManager *runtime.Manager) []types.InstalledModel {
 			if modelID == "" {
 				continue
 			}
+			key := runtimeName + "::" + modelID
+			if _, exists := seen[key]; exists {
+				continue
+			}
+			seen[key] = struct{}{}
 			result = append(result, types.InstalledModel{
 				ModelID: modelID,
 				Runtime: types.RuntimeType(runtimeName),

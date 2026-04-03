@@ -23,6 +23,7 @@ VERSION="${CLAWCONTROL_AGENT_VERSION:-latest}"
 OLLAMA_CONFIGURE_REMOTE="${CLAWCONTROL_OLLAMA_CONFIGURE_REMOTE:-true}"
 OLLAMA_HOST="${CLAWCONTROL_OLLAMA_HOST:-0.0.0.0:11434}"
 VLLM_CONFIGURE="${CLAWCONTROL_VLLM_CONFIGURE:-true}"
+VLLM_PREINSTALL="${CLAWCONTROL_VLLM_PREINSTALL:-true}"
 VLLM_PORT="${CLAWCONTROL_VLLM_PORT:-8000}"
 VLLM_GPU_MEMORY_UTILIZATION="${CLAWCONTROL_VLLM_GPU_MEMORY_UTILIZATION:-0.9}"
 
@@ -47,6 +48,7 @@ Environment overrides:
   CLAWCONTROL_OLLAMA_CONFIGURE_REMOTE  true|false (default: true)
   CLAWCONTROL_OLLAMA_HOST        Ollama bind host:port (default: 0.0.0.0:11434)
   CLAWCONTROL_VLLM_CONFIGURE     true|false (default: true)
+  CLAWCONTROL_VLLM_PREINSTALL    true|false (default: true)
   CLAWCONTROL_VLLM_PORT          vLLM OpenAI API port (default: 8000)
   CLAWCONTROL_VLLM_GPU_MEMORY_UTILIZATION GPU memory utilization fraction (default: 0.9)
 EOF
@@ -149,6 +151,14 @@ case "$VLLM_CONFIGURE" in
     ;;
   *)
     fatal "CLAWCONTROL_VLLM_CONFIGURE must be true or false"
+    ;;
+esac
+
+case "$VLLM_PREINSTALL" in
+  true|false)
+    ;;
+  *)
+    fatal "CLAWCONTROL_VLLM_PREINSTALL must be true or false"
     ;;
 esac
 
@@ -346,6 +356,35 @@ EOF"
     $SUDO chmod 0644 "$VLLM_UNIT_PATH"
     $SUDO systemctl daemon-reload
     $SUDO systemctl enable vllm >/dev/null || true
+
+    if [ "$VLLM_PREINSTALL" = "true" ]; then
+      log "Preinstalling vLLM in dedicated virtualenv (${VLLM_VENV_PATH})"
+      if ! command -v python3 >/dev/null 2>&1; then
+        log "vLLM preinstall warning: python3 not found. Runtime install command will retry later."
+      else
+        $SUDO install -d -m 0755 "$VLLM_VENV_PATH"
+        if ! $SUDO python3 -m venv "$VLLM_VENV_PATH"; then
+          log "vLLM preinstall warning: python3 venv creation failed. Trying to install python3-venv."
+          if command -v apt-get >/dev/null 2>&1; then
+            $SUDO sh -c "DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y python3-venv python3-pip" || true
+            $SUDO python3 -m venv "$VLLM_VENV_PATH" || true
+          fi
+        fi
+        if [ -x "$VLLM_PYTHON" ]; then
+          $SUDO "$VLLM_PYTHON" -m pip install --upgrade pip || true
+          if ! $SUDO "$VLLM_PYTHON" -m pip install --upgrade vllm; then
+            log "vLLM preinstall warning: pip install vllm failed. Agent self-heal/runtime install will retry."
+          else
+            log "vLLM preinstall complete."
+          fi
+        else
+          log "vLLM preinstall warning: virtualenv python missing at ${VLLM_PYTHON}."
+        fi
+      fi
+    else
+      log "Skipping vLLM package preinstall (CLAWCONTROL_VLLM_PREINSTALL=${VLLM_PREINSTALL})."
+    fi
+
     log "vLLM service template installed. It will be started when a model is configured."
   else
     log "Skipping vLLM template install (CLAWCONTROL_VLLM_CONFIGURE=${VLLM_CONFIGURE})."
