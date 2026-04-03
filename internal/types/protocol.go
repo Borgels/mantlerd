@@ -25,9 +25,10 @@ const (
 )
 
 type InstalledModel struct {
-	ModelID       string             `json:"modelId"`
-	Status        ModelInstallStatus `json:"status"`
-	Capabilities *ModelCapabilities  `json:"capabilities,omitempty"`
+	ModelID      string             `json:"modelId"`
+	Runtime      RuntimeType        `json:"runtime,omitempty"`
+	Status       ModelInstallStatus `json:"status"`
+	Capabilities *ModelCapabilities `json:"capabilities,omitempty"`
 }
 
 type ModelCapabilities struct {
@@ -37,27 +38,27 @@ type ModelCapabilities struct {
 }
 
 type ModelBenchmarkMetrics struct {
-	TTFTMs                        float64 `json:"ttftMs"`
-	OutputTokensPerSec            float64 `json:"outputTokensPerSec"`
-	TotalLatencyMs                float64 `json:"totalLatencyMs"`
-	PromptTokensPerSec            float64 `json:"promptTokensPerSec"`
-	P95TTFTMsAtSmallConcurrency   float64 `json:"p95TtftMsAtSmallConcurrency"`
+	TTFTMs                      float64 `json:"ttftMs"`
+	OutputTokensPerSec          float64 `json:"outputTokensPerSec"`
+	TotalLatencyMs              float64 `json:"totalLatencyMs"`
+	PromptTokensPerSec          float64 `json:"promptTokensPerSec"`
+	P95TTFTMsAtSmallConcurrency float64 `json:"p95TtftMsAtSmallConcurrency"`
 }
 
 type CheckinRequest struct {
-	MachineID       string           `json:"machineId"`
-	Hostname        string           `json:"hostname,omitempty"`
-	Addresses       []string         `json:"addresses,omitempty"`
-	HardwareSummary string           `json:"hardwareSummary,omitempty"`
-	AgentVersion    string           `json:"agentVersion,omitempty"`
-	RuntimeStatus   RuntimeStatus    `json:"runtimeStatus,omitempty"`
-	RuntimeType     RuntimeType      `json:"runtimeType,omitempty"`
-	InstalledRuntimeTypes []RuntimeType   `json:"installedRuntimeTypes,omitempty"`
-	RuntimeVersion  string           `json:"runtimeVersion,omitempty"`
-	RuntimeVersions map[RuntimeType]string `json:"runtimeVersions,omitempty"`
-	InstalledModels []InstalledModel `json:"installedModels,omitempty"`
-	Uptime          int64            `json:"uptime,omitempty"`
-	LoadAvg         []float64        `json:"loadAvg,omitempty"`
+	MachineID             string                 `json:"machineId"`
+	Hostname              string                 `json:"hostname,omitempty"`
+	Addresses             []string               `json:"addresses,omitempty"`
+	HardwareSummary       string                 `json:"hardwareSummary,omitempty"`
+	AgentVersion          string                 `json:"agentVersion,omitempty"`
+	RuntimeStatus         RuntimeStatus          `json:"runtimeStatus,omitempty"`
+	RuntimeType           RuntimeType            `json:"runtimeType,omitempty"`
+	InstalledRuntimeTypes []RuntimeType          `json:"installedRuntimeTypes,omitempty"`
+	RuntimeVersion        string                 `json:"runtimeVersion,omitempty"`
+	RuntimeVersions       map[RuntimeType]string `json:"runtimeVersions,omitempty"`
+	InstalledModels       []InstalledModel       `json:"installedModels,omitempty"`
+	Uptime                int64                  `json:"uptime,omitempty"`
+	LoadAvg               []float64              `json:"loadAvg,omitempty"`
 }
 
 type AgentCommand struct {
@@ -67,10 +68,10 @@ type AgentCommand struct {
 }
 
 type CheckinResponse struct {
-	Ack        bool           `json:"ack"`
-	ServerTime string         `json:"serverTime"`
-	DesiredConfig DesiredConfig `json:"desiredConfig"`
-	Commands   []AgentCommand `json:"commands"`
+	Ack           bool           `json:"ack"`
+	ServerTime    string         `json:"serverTime"`
+	DesiredConfig DesiredConfig  `json:"desiredConfig"`
+	Commands      []AgentCommand `json:"commands"`
 }
 
 type ModelFeatureFlags struct {
@@ -80,6 +81,7 @@ type ModelFeatureFlags struct {
 
 type ModelTarget struct {
 	ModelID      string            `json:"modelId"`
+	Runtime      RuntimeType       `json:"runtime,omitempty"`
 	FeatureFlags ModelFeatureFlags `json:"featureFlags"`
 }
 

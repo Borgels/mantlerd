@@ -43,13 +43,15 @@ func (e *Executor) Execute(command types.AgentCommand) (string, error) {
 			return "", err
 		}
 		flags := modelFeatureFlagsParam(command.Params)
-		return "", e.runtimeManager.EnsureModelWithFlags(modelID, flags)
+		runtimeName := optionalStringParam(command.Params, "runtime")
+		return "", e.runtimeManager.EnsureModelWithRuntime(modelID, runtimeName, flags)
 	case "remove_model":
 		modelID, err := stringParam(command.Params, "modelId")
 		if err != nil {
 			return "", err
 		}
-		return "", e.runtimeManager.RemoveModel(modelID)
+		runtimeName := optionalStringParam(command.Params, "runtime")
+		return "", e.runtimeManager.RemoveModelWithRuntime(modelID, runtimeName)
 	case "health_check":
 		scope, _ := command.Params["scope"].(string)
 		if scope != "model_benchmark" {
@@ -75,27 +77,27 @@ func (e *Executor) Execute(command types.AgentCommand) (string, error) {
 				}
 				payload := map[string]any{
 					"progress": map[string]any{
-						"scope":           "model_benchmark",
-						"runsCompleted":   progress.RunsCompleted,
-						"runsTotal":       progress.RunsTotal,
-						"successfulRuns":  progress.SuccessfulRuns,
-						"failedRuns":      progress.FailedRuns,
+						"scope":            "model_benchmark",
+						"runsCompleted":    progress.RunsCompleted,
+						"runsTotal":        progress.RunsTotal,
+						"successfulRuns":   progress.SuccessfulRuns,
+						"failedRuns":       progress.FailedRuns,
 						"lastRunLatencyMs": progress.LastRunLatencyMs,
 					},
 				}
 				if progress.Benchmark != nil {
 					payload["progress"] = map[string]any{
-						"scope":                         "model_benchmark",
-						"runsCompleted":                 progress.RunsCompleted,
-						"runsTotal":                     progress.RunsTotal,
-						"successfulRuns":                progress.SuccessfulRuns,
-						"failedRuns":                    progress.FailedRuns,
-						"lastRunLatencyMs":              progress.LastRunLatencyMs,
-						"ttftMs":                        progress.Benchmark.TTFTMs,
-						"outputTokensPerSec":            progress.Benchmark.OutputTokensPerSec,
-						"totalLatencyMs":                progress.Benchmark.TotalLatencyMs,
-						"promptTokensPerSec":            progress.Benchmark.PromptTokensPerSec,
-						"p95TtftMsAtSmallConcurrency":   progress.Benchmark.P95TTFTMsAtSmallConcurrency,
+						"scope":                       "model_benchmark",
+						"runsCompleted":               progress.RunsCompleted,
+						"runsTotal":                   progress.RunsTotal,
+						"successfulRuns":              progress.SuccessfulRuns,
+						"failedRuns":                  progress.FailedRuns,
+						"lastRunLatencyMs":            progress.LastRunLatencyMs,
+						"ttftMs":                      progress.Benchmark.TTFTMs,
+						"outputTokensPerSec":          progress.Benchmark.OutputTokensPerSec,
+						"totalLatencyMs":              progress.Benchmark.TotalLatencyMs,
+						"promptTokensPerSec":          progress.Benchmark.PromptTokensPerSec,
+						"p95TtftMsAtSmallConcurrency": progress.Benchmark.P95TTFTMsAtSmallConcurrency,
 					}
 				}
 				raw, err := json.Marshal(payload)
@@ -192,6 +194,18 @@ func intParam(params map[string]interface{}, key string, fallback int) int {
 	default:
 		return fallback
 	}
+}
+
+func optionalStringParam(params map[string]interface{}, key string) string {
+	raw, ok := params[key]
+	if !ok {
+		return ""
+	}
+	value, ok := raw.(string)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(value)
 }
 
 func (e *Executor) startAgentUpdate(version string) error {
