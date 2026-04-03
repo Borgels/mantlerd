@@ -11,12 +11,18 @@ CONFIG_PATH="${CONFIG_DIR}/agent.json"
 SYSTEMD_UNIT_PATH="/etc/systemd/system/${SERVICE_NAME}.service"
 OLLAMA_OVERRIDE_DIR="/etc/systemd/system/ollama.service.d"
 OLLAMA_OVERRIDE_PATH="${OLLAMA_OVERRIDE_DIR}/override.conf"
+VLLM_UNIT_PATH="/etc/systemd/system/vllm.service"
+VLLM_CONFIG_PATH="${CONFIG_DIR}/vllm.json"
+VLLM_ENV_PATH="${CONFIG_DIR}/vllm.env"
 INTERVAL_MS="${CLAWCONTROL_AGENT_INTERVAL_MS:-30000}"
 LOG_LEVEL="${CLAWCONTROL_AGENT_LOG_LEVEL:-info}"
 INSECURE="${CLAWCONTROL_AGENT_INSECURE:-false}"
 VERSION="${CLAWCONTROL_AGENT_VERSION:-latest}"
 OLLAMA_CONFIGURE_REMOTE="${CLAWCONTROL_OLLAMA_CONFIGURE_REMOTE:-true}"
 OLLAMA_HOST="${CLAWCONTROL_OLLAMA_HOST:-0.0.0.0:11434}"
+VLLM_CONFIGURE="${CLAWCONTROL_VLLM_CONFIGURE:-true}"
+VLLM_PORT="${CLAWCONTROL_VLLM_PORT:-8000}"
+VLLM_GPU_MEMORY_UTILIZATION="${CLAWCONTROL_VLLM_GPU_MEMORY_UTILIZATION:-0.9}"
 
 TOKEN=""
 MACHINE_ID=""
@@ -38,6 +44,9 @@ Environment overrides:
   CLAWCONTROL_AGENT_INSECURE     true|false (default: false)
   CLAWCONTROL_OLLAMA_CONFIGURE_REMOTE  true|false (default: true)
   CLAWCONTROL_OLLAMA_HOST        Ollama bind host:port (default: 0.0.0.0:11434)
+  CLAWCONTROL_VLLM_CONFIGURE     true|false (default: true)
+  CLAWCONTROL_VLLM_PORT          vLLM OpenAI API port (default: 8000)
+  CLAWCONTROL_VLLM_GPU_MEMORY_UTILIZATION GPU memory utilization fraction (default: 0.9)
 EOF
 }
 
@@ -130,6 +139,14 @@ case "$INSECURE" in
     ;;
   *)
     fatal "CLAWCONTROL_AGENT_INSECURE must be true or false"
+    ;;
+esac
+
+case "$VLLM_CONFIGURE" in
+  true|false)
+    ;;
+  *)
+    fatal "CLAWCONTROL_VLLM_CONFIGURE must be true or false"
     ;;
 esac
 
@@ -276,6 +293,57 @@ EOF"
     fi
   else
     log "Skipping ollama remote bind override (CLAWCONTROL_OLLAMA_CONFIGURE_REMOTE=${OLLAMA_CONFIGURE_REMOTE})."
+  fi
+
+  if [ "$VLLM_CONFIGURE" = "true" ]; then
+    log "Preparing vLLM service template and config"
+    if command -v nvidia-smi >/dev/null 2>&1; then
+      log "nvidia-smi detected; GPU runtime appears available for vLLM."
+    else
+      log "vLLM preflight warning: nvidia-smi not found. vLLM may fail without NVIDIA drivers/CUDA."
+    fi
+
+    $SUDO install -d -m 0755 "$CONFIG_DIR"
+    if [ ! -f "$VLLM_CONFIG_PATH" ]; then
+      $SUDO sh -c "cat > \"$VLLM_CONFIG_PATH\" <<EOF
+{
+  \"model\": \"\",
+  \"port\": ${VLLM_PORT}
+}
+EOF"
+      $SUDO chmod 600 "$VLLM_CONFIG_PATH"
+    fi
+
+    $SUDO sh -c "cat > \"$VLLM_ENV_PATH\" <<EOF
+VLLM_MODEL=
+VLLM_PORT=${VLLM_PORT}
+VLLM_GPU_MEMORY_UTILIZATION=${VLLM_GPU_MEMORY_UTILIZATION}
+EOF"
+    $SUDO chmod 600 "$VLLM_ENV_PATH"
+
+    $SUDO sh -c "cat > \"$VLLM_UNIT_PATH\" <<EOF
+[Unit]
+Description=vLLM OpenAI API Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=-${VLLM_ENV_PATH}
+ExecStart=/bin/sh -c 'python3 -m vllm.entrypoints.openai.api_server --model \"\${VLLM_MODEL}\" --host 0.0.0.0 --port \"\${VLLM_PORT:-8000}\" --gpu-memory-utilization \"\${VLLM_GPU_MEMORY_UTILIZATION:-0.9}\"'
+Restart=always
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target
+EOF"
+    $SUDO chmod 0644 "$VLLM_UNIT_PATH"
+    $SUDO systemctl daemon-reload
+    $SUDO systemctl enable vllm >/dev/null || true
+    log "vLLM service template installed. It will be started when a model is configured."
+  else
+    log "Skipping vLLM template install (CLAWCONTROL_VLLM_CONFIGURE=${VLLM_CONFIGURE})."
   fi
 
   if wait_for_service "$SERVICE_NAME" 15; then

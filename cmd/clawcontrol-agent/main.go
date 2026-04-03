@@ -107,6 +107,7 @@ func main() {
 			RuntimeStatus:         runtimeStatus,
 			RuntimeType:           runtimeType,
 			RuntimeVersion:        runtimeVersion,
+			RuntimeVersions:       runtimeManager.RuntimeVersions(),
 			InstalledRuntimeTypes: installedRuntimeTypes,
 			InstalledModels:       toInstalledModels(runtimeManager.ListModels()),
 		}

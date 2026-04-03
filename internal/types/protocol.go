@@ -54,6 +54,7 @@ type CheckinRequest struct {
 	RuntimeType     RuntimeType      `json:"runtimeType,omitempty"`
 	InstalledRuntimeTypes []RuntimeType   `json:"installedRuntimeTypes,omitempty"`
 	RuntimeVersion  string           `json:"runtimeVersion,omitempty"`
+	RuntimeVersions map[RuntimeType]string `json:"runtimeVersions,omitempty"`
 	InstalledModels []InstalledModel `json:"installedModels,omitempty"`
 	Uptime          int64            `json:"uptime,omitempty"`
 	LoadAvg         []float64        `json:"loadAvg,omitempty"`
