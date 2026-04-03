@@ -21,6 +21,8 @@ const (
 	vllmConfigPath = "/etc/clawcontrol/vllm.json"
 	vllmEnvPath    = "/etc/clawcontrol/vllm.env"
 	vllmUnitPath   = "/etc/systemd/system/vllm.service"
+	vllmVenvPath   = "/opt/clawcontrol/vllm-venv"
+	vllmPythonPath = "/opt/clawcontrol/vllm-venv/bin/python3"
 )
 
 type vllmConfig struct {
@@ -37,18 +39,24 @@ func newVLLMDriver() Driver {
 func (d *vllmDriver) Name() string { return "vllm" }
 
 func (d *vllmDriver) Install() error {
-	if err := runCommand("python3", "-m", "pip", "install", "--upgrade", "vllm"); err != nil {
+	if err := d.ensureVirtualEnv(); err != nil {
+		return err
+	}
+	if err := runCommand(vllmPythonPath, "-m", "pip", "install", "--upgrade", "pip"); err != nil {
+		return err
+	}
+	if err := runCommand(vllmPythonPath, "-m", "pip", "install", "--upgrade", "vllm"); err != nil {
 		return err
 	}
 	return d.ensureServiceUnit()
 }
 
 func (d *vllmDriver) IsInstalled() bool {
-	return runCommand("python3", "-m", "pip", "show", "vllm") == nil
+	return runCommand(vllmPythonPath, "-m", "pip", "show", "vllm") == nil
 }
 
 func (d *vllmDriver) Version() string {
-	cmd := exec.Command("python3", "-m", "pip", "show", "vllm")
+	cmd := exec.Command(vllmPythonPath, "-m", "pip", "show", "vllm")
 	output, err := cmd.Output()
 	if err != nil {
 		return ""
@@ -303,7 +311,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 EnvironmentFile=-` + vllmEnvPath + `
-ExecStart=/bin/sh -c 'python3 -m vllm.entrypoints.openai.api_server --model "${VLLM_MODEL}" --host 0.0.0.0 --port "${VLLM_PORT:-8000}" --gpu-memory-utilization "${VLLM_GPU_MEMORY_UTILIZATION:-0.9}"'
+ExecStart=/bin/sh -c '` + vllmPythonPath + ` -m vllm.entrypoints.openai.api_server --model "${VLLM_MODEL}" --host 0.0.0.0 --port "${VLLM_PORT:-8000}" --gpu-memory-utilization "${VLLM_GPU_MEMORY_UTILIZATION:-0.9}"'
 Restart=always
 RestartSec=5
 User=root
@@ -315,6 +323,19 @@ WantedBy=multi-user.target
 		return fmt.Errorf("write vllm service unit: %w", err)
 	}
 	return runCommand("systemctl", "daemon-reload")
+}
+
+func (d *vllmDriver) ensureVirtualEnv() error {
+	if _, err := os.Stat(vllmPythonPath); err == nil {
+		return nil
+	}
+	if err := os.MkdirAll(vllmVenvPath, 0o755); err != nil {
+		return fmt.Errorf("create vllm virtualenv directory: %w", err)
+	}
+	if err := runCommand("python3", "-m", "venv", vllmVenvPath); err != nil {
+		return fmt.Errorf("create vllm virtualenv: %w", err)
+	}
+	return nil
 }
 
 func (d *vllmDriver) startOrRestartService(modelID string, port int) error {
