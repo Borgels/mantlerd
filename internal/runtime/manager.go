@@ -20,6 +20,10 @@ func NewManager() *Manager {
 	return &Manager{drivers: drivers}
 }
 
+func (m *Manager) DriverFor(runtimeName string) (Driver, error) {
+	return m.driverFor(runtimeName)
+}
+
 func (m *Manager) driverFor(runtimeName string) (Driver, error) {
 	driver, ok := m.drivers[strings.ToLower(strings.TrimSpace(runtimeName))]
 	if !ok {
@@ -120,6 +124,17 @@ func (m *Manager) EnsureModelWithFlags(modelID string, flags *types.ModelFeature
 	return driver.EnsureModelWithFlags(modelID, flags)
 }
 
+func (m *Manager) EnsureModelWithRuntime(modelID string, runtimeName string, flags *types.ModelFeatureFlags) error {
+	if strings.TrimSpace(runtimeName) == "" {
+		return m.EnsureModelWithFlags(modelID, flags)
+	}
+	driver, err := m.driverFor(runtimeName)
+	if err != nil {
+		return err
+	}
+	return driver.EnsureModelWithFlags(modelID, flags)
+}
+
 func (m *Manager) ListModels() []string {
 	set := map[string]struct{}{}
 	for _, runtimeName := range m.InstalledRuntimes() {
@@ -143,6 +158,17 @@ func (m *Manager) ListModels() []string {
 
 func (m *Manager) RemoveModel(modelID string) error {
 	driver, err := m.preferredDriverForModel(modelID)
+	if err != nil {
+		return err
+	}
+	return driver.RemoveModel(modelID)
+}
+
+func (m *Manager) RemoveModelWithRuntime(modelID string, runtimeName string) error {
+	if strings.TrimSpace(runtimeName) == "" {
+		return m.RemoveModel(modelID)
+	}
+	driver, err := m.driverFor(runtimeName)
 	if err != nil {
 		return err
 	}

@@ -18,7 +18,7 @@ import (
 	"github.com/Borgels/clawcontrol-agent/internal/types"
 )
 
-var agentVersion = "0.1.4"
+var agentVersion = "0.1.6"
 
 func main() {
 	cfgPath := flag.String("config", config.DefaultConfigPath(), "Path to config file")
@@ -109,7 +109,7 @@ func main() {
 			RuntimeVersion:        runtimeVersion,
 			RuntimeVersions:       runtimeManager.RuntimeVersions(),
 			InstalledRuntimeTypes: installedRuntimeTypes,
-			InstalledModels:       toInstalledModels(runtimeManager.ListModels()),
+			InstalledModels:       toInstalledModels(runtimeManager),
 		}
 
 		resp, err := client.Retry(ctx, 3, func() (types.CheckinResponse, error) {
@@ -129,7 +129,7 @@ func main() {
 		for _, target := range resp.DesiredConfig.ModelTargets {
 			modelsHandled[target.ModelID] = true
 			flags := target.FeatureFlags
-			if err := runtimeManager.EnsureModelWithFlags(target.ModelID, &flags); err != nil {
+			if err := runtimeManager.EnsureModelWithRuntime(target.ModelID, string(target.Runtime), &flags); err != nil {
 				log.Printf("failed to ensure model target %s: %v", target.ModelID, err)
 			}
 		}
@@ -190,13 +190,24 @@ func toRuntimeTypes(values []string) []types.RuntimeType {
 	return result
 }
 
-func toInstalledModels(values []string) []types.InstalledModel {
-	result := make([]types.InstalledModel, 0, len(values))
-	for _, value := range values {
-		result = append(result, types.InstalledModel{
-			ModelID: value,
-			Status:  types.ModelReady,
-		})
+func toInstalledModels(runtimeManager *runtime.Manager) []types.InstalledModel {
+	result := make([]types.InstalledModel, 0)
+	for _, runtimeName := range runtimeManager.InstalledRuntimes() {
+		driver, err := runtimeManager.DriverFor(runtimeName)
+		if err != nil {
+			continue
+		}
+		for _, modelID := range driver.ListModels() {
+			modelID = strings.TrimSpace(modelID)
+			if modelID == "" {
+				continue
+			}
+			result = append(result, types.InstalledModel{
+				ModelID: modelID,
+				Runtime: types.RuntimeType(runtimeName),
+				Status:  types.ModelReady,
+			})
+		}
 	}
 	return result
 }
