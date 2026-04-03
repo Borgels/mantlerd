@@ -14,8 +14,9 @@ type Manager struct {
 
 func NewManager() *Manager {
 	drivers := map[string]Driver{
-		"ollama": newOllamaDriver(),
-		"vllm":   newVLLMDriver(),
+		"ollama":   newOllamaDriver(),
+		"vllm":     newVLLMDriver(),
+		"lmstudio": newLMStudioDriver(),
 	}
 	return &Manager{drivers: drivers}
 }

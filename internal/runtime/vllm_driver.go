@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	goruntime "runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -23,6 +24,8 @@ const (
 	vllmUnitPath   = "/etc/systemd/system/vllm.service"
 	vllmVenvPath   = "/opt/clawcontrol/vllm-venv"
 	vllmPythonPath = "/opt/clawcontrol/vllm-venv/bin/python3"
+	vllmContainerName = "clawcontrol-vllm"
+	vllmDefaultContainerImage = "nvcr.io/nvidia/vllm:26.02-py3"
 	vllmReadyTimeout = 180 * time.Second
 	vllmRestartCooldown = 90 * time.Second
 )
@@ -46,6 +49,31 @@ func newVLLMDriver() Driver {
 func (d *vllmDriver) Name() string { return "vllm" }
 
 func (d *vllmDriver) Install() error {
+	if d.shouldUseContainer() {
+		if err := d.ensureDockerAvailable(); err != nil {
+			return err
+		}
+		if err := d.ensureServiceUnit(); err != nil {
+			return err
+		}
+		image := d.containerImage()
+		_ = runCommand("docker", "pull", image)
+		cfg, err := d.readConfig()
+		if err != nil {
+			return nil
+		}
+		if strings.TrimSpace(cfg.Model) == "" {
+			return nil
+		}
+		port := cfg.Port
+		if port <= 0 {
+			port = 8000
+		}
+		if err := d.startOrRestartService(cfg.Model, port, false); err != nil {
+			return fmt.Errorf("vllm container install completed but configured model failed to start: %w", err)
+		}
+		return nil
+	}
 	if err := d.ensureVirtualEnv(); err != nil {
 		return err
 	}
@@ -93,6 +121,9 @@ func (d *vllmDriver) Install() error {
 }
 
 func (d *vllmDriver) IsInstalled() bool {
+	if d.shouldUseContainer() {
+		return d.ensureDockerAvailable() == nil
+	}
 	if runCommand(vllmPythonPath, "-c", "import vllm") == nil {
 		return true
 	}
@@ -101,6 +132,9 @@ func (d *vllmDriver) IsInstalled() bool {
 }
 
 func (d *vllmDriver) Version() string {
+	if d.shouldUseContainer() {
+		return "container:" + d.containerImage()
+	}
 	for _, pythonPath := range []string{vllmPythonPath, "python3"} {
 		cmd := exec.Command(
 			pythonPath,
@@ -395,6 +429,26 @@ User=root
 [Install]
 WantedBy=multi-user.target
 `
+	if d.shouldUseContainer() {
+		unit = `[Unit]
+Description=vLLM OpenAI API Server (Container)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=-` + vllmEnvPath + `
+ExecStartPre=-/bin/sh -c 'DOCKER_BIN="$(command -v docker)"; if [ -n "$DOCKER_BIN" ]; then "$DOCKER_BIN" rm -f ` + vllmContainerName + ` >/dev/null 2>&1 || true; fi'
+ExecStart=/bin/sh -c 'DOCKER_BIN="$(command -v docker)"; [ -n "$DOCKER_BIN" ] || exit 1; EXTRA_ARGS="${VLLM_EXTRA_ARGS:-}"; if [ "${VLLM_TRUST_REMOTE_CODE:-false}" = "true" ]; then EXTRA_ARGS="${EXTRA_ARGS} --trust-remote-code"; fi; exec "$DOCKER_BIN" run --rm --name ` + vllmContainerName + ` --gpus all --ipc=host --network host -e HF_TOKEN="${HF_TOKEN:-}" -e HUGGING_FACE_HUB_TOKEN="${HUGGING_FACE_HUB_TOKEN:-}" -e NVIDIA_VISIBLE_DEVICES=all -e NVIDIA_DRIVER_CAPABILITIES=compute,utility -v /root/.cache/huggingface:/root/.cache/huggingface "${VLLM_CONTAINER_IMAGE:-` + vllmDefaultContainerImage + `}" vllm serve "${VLLM_MODEL}" --host 0.0.0.0 --port "${VLLM_PORT:-8000}" --gpu-memory-utilization "${VLLM_GPU_MEMORY_UTILIZATION:-0.9}" ${EXTRA_ARGS}'
+ExecStop=-/bin/sh -c 'DOCKER_BIN="$(command -v docker)"; if [ -n "$DOCKER_BIN" ]; then "$DOCKER_BIN" stop ` + vllmContainerName + ` >/dev/null 2>&1 || true; fi'
+Restart=always
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target
+`
+	}
 	if err := os.WriteFile(vllmUnitPath, []byte(unit), 0o644); err != nil {
 		return fmt.Errorf("write vllm service unit: %w", err)
 	}
@@ -426,8 +480,14 @@ func (d *vllmDriver) ensureVirtualEnv() error {
 }
 
 func (d *vllmDriver) startOrRestartService(modelID string, port int, force bool) error {
-	if err := d.validateVLLMRuntimeCompatibility(); err != nil {
-		return err
+	if d.shouldUseContainer() {
+		if err := d.ensureDockerAvailable(); err != nil {
+			return err
+		}
+	} else {
+		if err := d.validateVLLMRuntimeCompatibility(); err != nil {
+			return err
+		}
 	}
 	if err := d.ensureServiceUnit(); err != nil {
 		return err
@@ -446,14 +506,21 @@ func (d *vllmDriver) startOrRestartService(modelID string, port int, force bool)
 	if existingLibrary := strings.TrimSpace(existingEnv["VLLM_LD_LIBRARY_PATH"]); existingLibrary != "" {
 		libraryPath = existingLibrary
 	}
-	envContent := fmt.Sprintf(
-		"VLLM_MODEL=%q\nVLLM_PORT=%d\nVLLM_GPU_MEMORY_UTILIZATION=0.9\nVLLM_LD_LIBRARY_PATH=%q\nVLLM_TRUST_REMOTE_CODE=%s\nVLLM_EXTRA_ARGS=%q\n",
+	containerImage := strings.TrimSpace(existingEnv["VLLM_CONTAINER_IMAGE"])
+	if containerImage == "" {
+		containerImage = d.containerImage()
+	}
+	envContent := fmt.Sprintf("VLLM_MODEL=%q\nVLLM_PORT=%d\nVLLM_GPU_MEMORY_UTILIZATION=0.9\nVLLM_TRUST_REMOTE_CODE=%s\nVLLM_EXTRA_ARGS=%q\n",
 		safeModelID,
 		port,
-		libraryPath,
 		trustRemoteCode,
 		extraArgs,
 	)
+	if d.shouldUseContainer() {
+		envContent += fmt.Sprintf("VLLM_CONTAINER_IMAGE=%q\n", containerImage)
+	} else {
+		envContent += fmt.Sprintf("VLLM_LD_LIBRARY_PATH=%q\n", libraryPath)
+	}
 	if err := os.WriteFile(vllmEnvPath, []byte(envContent), 0o600); err != nil {
 		return fmt.Errorf("write vllm env config: %w", err)
 	}
@@ -718,6 +785,9 @@ func (d *vllmDriver) ensureCudaRuntimeLibraries() error {
 }
 
 func (d *vllmDriver) validateVLLMRuntimeCompatibility() error {
+	if d.shouldUseContainer() {
+		return nil
+	}
 	pySnippet := strings.Join([]string{
 		"import json",
 		"import sys",
@@ -759,6 +829,39 @@ func (d *vllmDriver) validateVLLMRuntimeCompatibility() error {
 			)
 		}
 		return fmt.Errorf("vllm import check failed: %s", raw)
+	}
+	return nil
+}
+
+func (d *vllmDriver) runtimeMode() string {
+	mode := strings.ToLower(strings.TrimSpace(os.Getenv("VLLM_RUNTIME_MODE")))
+	switch mode {
+	case "native", "container":
+		return mode
+	}
+	if goruntime.GOARCH == "arm64" || goruntime.GOARCH == "aarch64" {
+		if _, err := exec.LookPath("docker"); err == nil {
+			return "container"
+		}
+	}
+	return "native"
+}
+
+func (d *vllmDriver) shouldUseContainer() bool {
+	return d.runtimeMode() == "container"
+}
+
+func (d *vllmDriver) containerImage() string {
+	image := strings.TrimSpace(os.Getenv("VLLM_CONTAINER_IMAGE"))
+	if image == "" {
+		image = vllmDefaultContainerImage
+	}
+	return image
+}
+
+func (d *vllmDriver) ensureDockerAvailable() error {
+	if _, err := exec.LookPath("docker"); err != nil {
+		return fmt.Errorf("docker is required for containerized vllm mode")
 	}
 	return nil
 }
