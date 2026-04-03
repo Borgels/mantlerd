@@ -1,10 +1,14 @@
 package commands
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/Borgels/clawcontrol-agent/internal/config"
 	"github.com/Borgels/clawcontrol-agent/internal/runtime"
@@ -132,10 +136,11 @@ func (e *Executor) Execute(command types.AgentCommand) (string, error) {
 				version = strings.TrimSpace(parsedVersion)
 			}
 		}
-		if err := e.startAgentUpdate(version); err != nil {
-			return "", err
+		details, err := e.startAgentUpdate(version)
+		if err != nil {
+			return details, err
 		}
-		return fmt.Sprintf("Agent update started (target version: %s)", version), nil
+		return details, nil
 	default:
 		return "", fmt.Errorf("unsupported command type: %s", command.Type)
 	}
@@ -208,7 +213,7 @@ func optionalStringParam(params map[string]interface{}, key string) string {
 	return strings.TrimSpace(value)
 }
 
-func (e *Executor) startAgentUpdate(version string) error {
+func (e *Executor) startAgentUpdate(version string) (string, error) {
 	installer := "https://raw.githubusercontent.com/Borgels/clawcontrol-agent/master/scripts/install.sh"
 	commandParts := []string{
 		"curl", "-fsSL", shellQuote(installer), "|", "sh", "-s", "--",
@@ -222,11 +227,42 @@ func (e *Executor) startAgentUpdate(version string) error {
 	}
 
 	commandLine := strings.Join(commandParts, " ")
-	cmd := exec.Command("sh", "-c", commandLine)
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("start agent update: %w", err)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "sh", "-c", commandLine)
+	output, err := cmd.CombinedOutput()
+	details := strings.TrimSpace(string(output))
+	if details == "" {
+		details = fmt.Sprintf("Agent update completed (target version: %s)", version)
 	}
-	return nil
+	if err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return details, fmt.Errorf("agent update timed out after 5m")
+		}
+		if isSignalTermination(err) {
+			return "Agent service restart triggered during update. Update likely applied; waiting for service to check in again.", nil
+		}
+		return details, fmt.Errorf("agent update failed: %w", err)
+	}
+	return details, nil
+}
+
+func isSignalTermination(err error) bool {
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		return false
+	}
+	status, ok := exitErr.Sys().(syscall.WaitStatus)
+	if !ok || !status.Signaled() {
+		return false
+	}
+	switch status.Signal() {
+	case syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP, syscall.SIGKILL:
+		return true
+	default:
+		return false
+	}
 }
 
 func shellQuote(value string) string {
