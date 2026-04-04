@@ -1,0 +1,81 @@
+package main
+
+import (
+	"fmt"
+	"os"
+
+	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
+)
+
+var (
+	cfgFile    string
+	serverURL  string
+	token      string
+	machineID  string
+	interval   string
+	insecure   bool
+	logLevel   string
+)
+
+var rootCmd = &cobra.Command{
+	Use:   "clawcontrol",
+	Short: "ClawControl agent for machine management",
+	Long: `ClawControl agent is a lightweight machine agent for ClawControl.
+
+It performs periodic authenticated check-ins, reports machine metadata,
+pulls pending commands, and executes allowlisted commands.`,
+}
+
+func init() {
+	cobra.OnInitialize(initConfig)
+
+	// Persistent flags (available to all subcommands)
+	rootCmd.PersistentFlags().StringVarP(&cfgFile, "config", "c", "", "config file (default is /etc/clawcontrol/agent.json or ~/.clawcontrol/agent.json)")
+	rootCmd.PersistentFlags().StringVarP(&serverURL, "server", "s", "", "ClawControl server URL")
+	rootCmd.PersistentFlags().StringVarP(&token, "token", "t", "", "Machine registration token")
+	rootCmd.PersistentFlags().StringVarP(&machineID, "machine", "m", "", "Machine ID")
+	rootCmd.PersistentFlags().StringVarP(&interval, "interval", "i", "30s", "Check-in interval")
+	rootCmd.PersistentFlags().BoolVarP(&insecure, "insecure", "k", false, "Allow non-HTTPS server")
+	rootCmd.PersistentFlags().StringVarP(&logLevel, "log-level", "l", "info", "Log level (debug, info, warn, error)")
+
+	// Bind flags to viper
+	viper.BindPFlag("server", rootCmd.PersistentFlags().Lookup("server"))
+	viper.BindPFlag("token", rootCmd.PersistentFlags().Lookup("token"))
+	viper.BindPFlag("machine", rootCmd.PersistentFlags().Lookup("machine"))
+	viper.BindPFlag("interval", rootCmd.PersistentFlags().Lookup("interval"))
+	viper.BindPFlag("insecure", rootCmd.PersistentFlags().Lookup("insecure"))
+	viper.BindPFlag("log-level", rootCmd.PersistentFlags().Lookup("log-level"))
+}
+
+func initConfig() {
+	if cfgFile != "" {
+		viper.SetConfigFile(cfgFile)
+	} else {
+		// Check if running as root
+		if os.Geteuid() == 0 {
+			viper.SetConfigFile("/etc/clawcontrol/agent.json")
+		} else {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error getting home directory: %v\n", err)
+				os.Exit(1)
+			}
+			viper.AddConfigPath(home + "/.clawcontrol")
+			viper.SetConfigName("agent")
+			viper.SetConfigType("json")
+		}
+	}
+
+	viper.AutomaticEnv()
+
+	// Read config file if it exists (don't error if it doesn't)
+	viper.ReadInConfig()
+}
+
+func Execute() {
+	if err := rootCmd.Execute(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
