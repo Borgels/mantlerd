@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	goruntime "runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -28,8 +29,10 @@ const (
 	vllmContainerName         = "clawcontrol-vllm"
 	vllmDefaultContainerImage = "nvcr.io/nvidia/vllm:26.02-py3"
 	vllmReadyTimeout          = 15 * time.Minute
+	vllmRapidFailureWindow    = 45 * time.Second
 	vllmStartupGraceWindow    = 20 * time.Minute
 	vllmRestartCooldown       = 90 * time.Second
+	nemotronSuper120BNVFP4    = "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4"
 )
 
 type vllmConfig struct {
@@ -144,25 +147,49 @@ func (d *vllmDriver) Uninstall() error {
 }
 
 func (d *vllmDriver) IsInstalled() bool {
+	hasServiceUnit := fileExists(vllmUnitPath)
+	hasConfig := fileExists(vllmConfigPath)
+	hasEnv := fileExists(vllmEnvPath)
 	if d.shouldUseContainer() {
-		return d.ensureDockerAvailable() == nil
+		return inferVLLMInstalled(false, hasServiceUnit, hasConfig, hasEnv)
 	}
-	if runCommand(vllmPythonPath, "-c", "import vllm") == nil {
-		return true
-	}
-	// Backward compatibility for legacy installs outside the managed venv.
-	return runCommand("python3", "-c", "import vllm") == nil
+	hasNativeImport := runCommand(vllmPythonPath, "-c", "import vllm") == nil ||
+		// Backward compatibility for legacy installs outside the managed venv.
+		runCommand("python3", "-c", "import vllm") == nil
+	return inferVLLMInstalled(hasNativeImport, hasServiceUnit, hasConfig, hasEnv)
 }
 
 func (d *vllmDriver) IsReady() bool {
 	if !d.IsInstalled() {
 		return false
 	}
+	if configuredModel, known := d.configuredModelState(); known {
+		if strings.TrimSpace(configuredModel) == "" {
+			// Installed runtime with no configured model is considered idle-ready.
+			_ = runCommand("systemctl", "stop", "vllm")
+			_ = runCommand("systemctl", "reset-failed", "vllm")
+			return true
+		}
+		if incompatibility := d.knownModelImageIncompatibility(configuredModel, d.effectiveContainerImage()); incompatibility != "" {
+			// Self-heal known terminal startup mismatch into idle-ready state.
+			d.disarmConfiguredModel()
+			d.stopVLLMServiceForKnownIncompatibility()
+			return true
+		}
+	}
+	if _, known := d.configuredModelState(); !known && d.serviceIsInactive() {
+		// Non-root CLI may not be able to read /etc/clawcontrol files; treat
+		// inactive service as idle-ready in that restricted visibility mode.
+		return true
+	}
 	_, err := d.fetchRemoteModels()
 	return err == nil
 }
 
 func (d *vllmDriver) Version() string {
+	if !d.IsInstalled() {
+		return ""
+	}
 	if d.shouldUseContainer() {
 		return "container:" + d.containerImage()
 	}
@@ -185,13 +212,20 @@ func (d *vllmDriver) Version() string {
 }
 
 func (d *vllmDriver) EnsureModelWithFlags(modelID string, _ *types.ModelFeatureFlags) error {
-	if strings.TrimSpace(modelID) == "" {
+	trimmedModel := strings.TrimSpace(modelID)
+	if trimmedModel == "" {
 		return fmt.Errorf("model ID is required")
 	}
-	if err := d.writeConfig(vllmConfig{Model: modelID, Port: 8000}); err != nil {
+	containerImage := d.effectiveContainerImage()
+	if incompatibility := d.knownModelImageIncompatibility(trimmedModel, containerImage); incompatibility != "" {
+		d.disarmConfiguredModel()
+		d.stopVLLMServiceForKnownIncompatibility()
+		return fmt.Errorf(incompatibility)
+	}
+	if err := d.writeConfig(vllmConfig{Model: trimmedModel, Port: 8000}); err != nil {
 		return err
 	}
-	return d.startOrRestartService(modelID, 8000, false)
+	return d.startOrRestartService(trimmedModel, 8000, false)
 }
 
 func (d *vllmDriver) ListModels() []string {
@@ -421,12 +455,29 @@ func (d *vllmDriver) benchmarkOnce(modelID string, prompt string, sampleOutputTo
 
 func (d *vllmDriver) RestartRuntime() error {
 	cfg, cfgErr := d.readConfig()
-	if cfgErr == nil && strings.TrimSpace(cfg.Model) != "" {
-		port := cfg.Port
-		if port <= 0 {
-			port = 8000
+	if cfgErr == nil {
+		if strings.TrimSpace(cfg.Model) != "" {
+			if incompatibility := d.knownModelImageIncompatibility(cfg.Model, d.effectiveContainerImage()); incompatibility != "" {
+				d.disarmConfiguredModel()
+				d.stopVLLMServiceForKnownIncompatibility()
+				_ = runCommand("systemctl", "reset-failed", "vllm")
+				return nil
+			}
+			port := cfg.Port
+			if port <= 0 {
+				port = 8000
+			}
+			return d.startOrRestartService(cfg.Model, port, true)
 		}
-		return d.startOrRestartService(cfg.Model, port, true)
+		// No configured model: keep runtime idle instead of crash-looping a blank service.
+		_ = runCommand("systemctl", "stop", "vllm")
+		_ = runCommand("systemctl", "reset-failed", "vllm")
+		return nil
+	}
+	if os.IsNotExist(cfgErr) {
+		_ = runCommand("systemctl", "stop", "vllm")
+		_ = runCommand("systemctl", "reset-failed", "vllm")
+		return nil
 	}
 	if err := runCommand("systemctl", "restart", "vllm"); err == nil {
 		return nil
@@ -441,6 +492,21 @@ func (d *vllmDriver) baseURL() string {
 		port = cfg.Port
 	}
 	return fmt.Sprintf("http://127.0.0.1:%d", port)
+}
+
+func (d *vllmDriver) configuredModelState() (string, bool) {
+	cfg, err := d.readConfig()
+	if err == nil {
+		return strings.TrimSpace(cfg.Model), true
+	}
+	values := d.readEnvConfigMap()
+	if envModel := strings.TrimSpace(values["VLLM_MODEL"]); envModel != "" {
+		return envModel, true
+	}
+	if os.IsNotExist(err) {
+		return "", true
+	}
+	return "", false
 }
 
 func (d *vllmDriver) ensureServiceUnit() error {
@@ -458,7 +524,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 EnvironmentFile=-` + vllmEnvPath + `
-ExecStart=/bin/sh -c 'LD_LIBRARY_PATH="${VLLM_LD_LIBRARY_PATH:-}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"; EXTRA_ARGS="${VLLM_EXTRA_ARGS:-}"; if [ "${VLLM_TRUST_REMOTE_CODE:-false}" = "true" ]; then EXTRA_ARGS="${EXTRA_ARGS} --trust-remote-code"; fi; exec ` + vllmPythonPath + ` -m vllm.entrypoints.openai.api_server --model "${VLLM_MODEL}" --host 0.0.0.0 --port "${VLLM_PORT:-8000}" --gpu-memory-utilization "${VLLM_GPU_MEMORY_UTILIZATION:-0.9}" ${EXTRA_ARGS}'
+ExecStart=/bin/sh -c 'LD_LIBRARY_PATH="${VLLM_LD_LIBRARY_PATH:-}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"; exec ` + vllmPythonPath + ` -m vllm.entrypoints.openai.api_server --model "${VLLM_MODEL}" --host 0.0.0.0 --port "${VLLM_PORT:-8000}" --gpu-memory-utilization "${VLLM_GPU_MEMORY_UTILIZATION:-0.9}" ${VLLM_EXTRA_ARGS:-}'
 Restart=always
 RestartSec=5
 User=root
@@ -476,7 +542,7 @@ Wants=network-online.target
 Type=simple
 EnvironmentFile=-` + vllmEnvPath + `
 ExecStartPre=-/bin/sh -c 'DOCKER_BIN="$(command -v docker)"; if [ -n "$DOCKER_BIN" ]; then "$DOCKER_BIN" rm -f ` + vllmContainerName + ` >/dev/null 2>&1 || true; fi'
-ExecStart=/bin/sh -c 'DOCKER_BIN="$(command -v docker)"; [ -n "$DOCKER_BIN" ] || exit 1; EXTRA_ARGS="${VLLM_EXTRA_ARGS:-}"; if [ "${VLLM_TRUST_REMOTE_CODE:-false}" = "true" ]; then EXTRA_ARGS="${EXTRA_ARGS} --trust-remote-code"; fi; exec "$DOCKER_BIN" run --rm --name ` + vllmContainerName + ` --gpus all --ipc=host --network host -e HF_TOKEN="${HF_TOKEN:-}" -e HUGGING_FACE_HUB_TOKEN="${HUGGING_FACE_HUB_TOKEN:-}" -e NVIDIA_VISIBLE_DEVICES=all -e NVIDIA_DRIVER_CAPABILITIES=compute,utility -v /root/.cache/huggingface:/root/.cache/huggingface "${VLLM_CONTAINER_IMAGE:-` + vllmDefaultContainerImage + `}" vllm serve "${VLLM_MODEL}" --host 0.0.0.0 --port "${VLLM_PORT:-8000}" --gpu-memory-utilization "${VLLM_GPU_MEMORY_UTILIZATION:-0.9}" ${EXTRA_ARGS}'
+ExecStart=/bin/sh -c 'DOCKER_BIN="$(command -v docker)"; [ -n "$DOCKER_BIN" ] || exit 1; exec "$DOCKER_BIN" run --rm --name ` + vllmContainerName + ` --gpus all --ipc=host --network host -e HF_TOKEN="${HF_TOKEN:-}" -e HUGGING_FACE_HUB_TOKEN="${HUGGING_FACE_HUB_TOKEN:-}" -e NVIDIA_VISIBLE_DEVICES=all -e NVIDIA_DRIVER_CAPABILITIES=compute,utility -v /root/.cache/huggingface:/root/.cache/huggingface "${VLLM_CONTAINER_IMAGE:-` + vllmDefaultContainerImage + `}" vllm serve "${VLLM_MODEL}" --host 0.0.0.0 --port "${VLLM_PORT:-8000}" --gpu-memory-utilization "${VLLM_GPU_MEMORY_UTILIZATION:-0.9}" ${VLLM_EXTRA_ARGS:-}'
 ExecStop=-/bin/sh -c 'DOCKER_BIN="$(command -v docker)"; if [ -n "$DOCKER_BIN" ]; then "$DOCKER_BIN" stop ` + vllmContainerName + ` >/dev/null 2>&1 || true; fi'
 Restart=always
 RestartSec=5
@@ -555,12 +621,25 @@ func (d *vllmDriver) startOrRestartService(modelID string, port int, force bool)
 		hfToken = hfHubToken
 	}
 	extraArgs := strings.TrimSpace(existingEnv["VLLM_EXTRA_ARGS"])
+	if strings.EqualFold(strings.TrimSpace(trustRemoteCode), "true") &&
+		!strings.Contains(strings.ToLower(extraArgs), "--trust-remote-code") {
+		if extraArgs == "" {
+			extraArgs = "--trust-remote-code"
+		} else {
+			extraArgs = strings.TrimSpace(extraArgs + " --trust-remote-code")
+		}
+	}
 	if existingLibrary := strings.TrimSpace(existingEnv["VLLM_LD_LIBRARY_PATH"]); existingLibrary != "" {
 		libraryPath = existingLibrary
 	}
 	containerImage := strings.TrimSpace(existingEnv["VLLM_CONTAINER_IMAGE"])
 	if containerImage == "" {
 		containerImage = d.containerImage()
+	}
+	if incompatibility := d.knownModelImageIncompatibility(safeModelID, containerImage); incompatibility != "" {
+		d.disarmConfiguredModel()
+		d.stopVLLMServiceForKnownIncompatibility()
+		return fmt.Errorf(incompatibility)
 	}
 	if d.shouldUseContainer() {
 		// Runtime control actions should not force image upgrades implicitly.
@@ -613,7 +692,7 @@ func (d *vllmDriver) startOrRestartService(modelID string, port int, force bool)
 	if err := runCommand("systemctl", "restart", "vllm"); err != nil {
 		return err
 	}
-	if err := d.waitForAPIReady(vllmReadyTimeout); err != nil {
+	if err := d.waitForAPIReady(vllmRapidFailureWindow); err != nil {
 		diagnostics := d.vllmDiagnosticsTail()
 		if d.shouldAutoEnableTrustRemoteCode(diagnostics) {
 			if trustErr := d.enableTrustRemoteCodeInEnv(); trustErr == nil {
@@ -622,8 +701,27 @@ func (d *vllmDriver) startOrRestartService(modelID string, port int, force bool)
 						return nil
 					}
 					diagnostics = d.vllmDiagnosticsTail()
+				} else {
+					diagnostics = strings.TrimSpace(strings.Join([]string{
+						diagnostics,
+						"trust-remote-code auto-restart failed: " + restartErr.Error(),
+					}, " | "))
 				}
+			} else {
+				diagnostics = strings.TrimSpace(strings.Join([]string{
+					diagnostics,
+					"failed to persist VLLM_TRUST_REMOTE_CODE=true: " + trustErr.Error(),
+				}, " | "))
 			}
+		} else {
+			remaining := vllmReadyTimeout - vllmRapidFailureWindow
+			if remaining < 10*time.Second {
+				remaining = 10 * time.Second
+			}
+			if readyErr := d.waitForAPIReady(remaining); readyErr == nil {
+				return nil
+			}
+			diagnostics = d.vllmDiagnosticsTail()
 		}
 		if hint := d.classifyKnownStartupFailure(diagnostics); hint != "" {
 			return fmt.Errorf("vllm service restarted but API not reachable yet: %w; %s; %s", err, diagnostics, hint)
@@ -643,19 +741,117 @@ func (d *vllmDriver) startOrRestartService(modelID string, port int, force bool)
 	return nil
 }
 
+func (d *vllmDriver) effectiveContainerImage() string {
+	existingEnv := d.readEnvConfigMap()
+	containerImage := strings.TrimSpace(existingEnv["VLLM_CONTAINER_IMAGE"])
+	if containerImage == "" {
+		containerImage = d.containerImage()
+	}
+	return containerImage
+}
+
+func (d *vllmDriver) knownModelImageIncompatibility(modelID string, containerImage string) string {
+	trimmedModel := strings.TrimSpace(modelID)
+	trimmedImage := strings.TrimSpace(containerImage)
+	if strings.EqualFold(trimmedModel, nemotronSuper120BNVFP4) &&
+		strings.EqualFold(trimmedImage, vllmDefaultContainerImage) {
+		return "known incompatibility: nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4 cannot start on nvcr.io/nvidia/vllm:26.02-py3 (vLLM 0.15.1, ModelOpt MIXED_PRECISION unsupported); use a newer compatible vLLM container or select another model"
+	}
+	return ""
+}
+
+func (d *vllmDriver) stopVLLMServiceForKnownIncompatibility() {
+	if err := runCommand("systemctl", "stop", "vllm"); err != nil {
+		return
+	}
+	_ = runCommand("systemctl", "reset-failed", "vllm")
+}
+
+func (d *vllmDriver) serviceIsInactive() bool {
+	out, err := exec.Command("systemctl", "is-active", "vllm").CombinedOutput()
+	if err != nil && len(out) == 0 {
+		return false
+	}
+	return strings.TrimSpace(string(out)) == "inactive"
+}
+
+func (d *vllmDriver) disarmConfiguredModel() {
+	port := 8000
+	if cfg, err := d.readConfig(); err == nil && cfg.Port > 0 {
+		port = cfg.Port
+	}
+	values := d.readEnvConfigMap()
+	if envPort := strings.TrimSpace(values["VLLM_PORT"]); envPort != "" {
+		if parsedPort, convErr := strconv.Atoi(envPort); convErr == nil && parsedPort > 0 {
+			port = parsedPort
+		}
+	}
+	if port <= 0 {
+		port = 8000
+	}
+	_ = d.writeConfig(vllmConfig{Port: port})
+
+	// Clear model from env as well; service ExecStart reads VLLM_MODEL here.
+	delete(values, "VLLM_MODEL")
+	if _, ok := values["VLLM_PORT"]; !ok {
+		values["VLLM_PORT"] = fmt.Sprintf("%d", port)
+	}
+	order := []string{
+		"VLLM_MODEL",
+		"VLLM_PORT",
+		"VLLM_GPU_MEMORY_UTILIZATION",
+		"VLLM_TRUST_REMOTE_CODE",
+		"VLLM_EXTRA_ARGS",
+		"VLLM_RUNTIME_MODE",
+		"HF_TOKEN",
+		"HUGGING_FACE_HUB_TOKEN",
+		"VLLM_CONTAINER_IMAGE",
+		"VLLM_LD_LIBRARY_PATH",
+	}
+	lines := make([]string, 0, len(values))
+	seen := map[string]struct{}{}
+	for _, key := range order {
+		if value, ok := values[key]; ok {
+			lines = append(lines, fmt.Sprintf("%s=%q", key, value))
+			seen[key] = struct{}{}
+		}
+	}
+	for key, value := range values {
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		lines = append(lines, fmt.Sprintf("%s=%q", key, value))
+	}
+	payload := strings.Join(lines, "\n")
+	if payload != "" {
+		payload += "\n"
+	}
+	_ = os.WriteFile(vllmEnvPath, []byte(payload), 0o600)
+}
+
 func (d *vllmDriver) shouldAutoEnableTrustRemoteCode(diagnostics string) bool {
 	text := strings.ToLower(diagnostics)
+	if strings.Contains(text, "modelopt currently only supports") {
+		return false
+	}
 	return strings.Contains(text, "trust_remote_code") ||
 		strings.Contains(text, "trust-remote-code") ||
-		strings.Contains(text, "please pass the argument `trust_remote_code=true`")
+		strings.Contains(text, "please pass the argument `trust_remote_code=true`") ||
+		strings.Contains(text, "contains custom code which must be executed") ||
+		strings.Contains(text, "allow custom code to be run")
 }
 
 func (d *vllmDriver) enableTrustRemoteCodeInEnv() error {
 	values := d.readEnvConfigMap()
-	if strings.EqualFold(strings.TrimSpace(values["VLLM_TRUST_REMOTE_CODE"]), "true") {
-		return nil
-	}
 	values["VLLM_TRUST_REMOTE_CODE"] = "true"
+	extraArgs := strings.TrimSpace(values["VLLM_EXTRA_ARGS"])
+	if !strings.Contains(strings.ToLower(extraArgs), "--trust-remote-code") {
+		if extraArgs == "" {
+			values["VLLM_EXTRA_ARGS"] = "--trust-remote-code"
+		} else {
+			values["VLLM_EXTRA_ARGS"] = strings.TrimSpace(extraArgs + " --trust-remote-code")
+		}
+	}
 
 	order := []string{
 		"VLLM_MODEL",
@@ -825,7 +1021,7 @@ func (d *vllmDriver) systemdUnitStatusTail() string {
 }
 
 func (d *vllmDriver) systemdUnitJournalTail() string {
-	out, err := exec.Command("journalctl", "-u", "vllm", "-n", "25", "--no-pager").CombinedOutput()
+	out, err := exec.Command("journalctl", "-u", "vllm", "-n", "120", "--no-pager").CombinedOutput()
 	if err != nil && len(out) == 0 {
 		return ""
 	}
@@ -834,8 +1030,8 @@ func (d *vllmDriver) systemdUnitJournalTail() string {
 		return ""
 	}
 	lines := strings.Split(trimmed, "\n")
-	if len(lines) > 12 {
-		lines = lines[len(lines)-12:]
+	if len(lines) > 40 {
+		lines = lines[len(lines)-40:]
 	}
 	return strings.Join(lines, " | ")
 }
@@ -1027,6 +1223,22 @@ func (d *vllmDriver) shouldUseContainer() bool {
 	return d.runtimeMode() == "container"
 }
 
+func inferVLLMInstalled(hasNativeImport bool, hasServiceUnit bool, hasConfig bool, hasEnv bool) bool {
+	if hasNativeImport {
+		return true
+	}
+	// Managed installs should leave one or more local artifacts behind.
+	return hasServiceUnit || hasConfig || hasEnv
+}
+
+func fileExists(path string) bool {
+	if strings.TrimSpace(path) == "" {
+		return false
+	}
+	_, err := os.Stat(path)
+	return err == nil
+}
+
 func (d *vllmDriver) containerImage() string {
 	image := strings.TrimSpace(os.Getenv("VLLM_CONTAINER_IMAGE"))
 	if image == "" {
@@ -1058,6 +1270,10 @@ func (d *vllmDriver) classifyKnownStartupFailure(diagnostics string) string {
 		return "hint: torch/vllm ABI mismatch detected; reinstall matching torch and vllm versions from the same CUDA wheel family"
 	case strings.Contains(text, "modelopt currently only supports") && strings.Contains(text, "mixed_precision"):
 		return "hint: this model uses ModelOpt MIXED_PRECISION not supported by current vLLM build; upgrade vLLM container/wheel variant"
+	case strings.Contains(text, "modelopt currently only supports"):
+		return "hint: this model's ModelOpt quantization format is incompatible with nvcr.io/nvidia/vllm:26.02-py3 (vLLM 0.15.1); use a container build that includes mixed-precision ModelOpt support or select a compatible model"
+	case strings.Contains(text, "trust_remote_code") || strings.Contains(text, "trust-remote-code"):
+		return "hint: this model requires remote code; set VLLM_TRUST_REMOTE_CODE=true (or CLAWCONTROL_VLLM_TRUST_REMOTE_CODE=true at install time)"
 	default:
 		return ""
 	}
