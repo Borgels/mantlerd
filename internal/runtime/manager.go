@@ -44,6 +44,20 @@ func (m *Manager) InstalledRuntimes() []string {
 	return runtimes
 }
 
+func (m *Manager) ReadyRuntimes() []string {
+	runtimes := make([]string, 0, len(m.drivers))
+	for name, driver := range m.drivers {
+		if !driver.IsInstalled() {
+			continue
+		}
+		if driver.IsReady() {
+			runtimes = append(runtimes, name)
+		}
+	}
+	sort.Strings(runtimes)
+	return runtimes
+}
+
 func (m *Manager) RuntimeVersion(runtimeName string) string {
 	driver, err := m.driverFor(runtimeName)
 	if err != nil {
@@ -83,13 +97,27 @@ func (m *Manager) IsRuntimeInstalled(runtimeName string) bool {
 	return driver.IsInstalled()
 }
 
+func (m *Manager) IsRuntimeReady(runtimeName string) bool {
+	driver, err := m.driverFor(runtimeName)
+	if err != nil {
+		return false
+	}
+	if !driver.IsInstalled() {
+		return false
+	}
+	return driver.IsReady()
+}
+
 func (m *Manager) EnsureRuntime(runtimeName string) error {
 	driver, err := m.driverFor(runtimeName)
 	if err != nil {
 		return err
 	}
 	if driver.IsInstalled() {
-		return nil
+		if driver.IsReady() {
+			return nil
+		}
+		return driver.RestartRuntime()
 	}
 	return driver.Install()
 }
@@ -250,12 +278,14 @@ func (m *Manager) RestartRuntimeNamed(runtimeName string) error {
 	if normalizedRuntime == "" {
 		return fmt.Errorf("runtime name is required")
 	}
-	if err := m.EnsureRuntime(normalizedRuntime); err != nil {
-		return fmt.Errorf("ensure runtime %s: %w", normalizedRuntime, err)
-	}
 	driver, err := m.driverFor(normalizedRuntime)
 	if err != nil {
 		return err
+	}
+	if !driver.IsInstalled() {
+		if err := driver.Install(); err != nil {
+			return fmt.Errorf("ensure runtime %s: %w", normalizedRuntime, err)
+		}
 	}
 	return driver.RestartRuntime()
 }

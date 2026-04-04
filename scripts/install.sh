@@ -24,6 +24,7 @@ OLLAMA_CONFIGURE_REMOTE="${CLAWCONTROL_OLLAMA_CONFIGURE_REMOTE:-true}"
 OLLAMA_HOST="${CLAWCONTROL_OLLAMA_HOST:-0.0.0.0:11434}"
 VLLM_CONFIGURE="${CLAWCONTROL_VLLM_CONFIGURE:-true}"
 VLLM_PREINSTALL="${CLAWCONTROL_VLLM_PREINSTALL:-true}"
+VLLM_RUNTIME_MODE="${CLAWCONTROL_VLLM_RUNTIME_MODE:-auto}"
 VLLM_PORT="${CLAWCONTROL_VLLM_PORT:-8000}"
 VLLM_GPU_MEMORY_UTILIZATION="${CLAWCONTROL_VLLM_GPU_MEMORY_UTILIZATION:-0.9}"
 VLLM_TRUST_REMOTE_CODE="${CLAWCONTROL_VLLM_TRUST_REMOTE_CODE:-false}"
@@ -52,6 +53,7 @@ Environment overrides:
   CLAWCONTROL_OLLAMA_HOST        Ollama bind host:port (default: 0.0.0.0:11434)
   CLAWCONTROL_VLLM_CONFIGURE     true|false (default: true)
   CLAWCONTROL_VLLM_PREINSTALL    true|false (default: true)
+  CLAWCONTROL_VLLM_RUNTIME_MODE  auto|container|native (default: auto)
   CLAWCONTROL_VLLM_PORT          vLLM OpenAI API port (default: 8000)
   CLAWCONTROL_VLLM_GPU_MEMORY_UTILIZATION GPU memory utilization fraction (default: 0.9)
   CLAWCONTROL_VLLM_TRUST_REMOTE_CODE true|false (default: false)
@@ -164,6 +166,14 @@ case "$VLLM_PREINSTALL" in
     ;;
   *)
     fatal "CLAWCONTROL_VLLM_PREINSTALL must be true or false"
+    ;;
+esac
+
+case "$VLLM_RUNTIME_MODE" in
+  auto|native|container)
+    ;;
+  *)
+    fatal "CLAWCONTROL_VLLM_RUNTIME_MODE must be auto, native, or container"
     ;;
 esac
 
@@ -364,6 +374,7 @@ VLLM_GPU_MEMORY_UTILIZATION=${VLLM_GPU_MEMORY_UTILIZATION}
 VLLM_LD_LIBRARY_PATH=
 VLLM_TRUST_REMOTE_CODE=${VLLM_TRUST_REMOTE_CODE}
 VLLM_EXTRA_ARGS="${VLLM_EXTRA_ARGS}"
+VLLM_RUNTIME_MODE=${VLLM_RUNTIME_MODE}
 EOF"
     $SUDO chmod 600 "$VLLM_ENV_PATH"
 
@@ -388,7 +399,16 @@ EOF"
     $SUDO systemctl daemon-reload
     $SUDO systemctl enable vllm >/dev/null || true
 
-    if [ "$VLLM_PREINSTALL" = "true" ]; then
+    VLLM_EFFECTIVE_MODE="$VLLM_RUNTIME_MODE"
+    if [ "$VLLM_EFFECTIVE_MODE" = "auto" ]; then
+      if command -v docker >/dev/null 2>&1; then
+        VLLM_EFFECTIVE_MODE="container"
+      else
+        VLLM_EFFECTIVE_MODE="native"
+      fi
+    fi
+
+    if [ "$VLLM_PREINSTALL" = "true" ] && [ "$VLLM_EFFECTIVE_MODE" != "container" ]; then
       log "Preinstalling vLLM in dedicated virtualenv (${VLLM_VENV_PATH})"
       if ! command -v python3 >/dev/null 2>&1; then
         log "vLLM preinstall warning: python3 not found. Runtime install command will retry later."
@@ -426,7 +446,7 @@ EOF"
         fi
       fi
     else
-      log "Skipping vLLM package preinstall (CLAWCONTROL_VLLM_PREINSTALL=${VLLM_PREINSTALL})."
+      log "Skipping vLLM package preinstall (CLAWCONTROL_VLLM_PREINSTALL=${VLLM_PREINSTALL}, mode=${VLLM_EFFECTIVE_MODE})."
     fi
 
     log "vLLM service template installed. It will be started when a model is configured."

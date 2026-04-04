@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -18,7 +20,8 @@ import (
 	"github.com/Borgels/clawcontrol-agent/internal/types"
 )
 
-var agentVersion = "0.1.9"
+var agentVersion = "0.1.10"
+const desiredConfigCachePath = "/etc/clawcontrol/desired-config.json"
 
 func main() {
 	cfgPath := flag.String("config", config.DefaultConfigPath(), "Path to config file")
@@ -88,15 +91,24 @@ func main() {
 	defer cancel()
 
 	runOnce := func() {
+		cachedDesired := loadCachedDesiredConfig()
+
 		report := discovery.Collect()
-		installedRuntimeTypes := toRuntimeTypes(runtimeManager.InstalledRuntimes())
+		installedRuntimeNames := runtimeManager.InstalledRuntimes()
+		installedRuntimeTypes := toRuntimeTypes(installedRuntimeNames)
+		readyRuntimeNames := runtimeManager.ReadyRuntimes()
 		runtimeStatus := types.RuntimeNotInstalled
 		runtimeType := types.RuntimeType("")
 		runtimeVersion := ""
-		if len(installedRuntimeTypes) > 0 {
+		if len(installedRuntimeNames) > 0 {
+			runtimeStatus = types.RuntimeFailed
+			runtimeType = types.RuntimeType(installedRuntimeNames[0])
+			runtimeVersion = runtimeManager.RuntimeVersion(installedRuntimeNames[0])
+		}
+		if len(readyRuntimeNames) > 0 {
 			runtimeStatus = types.RuntimeReady
-			runtimeType = installedRuntimeTypes[0]
-			runtimeVersion = runtimeManager.RuntimeVersion(string(runtimeType))
+			runtimeType = types.RuntimeType(readyRuntimeNames[0])
+			runtimeVersion = runtimeManager.RuntimeVersion(readyRuntimeNames[0])
 		}
 		payload := types.CheckinRequest{
 			MachineID:             cfg.MachineID,
@@ -117,30 +129,14 @@ func main() {
 		})
 		if err != nil {
 			log.Printf("checkin error: %v", err)
+			enforceDesiredConfig(runtimeManager, cachedDesired)
 			return
 		}
 
-		for _, runtimeType := range resp.DesiredConfig.Runtimes {
-			if err := runtimeManager.EnsureRuntime(string(runtimeType)); err != nil {
-				log.Printf("failed to ensure runtime %s: %v", runtimeType, err)
-			}
+		if err := saveCachedDesiredConfig(resp.DesiredConfig); err != nil {
+			log.Printf("failed to persist desired config cache: %v", err)
 		}
-		modelsHandled := map[string]bool{}
-		for _, target := range resp.DesiredConfig.ModelTargets {
-			modelsHandled[target.ModelID] = true
-			flags := target.FeatureFlags
-			if err := runtimeManager.EnsureModelWithRuntime(target.ModelID, string(target.Runtime), &flags); err != nil {
-				log.Printf("failed to ensure model target %s: %v", target.ModelID, err)
-			}
-		}
-		for _, modelID := range resp.DesiredConfig.Models {
-			if modelsHandled[modelID] {
-				continue
-			}
-			if err := runtimeManager.EnsureModelWithFlags(modelID, nil); err != nil {
-				log.Printf("failed to ensure model %s: %v", modelID, err)
-			}
-		}
+		enforceDesiredConfig(runtimeManager, resp.DesiredConfig)
 
 		for _, command := range resp.Commands {
 			details, err := executor.Execute(command)
@@ -180,6 +176,55 @@ func main() {
 			runOnce()
 		}
 	}
+}
+
+func enforceDesiredConfig(runtimeManager *runtime.Manager, desired types.DesiredConfig) {
+	for _, runtimeType := range desired.Runtimes {
+		if err := runtimeManager.EnsureRuntime(string(runtimeType)); err != nil {
+			log.Printf("failed to ensure runtime %s: %v", runtimeType, err)
+		}
+	}
+
+	modelsHandled := map[string]bool{}
+	for _, target := range desired.ModelTargets {
+		modelsHandled[target.ModelID] = true
+		flags := target.FeatureFlags
+		if err := runtimeManager.EnsureModelWithRuntime(target.ModelID, string(target.Runtime), &flags); err != nil {
+			log.Printf("failed to ensure model target %s: %v", target.ModelID, err)
+		}
+	}
+	for _, modelID := range desired.Models {
+		if modelsHandled[modelID] {
+			continue
+		}
+		if err := runtimeManager.EnsureModelWithFlags(modelID, nil); err != nil {
+			log.Printf("failed to ensure model %s: %v", modelID, err)
+		}
+	}
+}
+
+func loadCachedDesiredConfig() types.DesiredConfig {
+	raw, err := os.ReadFile(desiredConfigCachePath)
+	if err != nil {
+		return types.DesiredConfig{}
+	}
+	var desired types.DesiredConfig
+	if err := json.Unmarshal(raw, &desired); err != nil {
+		log.Printf("failed to parse desired config cache: %v", err)
+		return types.DesiredConfig{}
+	}
+	return desired
+}
+
+func saveCachedDesiredConfig(desired types.DesiredConfig) error {
+	if err := os.MkdirAll(filepath.Dir(desiredConfigCachePath), 0o755); err != nil {
+		return err
+	}
+	payload, err := json.MarshalIndent(desired, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(desiredConfigCachePath, append(payload, '\n'), 0o600)
 }
 
 func toRuntimeTypes(values []string) []types.RuntimeType {

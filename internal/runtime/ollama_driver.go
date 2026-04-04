@@ -34,6 +34,22 @@ func (d *ollamaDriver) IsInstalled() bool {
 	return runCommand("sh", "-c", "command -v ollama") == nil
 }
 
+func (d *ollamaDriver) IsReady() bool {
+	if !d.IsInstalled() {
+		return false
+	}
+	req, err := http.NewRequest(http.MethodGet, d.baseURL()+"/api/tags", nil)
+	if err != nil {
+		return false
+	}
+	resp, err := (&http.Client{Timeout: 3 * time.Second}).Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode >= 200 && resp.StatusCode < 300
+}
+
 func (d *ollamaDriver) Version() string {
 	cmd := exec.Command("ollama", "--version")
 	output, err := cmd.Output()

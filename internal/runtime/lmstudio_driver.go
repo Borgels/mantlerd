@@ -63,6 +63,24 @@ func (d *lmstudioDriver) IsInstalled() bool {
 	return strings.TrimSpace(d.resolveLMSPath()) != ""
 }
 
+func (d *lmstudioDriver) IsReady() bool {
+	path := d.resolveLMSPath()
+	if path == "" {
+		return false
+	}
+	if _, err := exec.LookPath("systemctl"); err == nil {
+		active, activeErr := isSystemdServiceActive("lmstudio")
+		if activeErr == nil && !active {
+			return false
+		}
+	}
+	if running, known := d.daemonRunning(path); known && !running {
+		return false
+	}
+	_, err := d.fetchRemoteModels()
+	return err == nil
+}
+
 func (d *lmstudioDriver) Version() string {
 	path := d.resolveLMSPath()
 	if path == "" {
@@ -86,6 +104,41 @@ func (d *lmstudioDriver) Version() string {
 		return ""
 	}
 	return strings.TrimSpace(string(output))
+}
+
+func (d *lmstudioDriver) daemonRunning(path string) (bool, bool) {
+	cmd := exec.Command(path, "daemon", "status", "--json", "--quiet")
+	cmd.Env = d.envForPath(path)
+	output, err := cmd.Output()
+	if err != nil {
+		return false, false
+	}
+	var payload struct {
+		Running *bool  `json:"running"`
+		Status  string `json:"status"`
+		State   string `json:"state"`
+	}
+	if err := json.Unmarshal(output, &payload); err != nil {
+		return false, false
+	}
+	if payload.Running != nil {
+		return *payload.Running, true
+	}
+	state := strings.ToLower(strings.TrimSpace(payload.State))
+	if state == "" {
+		state = strings.ToLower(strings.TrimSpace(payload.Status))
+	}
+	if state == "" {
+		return false, false
+	}
+	switch state {
+	case "running", "active", "up":
+		return true, true
+	case "stopped", "inactive", "down":
+		return false, true
+	default:
+		return false, false
+	}
 }
 
 func (d *lmstudioDriver) EnsureModelWithFlags(modelID string, _ *types.ModelFeatureFlags) error {
