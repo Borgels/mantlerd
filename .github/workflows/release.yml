@@ -31,11 +31,29 @@ jobs:
         id: version
         run: |
           if [ -n "${{ github.event.inputs.version }}" ]; then
+            case "${{ github.event.inputs.version }}" in
+              v*) ;;
+              *)
+                echo "Version input must start with 'v' (example: v0.1.18)" >&2
+                exit 1
+                ;;
+            esac
             echo "value=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
           elif [ "${{ github.ref_type }}" = "tag" ]; then
             echo "value=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
           else
             echo "value=dev-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Resolve release tag
+        id: release_tag
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            echo "value=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          elif [ -n "${{ github.event.inputs.version }}" ]; then
+            echo "value=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=manual-${{ github.run_number }}" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Build release assets
@@ -46,7 +64,7 @@ jobs:
       - name: Upload release assets
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || format('manual-{0}', github.run_number) }}
+          tag_name: ${{ steps.release_tag.outputs.value }}
           name: ${{ steps.version.outputs.value }}
           files: |
             dist/clawcontrol-agent-linux-amd64
