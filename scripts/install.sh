@@ -29,6 +29,8 @@ VLLM_PORT="${CLAWCONTROL_VLLM_PORT:-8000}"
 VLLM_GPU_MEMORY_UTILIZATION="${CLAWCONTROL_VLLM_GPU_MEMORY_UTILIZATION:-0.9}"
 VLLM_TRUST_REMOTE_CODE="${CLAWCONTROL_VLLM_TRUST_REMOTE_CODE:-false}"
 VLLM_EXTRA_ARGS="${CLAWCONTROL_VLLM_EXTRA_ARGS:-}"
+VLLM_HF_TOKEN="${CLAWCONTROL_HF_TOKEN:-${HF_TOKEN:-}}"
+VLLM_HF_HUB_TOKEN="${CLAWCONTROL_HUGGING_FACE_HUB_TOKEN:-${HUGGING_FACE_HUB_TOKEN:-}}"
 SELF_UPDATE_MODE="${CLAWCONTROL_AGENT_SELF_UPDATE:-false}"
 
 TOKEN=""
@@ -58,6 +60,8 @@ Environment overrides:
   CLAWCONTROL_VLLM_GPU_MEMORY_UTILIZATION GPU memory utilization fraction (default: 0.9)
   CLAWCONTROL_VLLM_TRUST_REMOTE_CODE true|false (default: false)
   CLAWCONTROL_VLLM_EXTRA_ARGS    extra CLI args appended to vLLM serve
+  CLAWCONTROL_HF_TOKEN           optional Hugging Face token persisted for vLLM model pulls
+  CLAWCONTROL_HUGGING_FACE_HUB_TOKEN optional Hugging Face Hub token persisted for vLLM model pulls
 EOF
 }
 
@@ -376,6 +380,14 @@ VLLM_TRUST_REMOTE_CODE=${VLLM_TRUST_REMOTE_CODE}
 VLLM_EXTRA_ARGS="${VLLM_EXTRA_ARGS}"
 VLLM_RUNTIME_MODE=${VLLM_RUNTIME_MODE}
 EOF"
+    if [ -n "$VLLM_HF_TOKEN" ]; then
+      VLLM_ESCAPED_HF_TOKEN="$(printf '%s' "$VLLM_HF_TOKEN" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+      $SUDO sh -c "printf '%s\n' \"HF_TOKEN=\\\"${VLLM_ESCAPED_HF_TOKEN}\\\"\" >> \"$VLLM_ENV_PATH\""
+    fi
+    if [ -n "$VLLM_HF_HUB_TOKEN" ]; then
+      VLLM_ESCAPED_HF_HUB_TOKEN="$(printf '%s' "$VLLM_HF_HUB_TOKEN" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+      $SUDO sh -c "printf '%s\n' \"HUGGING_FACE_HUB_TOKEN=\\\"${VLLM_ESCAPED_HF_HUB_TOKEN}\\\"\" >> \"$VLLM_ENV_PATH\""
+    fi
     $SUDO chmod 600 "$VLLM_ENV_PATH"
 
     $SUDO sh -c "cat > \"$VLLM_UNIT_PATH\" <<EOF
