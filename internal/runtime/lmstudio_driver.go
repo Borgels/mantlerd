@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -52,8 +53,13 @@ func (d *lmstudioDriver) Install() error {
 	}
 	cfg, err := d.readConfig()
 	if err == nil && strings.TrimSpace(cfg.Model) != "" {
-		if err := d.loadModel(cfg.Model); err != nil {
+		resolvedModelID, err := d.loadModel(cfg.Model)
+		if err != nil {
 			return fmt.Errorf("load configured lmstudio model %q: %w", cfg.Model, err)
+		}
+		if resolvedModelID != "" && resolvedModelID != cfg.Model {
+			cfg.Model = resolvedModelID
+			_ = d.writeConfig(cfg)
 		}
 	}
 	return nil
@@ -149,11 +155,12 @@ func (d *lmstudioDriver) EnsureModelWithFlags(modelID string, _ *types.ModelFeat
 	if err := d.Install(); err != nil {
 		return err
 	}
-	if err := d.loadModel(modelID); err != nil {
+	resolvedModelID, err := d.loadModel(modelID)
+	if err != nil {
 		return err
 	}
 	cfg, _ := d.readConfig()
-	cfg.Model = modelID
+	cfg.Model = resolvedModelID
 	if cfg.Port <= 0 {
 		cfg.Port = lmsDefaultPort
 	}
@@ -395,33 +402,79 @@ func (d *lmstudioDriver) benchmarkOnce(modelID string, prompt string, sampleOutp
 	}, nil
 }
 
-func (d *lmstudioDriver) loadModel(modelID string) error {
+func (d *lmstudioDriver) loadModel(modelID string) (string, error) {
 	path := d.resolveLMSPath()
 	if path == "" {
-		return fmt.Errorf("lmstudio cli not installed")
+		return "", fmt.Errorf("lmstudio cli not installed")
 	}
-	loadCmd := exec.Command(path, "load", modelID)
-	loadCmd.Env = d.envForPath(path)
-	if output, err := loadCmd.CombinedOutput(); err != nil {
-		getCmd := exec.Command(path, "get", modelID)
+	candidates := []string{modelID}
+	if normalized := normalizeLMStudioModelID(modelID); normalized != modelID {
+		candidates = []string{normalized, modelID}
+	}
+	var lastErr error
+	for _, candidate := range candidates {
+		loadCmd := exec.Command(path, "load", candidate)
+		loadCmd.Env = d.envForPath(path)
+		output, err := loadCmd.CombinedOutput()
+		if err == nil {
+			return candidate, nil
+		}
+		outText := strings.TrimSpace(string(output))
+		if shouldAvoidInteractiveLMStudioGet(outText) {
+			lastErr = fmt.Errorf("load lmstudio model %q failed: %w (%s)", candidate, err, outText)
+			continue
+		}
+
+		getCmd := exec.Command(path, "get", candidate)
 		getCmd.Env = d.envForPath(path)
 		if getOut, getErr := getCmd.CombinedOutput(); getErr != nil {
-			return fmt.Errorf(
+			lastErr = fmt.Errorf(
 				"load lmstudio model %q failed: %w (%s); download attempt failed: %w (%s)",
-				modelID,
+				candidate,
 				err,
-				strings.TrimSpace(string(output)),
+				outText,
 				getErr,
 				strings.TrimSpace(string(getOut)),
 			)
+			continue
 		}
-		retryCmd := exec.Command(path, "load", modelID)
+		retryCmd := exec.Command(path, "load", candidate)
 		retryCmd.Env = d.envForPath(path)
 		if retryOut, retryErr := retryCmd.CombinedOutput(); retryErr != nil {
-			return fmt.Errorf("load lmstudio model %q after download: %w (%s)", modelID, retryErr, strings.TrimSpace(string(retryOut)))
+			lastErr = fmt.Errorf("load lmstudio model %q after download: %w (%s)", candidate, retryErr, strings.TrimSpace(string(retryOut)))
+			continue
+		}
+		return candidate, nil
+	}
+	if lastErr != nil {
+		return "", lastErr
+	}
+	return "", fmt.Errorf("failed to load lmstudio model %q", modelID)
+}
+
+var lmstudioNumericSuffixPattern = regexp.MustCompile(`^(.*):[0-9]+$`)
+
+func normalizeLMStudioModelID(modelID string) string {
+	modelID = strings.TrimSpace(modelID)
+	matches := lmstudioNumericSuffixPattern.FindStringSubmatch(modelID)
+	if len(matches) == 2 {
+		trimmed := strings.TrimSpace(matches[1])
+		if trimmed != "" {
+			return trimmed
 		}
 	}
-	return nil
+	return modelID
+}
+
+func shouldAvoidInteractiveLMStudioGet(output string) bool {
+	text := strings.ToLower(strings.TrimSpace(output))
+	if text == "" {
+		return false
+	}
+	return strings.Contains(text, "enotty") ||
+		strings.Contains(text, "not a typewriter") ||
+		strings.Contains(text, "please select one from the list below") ||
+		strings.Contains(text, "cannot find a model matching the provided model key")
 }
 
 func (d *lmstudioDriver) baseURL() string {
@@ -496,7 +549,7 @@ func (d *lmstudioDriver) startOrRestartService() error {
 	if cfgErr == nil && cfg.Port > 0 {
 		port = cfg.Port
 	}
-	isExternal, err := d.isListeningOnNonLoopback(port)
+	isExternal, err := isServiceListeningOnNonLoopback(port)
 	if err != nil {
 		return err
 	}
@@ -533,43 +586,6 @@ func (d *lmstudioDriver) waitForAPIReady(timeout time.Duration) error {
 		lastErr = "timed out waiting for /v1/models"
 	}
 	return fmt.Errorf("lmstudio api not ready: %s", lastErr)
-}
-
-func (d *lmstudioDriver) isListeningOnNonLoopback(port int) (bool, error) {
-	cmd := exec.Command("sh", "-c", fmt.Sprintf("ss -ltnH '( sport = :%d )' || true", port))
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return false, fmt.Errorf("check lmstudio listen sockets: %w (%s)", err, strings.TrimSpace(string(output)))
-	}
-	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
-	seenAny := false
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		fields := strings.Fields(line)
-		if len(fields) < 4 {
-			continue
-		}
-		localAddr := fields[3]
-		if localAddr == "" {
-			continue
-		}
-		seenAny = true
-		if !isLoopbackSocket(localAddr) {
-			return true, nil
-		}
-	}
-	if !seenAny {
-		return false, nil
-	}
-	return false, nil
-}
-
-func isLoopbackSocket(value string) bool {
-	value = strings.TrimSpace(value)
-	return strings.HasPrefix(value, "127.0.0.1:") || strings.HasPrefix(value, "[::1]:")
 }
 
 func (d *lmstudioDriver) fetchRemoteModels() ([]string, error) {

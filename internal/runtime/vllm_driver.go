@@ -20,15 +20,15 @@ import (
 )
 
 const (
-	vllmConfigPath = "/etc/clawcontrol/vllm.json"
-	vllmEnvPath    = "/etc/clawcontrol/vllm.env"
-	vllmUnitPath   = "/etc/systemd/system/vllm.service"
-	vllmVenvPath   = "/opt/clawcontrol/vllm-venv"
-	vllmPythonPath = "/opt/clawcontrol/vllm-venv/bin/python3"
-	vllmContainerName = "clawcontrol-vllm"
+	vllmConfigPath            = "/etc/clawcontrol/vllm.json"
+	vllmEnvPath               = "/etc/clawcontrol/vllm.env"
+	vllmUnitPath              = "/etc/systemd/system/vllm.service"
+	vllmVenvPath              = "/opt/clawcontrol/vllm-venv"
+	vllmPythonPath            = "/opt/clawcontrol/vllm-venv/bin/python3"
+	vllmContainerName         = "clawcontrol-vllm"
 	vllmDefaultContainerImage = "nvcr.io/nvidia/vllm:26.02-py3"
-	vllmReadyTimeout = 180 * time.Second
-	vllmRestartCooldown = 90 * time.Second
+	vllmReadyTimeout          = 180 * time.Second
+	vllmRestartCooldown       = 90 * time.Second
 )
 
 type vllmConfig struct {
@@ -39,8 +39,8 @@ type vllmConfig struct {
 type vllmDriver struct{}
 
 var (
-	vllmRestartMu         sync.Mutex
-	lastVLLMRestartAt     time.Time
+	vllmRestartMu     sync.Mutex
+	lastVLLMRestartAt time.Time
 )
 
 func newVLLMDriver() Driver {
@@ -564,6 +564,16 @@ func (d *vllmDriver) startOrRestartService(modelID string, port int, force bool)
 	}
 	if err := d.waitForAPIReady(vllmReadyTimeout); err != nil {
 		diagnostics := d.vllmDiagnosticsTail()
+		if d.shouldAutoEnableTrustRemoteCode(diagnostics) {
+			if trustErr := d.enableTrustRemoteCodeInEnv(); trustErr == nil {
+				if restartErr := runCommand("systemctl", "restart", "vllm"); restartErr == nil {
+					if readyErr := d.waitForAPIReady(vllmReadyTimeout); readyErr == nil {
+						return nil
+					}
+					diagnostics = d.vllmDiagnosticsTail()
+				}
+			}
+		}
 		if hint := d.classifyKnownStartupFailure(diagnostics); hint != "" {
 			return fmt.Errorf("vllm service restarted but API not reachable yet: %w; %s; %s", err, diagnostics, hint)
 		}
@@ -572,7 +582,62 @@ func (d *vllmDriver) startOrRestartService(modelID string, port int, force bool)
 		}
 		return fmt.Errorf("vllm service restarted but API not reachable yet: %w; %s", err, diagnostics)
 	}
+	isExternal, listenErr := isServiceListeningOnNonLoopback(port)
+	if listenErr != nil {
+		return listenErr
+	}
+	if !isExternal {
+		return fmt.Errorf("vllm server is only listening on localhost; expected 0.0.0.0 or non-loopback interface")
+	}
 	return nil
+}
+
+func (d *vllmDriver) shouldAutoEnableTrustRemoteCode(diagnostics string) bool {
+	text := strings.ToLower(diagnostics)
+	return strings.Contains(text, "trust_remote_code") ||
+		strings.Contains(text, "trust-remote-code") ||
+		strings.Contains(text, "please pass the argument `trust_remote_code=true`")
+}
+
+func (d *vllmDriver) enableTrustRemoteCodeInEnv() error {
+	values := d.readEnvConfigMap()
+	if strings.EqualFold(strings.TrimSpace(values["VLLM_TRUST_REMOTE_CODE"]), "true") {
+		return nil
+	}
+	values["VLLM_TRUST_REMOTE_CODE"] = "true"
+
+	order := []string{
+		"VLLM_MODEL",
+		"VLLM_PORT",
+		"VLLM_GPU_MEMORY_UTILIZATION",
+		"VLLM_TRUST_REMOTE_CODE",
+		"VLLM_EXTRA_ARGS",
+		"VLLM_RUNTIME_MODE",
+		"VLLM_CONTAINER_IMAGE",
+		"VLLM_LD_LIBRARY_PATH",
+	}
+	lines := make([]string, 0, len(values))
+	seen := map[string]struct{}{}
+	for _, key := range order {
+		if value, ok := values[key]; ok {
+			lines = append(lines, fmt.Sprintf("%s=%q", key, value))
+			seen[key] = struct{}{}
+		}
+	}
+	for key, value := range values {
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		lines = append(lines, fmt.Sprintf("%s=%q", key, value))
+	}
+	payload := strings.Join(lines, "\n")
+	if payload != "" {
+		payload += "\n"
+	}
+	if err := os.MkdirAll(filepath.Dir(vllmEnvPath), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(vllmEnvPath, []byte(payload), 0o600)
 }
 
 func (d *vllmDriver) pullContainerImage(image string) error {
