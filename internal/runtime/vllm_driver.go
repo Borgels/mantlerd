@@ -27,7 +27,8 @@ const (
 	vllmPythonPath            = "/opt/clawcontrol/vllm-venv/bin/python3"
 	vllmContainerName         = "clawcontrol-vllm"
 	vllmDefaultContainerImage = "nvcr.io/nvidia/vllm:26.02-py3"
-	vllmReadyTimeout          = 180 * time.Second
+	vllmReadyTimeout          = 15 * time.Minute
+	vllmStartupGraceWindow    = 20 * time.Minute
 	vllmRestartCooldown       = 90 * time.Second
 )
 
@@ -243,11 +244,17 @@ func (d *vllmDriver) InstalledModels() []types.InstalledModel {
 
 	// Endpoint unreachable: preserve configured model but mark failed so server/UI
 	// can show actionable state instead of a false-ready model.
+	// Treat active service warm-up as installing to avoid false "needs attention"
+	// while very large models are still loading.
 	if configuredModel != "" {
+		status := types.ModelFailed
+		if d.isLikelyServiceWarmup(err) {
+			status = types.ModelInstalling
+		}
 		models = append(models, types.InstalledModel{
 			ModelID: configuredModel,
 			Runtime: types.RuntimeVLLM,
-			Status:  types.ModelFailed,
+			Status:  status,
 		})
 	}
 	return models
@@ -556,8 +563,12 @@ func (d *vllmDriver) startOrRestartService(modelID string, port int, force bool)
 		containerImage = d.containerImage()
 	}
 	if d.shouldUseContainer() {
-		if err := d.pullContainerImage(containerImage); err != nil {
-			return err
+		// Runtime control actions should not force image upgrades implicitly.
+		// Pull only when the configured image is missing locally.
+		if !d.containerImageExists(containerImage) {
+			if err := d.pullContainerImage(containerImage); err != nil {
+				return err
+			}
 		}
 	}
 	runtimeMode := d.runtimeMode()
@@ -1050,4 +1061,71 @@ func (d *vllmDriver) classifyKnownStartupFailure(diagnostics string) string {
 	default:
 		return ""
 	}
+}
+
+func (d *vllmDriver) isLikelyServiceWarmup(endpointErr error) bool {
+	if endpointErr == nil {
+		return false
+	}
+	if !d.isTransientEndpointError(endpointErr) {
+		return false
+	}
+	out, err := exec.Command(
+		"systemctl",
+		"show",
+		"--property=ActiveState",
+		"--property=SubState",
+		"--property=ActiveEnterTimestamp",
+		"vllm",
+	).Output()
+	if err != nil {
+		return false
+	}
+	activeState := ""
+	subState := ""
+	activeSinceRaw := ""
+	for _, line := range strings.Split(string(out), "\n") {
+		parts := strings.SplitN(strings.TrimSpace(line), "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		switch parts[0] {
+		case "ActiveState":
+			activeState = strings.TrimSpace(parts[1])
+		case "SubState":
+			subState = strings.TrimSpace(parts[1])
+		case "ActiveEnterTimestamp":
+			activeSinceRaw = strings.TrimSpace(parts[1])
+		}
+	}
+	if activeState != "active" {
+		return false
+	}
+	if subState != "running" && subState != "start" && subState != "start-post" {
+		return false
+	}
+	if activeSinceRaw == "" || activeSinceRaw == "n/a" {
+		return true
+	}
+	// Example: "Sat 2026-04-04 18:08:52 CEST"
+	activeSince, parseErr := time.Parse("Mon 2006-01-02 15:04:05 MST", activeSinceRaw)
+	if parseErr != nil {
+		return true
+	}
+	return time.Since(activeSince) <= vllmStartupGraceWindow
+}
+
+func (d *vllmDriver) isTransientEndpointError(err error) bool {
+	text := strings.ToLower(strings.TrimSpace(err.Error()))
+	if text == "" {
+		return false
+	}
+	return strings.Contains(text, "connection refused") ||
+		strings.Contains(text, "i/o timeout") ||
+		strings.Contains(text, "context deadline exceeded") ||
+		strings.Contains(text, "eof") ||
+		strings.Contains(text, "connection reset by peer") ||
+		strings.Contains(text, "service unavailable") ||
+		strings.Contains(text, "bad gateway") ||
+		strings.Contains(text, "temporarily unavailable")
 }
