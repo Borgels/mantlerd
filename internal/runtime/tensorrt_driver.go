@@ -86,24 +86,36 @@ func (d *tensorrtDriver) Uninstall() error {
 }
 
 func (d *tensorrtDriver) IsInstalled() bool {
-	if d.ensureDockerAvailable() == nil {
-		return true
-	}
-	if d.hasTrtllmServe() {
-		return true
-	}
-	return false
+	hasNativeBinary := d.hasTrtllmServe()
+	hasServiceUnit := d.fileExists(tensorrtUnitPath)
+	hasConfig := d.fileExists(tensorrtConfigPath)
+	hasEnv := d.fileExists(tensorrtEnvPath)
+	return inferTensorRTInstalled(hasNativeBinary, hasServiceUnit, hasConfig, hasEnv)
 }
 
 func (d *tensorrtDriver) IsReady() bool {
 	if !d.IsInstalled() {
 		return false
 	}
+	if configuredModel, known := d.configuredModelState(); known && strings.TrimSpace(configuredModel) == "" {
+		// Installed runtime with no configured model is considered idle-ready.
+		_ = runCommand("systemctl", "stop", "tensorrt-llm")
+		_ = runCommand("systemctl", "reset-failed", "tensorrt-llm")
+		return true
+	}
+	if _, known := d.configuredModelState(); !known && d.serviceIsInactive() {
+		// Non-root CLI may not be able to read /etc/clawcontrol files; treat
+		// inactive service as idle-ready in that restricted visibility mode.
+		return true
+	}
 	_, err := d.fetchRemoteModels()
 	return err == nil
 }
 
 func (d *tensorrtDriver) Version() string {
+	if !d.IsInstalled() {
+		return ""
+	}
 	image := d.containerImage()
 	if d.containerImageExists(image) {
 		return "container:" + image
@@ -344,12 +356,23 @@ func (d *tensorrtDriver) benchmarkOnce(modelID string, prompt string, sampleOutp
 
 func (d *tensorrtDriver) RestartRuntime() error {
 	cfg, cfgErr := d.readConfig()
-	if cfgErr == nil && strings.TrimSpace(cfg.Model) != "" {
-		port := cfg.Port
-		if port <= 0 {
-			port = tensorrtDefaultPort
+	if cfgErr == nil {
+		if strings.TrimSpace(cfg.Model) != "" {
+			port := cfg.Port
+			if port <= 0 {
+				port = tensorrtDefaultPort
+			}
+			return d.startOrRestartService(cfg.Model, port, true)
 		}
-		return d.startOrRestartService(cfg.Model, port, true)
+		// No configured model: keep runtime idle instead of crash-looping.
+		_ = runCommand("systemctl", "stop", "tensorrt-llm")
+		_ = runCommand("systemctl", "reset-failed", "tensorrt-llm")
+		return nil
+	}
+	if os.IsNotExist(cfgErr) {
+		_ = runCommand("systemctl", "stop", "tensorrt-llm")
+		_ = runCommand("systemctl", "reset-failed", "tensorrt-llm")
+		return nil
 	}
 	return runCommand("systemctl", "restart", "tensorrt-llm")
 }
@@ -367,8 +390,43 @@ func (d *tensorrtDriver) baseURL() string {
 	return fmt.Sprintf("http://127.0.0.1:%d", port)
 }
 
+func (d *tensorrtDriver) configuredModelState() (string, bool) {
+	cfg, err := d.readConfig()
+	if err == nil {
+		return strings.TrimSpace(cfg.Model), true
+	}
+	if os.IsNotExist(err) {
+		return "", true
+	}
+	return "", false
+}
+
+func (d *tensorrtDriver) serviceIsInactive() bool {
+	out, err := exec.Command("systemctl", "is-active", "tensorrt-llm").CombinedOutput()
+	if err != nil && len(out) == 0 {
+		return false
+	}
+	return strings.TrimSpace(string(out)) == "inactive"
+}
+
 func (d *tensorrtDriver) hasTrtllmServe() bool {
 	_, err := exec.LookPath("trtllm-serve")
+	return err == nil
+}
+
+func inferTensorRTInstalled(hasNativeBinary bool, hasServiceUnit bool, hasConfig bool, hasEnv bool) bool {
+	if hasNativeBinary {
+		return true
+	}
+	// Managed installs should leave one or more local artifacts behind.
+	return hasServiceUnit || hasConfig || hasEnv
+}
+
+func (d *tensorrtDriver) fileExists(path string) bool {
+	if strings.TrimSpace(path) == "" {
+		return false
+	}
+	_, err := os.Stat(path)
 	return err == nil
 }
 

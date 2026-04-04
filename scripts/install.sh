@@ -402,7 +402,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 EnvironmentFile=-${VLLM_ENV_PATH}
-ExecStart=/bin/sh -c 'LD_LIBRARY_PATH=\"\${VLLM_LD_LIBRARY_PATH:-}\${LD_LIBRARY_PATH:+:\${LD_LIBRARY_PATH}}\"; EXTRA_ARGS=\"\${VLLM_EXTRA_ARGS:-}\"; if [ \"\${VLLM_TRUST_REMOTE_CODE:-false}\" = \"true\" ]; then EXTRA_ARGS=\"\${EXTRA_ARGS} --trust-remote-code\"; fi; exec ${VLLM_PYTHON} -m vllm.entrypoints.openai.api_server --model \"\${VLLM_MODEL}\" --host 0.0.0.0 --port \"\${VLLM_PORT:-8000}\" --gpu-memory-utilization \"\${VLLM_GPU_MEMORY_UTILIZATION:-0.9}\" \${EXTRA_ARGS}'
+ExecStart=/bin/sh -c 'LD_LIBRARY_PATH=\"\${VLLM_LD_LIBRARY_PATH:-}\${LD_LIBRARY_PATH:+:\${LD_LIBRARY_PATH}}\"; exec ${VLLM_PYTHON} -m vllm.entrypoints.openai.api_server --model \"\${VLLM_MODEL}\" --host 0.0.0.0 --port \"\${VLLM_PORT:-8000}\" --gpu-memory-utilization \"\${VLLM_GPU_MEMORY_UTILIZATION:-0.9}\" \${VLLM_EXTRA_ARGS:-}'
 Restart=always
 RestartSec=5
 User=root
