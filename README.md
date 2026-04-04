@@ -68,7 +68,7 @@ curl -sSL https://raw.githubusercontent.com/Borgels/clawcontrol-agent/master/scr
 Pin to a specific version:
 
 ```bash
-... --version v0.2.4
+... --version v0.2.5
 ```
 
 ### What the installer sets up
