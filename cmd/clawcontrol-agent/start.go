@@ -133,6 +133,7 @@ func runCheckIn(cfg config.Config, cl *client.Client, runtimeManager *runtime.Ma
 	installedRuntimeNames := runtimeManager.InstalledRuntimes()
 	installedRuntimeTypes := toRuntimeTypes(installedRuntimeNames)
 	readyRuntimeNames := runtimeManager.ReadyRuntimes()
+	runtimeStatuses := buildRuntimeStatuses(installedRuntimeNames, readyRuntimeNames)
 	runtimeStatus := types.RuntimeNotInstalled
 	runtimeType := types.RuntimeType("")
 	runtimeVersion := ""
@@ -154,6 +155,7 @@ func runCheckIn(cfg config.Config, cl *client.Client, runtimeManager *runtime.Ma
 		HardwareSummary:       report.HardwareSummary,
 		AgentVersion:          agentVersion,
 		RuntimeStatus:         runtimeStatus,
+		RuntimeStatuses:       runtimeStatuses,
 		RuntimeType:           runtimeType,
 		RuntimeVersion:        runtimeVersion,
 		RuntimeVersions:       runtimeManager.RuntimeVersions(),
@@ -195,6 +197,20 @@ func runCheckIn(cfg config.Config, cl *client.Client, runtimeManager *runtime.Ma
 			log.Printf("ack failed for %s: %v", command.ID, ackErr)
 		}
 	}
+}
+
+func buildRuntimeStatuses(installedRuntimeNames []string, readyRuntimeNames []string) map[types.RuntimeType]types.RuntimeStatus {
+	statuses := make(map[types.RuntimeType]types.RuntimeStatus, len(installedRuntimeNames))
+	for _, runtimeName := range installedRuntimeNames {
+		statuses[types.RuntimeType(runtimeName)] = types.RuntimeFailed
+	}
+	for _, runtimeName := range readyRuntimeNames {
+		statuses[types.RuntimeType(runtimeName)] = types.RuntimeReady
+	}
+	if len(statuses) == 0 {
+		return nil
+	}
+	return statuses
 }
 
 func sendInProgressAck(cl *client.Client, commandID string, details string) {
