@@ -20,7 +20,7 @@ import (
 	"github.com/Borgels/clawcontrol-agent/internal/types"
 )
 
-var agentVersion = "0.1.10"
+var agentVersion = "0.1.14"
 const desiredConfigCachePath = "/etc/clawcontrol/desired-config.json"
 
 func main() {
