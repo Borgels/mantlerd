@@ -88,27 +88,27 @@ func (e *Executor) Execute(command types.AgentCommand) (string, error) {
 				}
 				payload := map[string]any{
 					"progress": map[string]any{
-						"scope":           "model_benchmark",
-						"runsCompleted":   progress.RunsCompleted,
-						"runsTotal":       progress.RunsTotal,
-						"successfulRuns":  progress.SuccessfulRuns,
-						"failedRuns":      progress.FailedRuns,
+						"scope":            "model_benchmark",
+						"runsCompleted":    progress.RunsCompleted,
+						"runsTotal":        progress.RunsTotal,
+						"successfulRuns":   progress.SuccessfulRuns,
+						"failedRuns":       progress.FailedRuns,
 						"lastRunLatencyMs": progress.LastRunLatencyMs,
 					},
 				}
 				if progress.Benchmark != nil {
 					payload["progress"] = map[string]any{
-						"scope":                         "model_benchmark",
-						"runsCompleted":                 progress.RunsCompleted,
-						"runsTotal":                     progress.RunsTotal,
-						"successfulRuns":                progress.SuccessfulRuns,
-						"failedRuns":                    progress.FailedRuns,
-						"lastRunLatencyMs":              progress.LastRunLatencyMs,
-						"ttftMs":                        progress.Benchmark.TTFTMs,
-						"outputTokensPerSec":            progress.Benchmark.OutputTokensPerSec,
-						"totalLatencyMs":                progress.Benchmark.TotalLatencyMs,
-						"promptTokensPerSec":            progress.Benchmark.PromptTokensPerSec,
-						"p95TtftMsAtSmallConcurrency":   progress.Benchmark.P95TTFTMsAtSmallConcurrency,
+						"scope":                       "model_benchmark",
+						"runsCompleted":               progress.RunsCompleted,
+						"runsTotal":                   progress.RunsTotal,
+						"successfulRuns":              progress.SuccessfulRuns,
+						"failedRuns":                  progress.FailedRuns,
+						"lastRunLatencyMs":            progress.LastRunLatencyMs,
+						"ttftMs":                      progress.Benchmark.TTFTMs,
+						"outputTokensPerSec":          progress.Benchmark.OutputTokensPerSec,
+						"totalLatencyMs":              progress.Benchmark.TotalLatencyMs,
+						"promptTokensPerSec":          progress.Benchmark.PromptTokensPerSec,
+						"p95TtftMsAtSmallConcurrency": progress.Benchmark.P95TTFTMsAtSmallConcurrency,
 					}
 				}
 				raw, err := json.Marshal(payload)
