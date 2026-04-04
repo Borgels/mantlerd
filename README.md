@@ -1,88 +1,228 @@
 # clawcontrol-agent
 
-Lightweight machine agent for ClawControl.
+ClawControl machine agent for runtime and model orchestration.
 
-## What it does
+The agent runs on each worker machine, checks in with ClawControl, executes typed commands, and reports runtime/model state back to the control plane.
 
-- Performs periodic authenticated check-ins to `POST /api/agent/checkin`
-- Reports discovered machine metadata (hostname, addresses, hardware summary)
-- Pulls pending commands from ClawControl
-- Executes allowlisted commands (`install_runtime`, `pull_model`, `remove_model`, `restart_runtime`, `health_check`, `update_agent`)
-- Acknowledges command result to `POST /api/agent/ack`
+## Overview
 
-`update_agent` command notes:
+`clawcontrol-agent` does three core things:
 
-- Starts an in-place agent update using the official installer script.
-- Accepts optional `params.version` (`latest` by default).
-- Agent reports the installed version via `agentVersion` on subsequent check-ins.
+- Performs periodic authenticated check-ins to ClawControl (`/api/agent/checkin`)
+- Executes allowlisted commands returned by the server
+- Acknowledges command results (`/api/agent/ack`)
 
-`health_check` command notes:
+It also reports machine metadata:
 
-- When `params.scope` is `"model_benchmark"`, the agent runs a real Ollama benchmark via `/api/generate`.
-- Supports benchmark profiles via params (`quick`, `standard`, `deep`) by varying token sizes and run count.
-- Sends interim `in_progress` acknowledgements with rolling benchmark progress and partial metrics.
-- Ack `details` includes benchmark JSON under `benchmark`:
-  - `ttftMs`
-  - `outputTokensPerSec`
-  - `totalLatencyMs`
-  - `promptTokensPerSec`
-  - `p95TtftMsAtSmallConcurrency`
+- Hostname and discovered addresses
+- Hardware summary (CPU, RAM, GPU)
+- Installed/ready runtimes and versions
+- Installed models and model status
+- Agent version
 
-## Quick start
+## Runtime lifecycle model
 
-```bash
-go build -o clawcontrol-agent ./cmd/clawcontrol-agent
-./clawcontrol-agent \
-  --server https://control.example.com \
-  --token YOUR_MACHINE_TOKEN \
-  --machine MACHINE_ID
-```
+The agent and runtimes are intentionally separate concerns:
 
-Config is persisted by default at:
+- **Agent updates** update agent code and service behavior.
+- **Runtime changes** (install/restart/reconfigure) are done via runtime commands.
+- Routine runtime control should not force implicit runtime upgrades.
 
-- `/etc/clawcontrol/agent.json` when run as root
-- `~/.clawcontrol/agent.json` otherwise
+In practice, the agent controls runtimes but does not treat runtime version drift as an automatic agent-upgrade side effect.
 
-## Security defaults
+## Supported server commands
 
-- Requires HTTPS unless `--insecure` is explicitly set
-- Sends bearer token on every request
-- Stores config with `0600` permissions
-- Only executes typed, allowlisted commands
+The executor currently supports:
 
-## Build targets
+- `install_runtime`
+- `uninstall_runtime`
+- `restart_runtime`
+- `pull_model`
+- `remove_model`
+- `health_check`
+- `update_agent`
+
+## Installation (Linux, recommended)
+
+Use the release installer script:
 
 ```bash
-make build
-make release
-```
-
-## Linux installer (recommended)
-
-```bash
-curl -fsSL https://install.clawcontrol.dev | sh -s -- \
+curl -sSL https://raw.githubusercontent.com/Borgels/clawcontrol-agent/master/scripts/install.sh | \
+  sudo sh -s -- \
   --token YOUR_MACHINE_TOKEN \
   --machine MACHINE_ID \
   --server https://control.example.com
 ```
 
-Installer behavior:
+For non-HTTPS ClawControl endpoints:
 
-- Linux-only (systemd target)
-- Requires root privileges (or passwordless sudo)
-- Downloads release binary from GitHub Releases
-- Verifies SHA-256 using `<asset>.sha256`
-- Installs binary to `/usr/local/bin/clawcontrol-agent`
-- Writes config to `/etc/clawcontrol/agent.json` (`0600`)
-- Creates/updates and restarts `clawcontrol-agent.service`
-- Writes `ollama.service` systemd override with `OLLAMA_HOST=0.0.0.0:11434` (configurable)
-- Runs post-install service health checks and prints diagnostics on failure
-- Auto-enables insecure mode for `http://` server URLs (or use `--insecure`)
-- Agent runtime also auto-enables insecure mode for `http://` server URLs as a safety fallback
+```bash
+curl -sSL https://raw.githubusercontent.com/Borgels/clawcontrol-agent/master/scripts/install.sh | \
+  sudo sh -s -- \
+  --token YOUR_MACHINE_TOKEN \
+  --machine MACHINE_ID \
+  --server http://control.local:3400 \
+  --insecure
+```
 
-Required release assets:
+Pin to a specific version:
 
-- `clawcontrol-agent-linux-amd64`
-- `clawcontrol-agent-linux-amd64.sha256`
-- `clawcontrol-agent-linux-arm64`
-- `clawcontrol-agent-linux-arm64.sha256`
+```bash
+... --version v0.2.4
+```
+
+### What the installer sets up
+
+- Installs `/usr/local/bin/clawcontrol-agent`
+- Creates CLI alias `/usr/local/bin/clawcontrol` (symlink)
+- Writes config file `/etc/clawcontrol/agent.json` (`0600`)
+- Installs systemd unit `/etc/systemd/system/clawcontrol-agent.service`
+- Starts daemon with:
+  - `ExecStart=/usr/local/bin/clawcontrol-agent start --config /etc/clawcontrol/agent.json`
+- Enables + restarts the service
+- Installs/updates runtime templates:
+  - Ollama remote bind override (`OLLAMA_HOST=0.0.0.0:11434` by default)
+  - vLLM systemd template and env/config files
+
+## Configuration
+
+Default config path:
+
+- root: `/etc/clawcontrol/agent.json`
+- non-root: `~/.clawcontrol/agent.json`
+
+Config schema:
+
+```json
+{
+  "serverUrl": "https://control.example.com",
+  "token": "MACHINE_TOKEN",
+  "machineId": "spark01",
+  "intervalMs": 30000,
+  "insecure": false,
+  "logLevel": "info"
+}
+```
+
+Manage config via CLI:
+
+```bash
+clawcontrol config show
+clawcontrol config path
+clawcontrol config set server https://control.example.com
+clawcontrol config set interval 30s
+```
+
+## CLI quick reference
+
+Top-level:
+
+```bash
+clawcontrol --help
+clawcontrol version
+clawcontrol doctor
+clawcontrol info
+clawcontrol start
+clawcontrol checkin
+```
+
+Runtime management:
+
+```bash
+clawcontrol runtime list
+clawcontrol runtime status
+clawcontrol runtime install vllm
+clawcontrol runtime restart vllm
+```
+
+Model management:
+
+```bash
+clawcontrol model list
+clawcontrol model pull nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4 --runtime vllm
+clawcontrol model remove nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4 --runtime vllm
+clawcontrol model benchmark llama2:7b --profile standard
+```
+
+## vLLM notes
+
+The agent supports both native and containerized vLLM modes.
+
+- Runtime mode defaults to `auto` (container if Docker is available)
+- vLLM env/config files:
+  - `/etc/clawcontrol/vllm.json`
+  - `/etc/clawcontrol/vllm.env`
+- Container image default:
+  - `nvcr.io/nvidia/vllm:26.02-py3`
+
+Useful installer env overrides:
+
+- `CLAWCONTROL_VLLM_RUNTIME_MODE=auto|container|native`
+- `CLAWCONTROL_VLLM_PORT=8000`
+- `CLAWCONTROL_VLLM_GPU_MEMORY_UTILIZATION=0.9`
+- `CLAWCONTROL_VLLM_TRUST_REMOTE_CODE=true|false`
+- `CLAWCONTROL_VLLM_EXTRA_ARGS="..."`
+- `CLAWCONTROL_HF_TOKEN=...`
+- `CLAWCONTROL_HUGGING_FACE_HUB_TOKEN=...`
+
+## Health checks and benchmarks
+
+For `health_check` commands with `scope=model_benchmark`, the agent reports benchmark metrics including:
+
+- `ttftMs`
+- `outputTokensPerSec`
+- `totalLatencyMs`
+- `promptTokensPerSec`
+- `p95TtftMsAtSmallConcurrency`
+
+Profiles: `quick`, `standard`, `deep`.
+
+## Troubleshooting
+
+### Service is restarting / machine not checking in
+
+```bash
+sudo systemctl status clawcontrol-agent --no-pager -l
+sudo journalctl -u clawcontrol-agent -n 200 --no-pager
+sudo cat /etc/clawcontrol/agent.json
+```
+
+Common cause:
+
+- `invalid config: server URL is required`
+  - Fix `serverUrl` in `/etc/clawcontrol/agent.json`
+  - Re-run installer with `--server ...`
+
+### CLI command not found
+
+Installer creates `clawcontrol` alias. If missing:
+
+```bash
+sudo ln -sf /usr/local/bin/clawcontrol-agent /usr/local/bin/clawcontrol
+```
+
+### Verify server reachability
+
+```bash
+curl -sS http://control.local:3400/api/health
+```
+
+### Verify current agent version
+
+```bash
+clawcontrol version
+```
+
+## Development
+
+Build:
+
+```bash
+make build
+```
+
+Release assets:
+
+```bash
+make release
+```
