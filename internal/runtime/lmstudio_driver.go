@@ -65,6 +65,21 @@ func (d *lmstudioDriver) Install() error {
 	return nil
 }
 
+func (d *lmstudioDriver) Uninstall() error {
+	_ = runCommand("systemctl", "stop", "lmstudio")
+	_ = runCommand("systemctl", "disable", "lmstudio")
+	_ = os.Remove(lmsServiceUnitPath)
+	_ = runCommand("systemctl", "daemon-reload")
+	path := d.resolveLMSPath()
+	if path != "" {
+		cmd := exec.Command(path, "daemon", "down")
+		cmd.Env = d.envForPath(path)
+		_ = cmd.Run()
+	}
+	_ = os.Remove(lmsConfigPath)
+	return nil
+}
+
 func (d *lmstudioDriver) IsInstalled() bool {
 	return strings.TrimSpace(d.resolveLMSPath()) != ""
 }

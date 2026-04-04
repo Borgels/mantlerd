@@ -20,7 +20,7 @@ import (
 	"github.com/Borgels/clawcontrol-agent/internal/types"
 )
 
-var agentVersion = "0.1.15"
+var agentVersion = "0.1.16"
 
 const desiredConfigCachePath = "/etc/clawcontrol/desired-config.json"
 

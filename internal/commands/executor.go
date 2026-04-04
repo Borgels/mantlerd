@@ -134,6 +134,16 @@ func (e *Executor) Execute(command types.AgentCommand) (string, error) {
 			return "", fmt.Errorf("encode benchmark metrics: %w", err)
 		}
 		return string(details), nil
+	case "uninstall_runtime":
+		rawRuntime, ok := command.Params["runtime"]
+		if !ok {
+			return "", fmt.Errorf("missing runtime param")
+		}
+		runtimeName, ok := rawRuntime.(string)
+		if !ok || runtimeName == "" {
+			return "", fmt.Errorf("invalid runtime param")
+		}
+		return "", e.runtimeManager.UninstallRuntime(runtimeName)
 	case "restart_runtime":
 		runtimeName := optionalStringParam(command.Params, "runtime")
 		if runtimeName == "" {

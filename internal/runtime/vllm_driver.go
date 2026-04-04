@@ -123,6 +123,25 @@ func (d *vllmDriver) Install() error {
 	return nil
 }
 
+func (d *vllmDriver) Uninstall() error {
+	_ = runCommand("systemctl", "stop", "vllm")
+	_ = runCommand("systemctl", "disable", "vllm")
+	_ = os.Remove(vllmUnitPath)
+	_ = runCommand("systemctl", "daemon-reload")
+	if d.shouldUseContainer() {
+		_ = exec.Command("docker", "rm", "-f", vllmContainerName).Run()
+		image := d.containerImage()
+		if image != "" {
+			_ = exec.Command("docker", "rmi", image).Run()
+		}
+	} else {
+		_ = os.RemoveAll(vllmVenvPath)
+	}
+	_ = os.Remove(vllmConfigPath)
+	_ = os.Remove(vllmEnvPath)
+	return nil
+}
+
 func (d *vllmDriver) IsInstalled() bool {
 	if d.shouldUseContainer() {
 		return d.ensureDockerAvailable() == nil
