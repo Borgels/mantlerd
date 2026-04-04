@@ -1,0 +1,105 @@
+package main
+
+import (
+	"fmt"
+	"log"
+	"time"
+
+	"github.com/Borgels/clawcontrol-agent/internal/client"
+	"github.com/Borgels/clawcontrol-agent/internal/commands"
+	"github.com/Borgels/clawcontrol-agent/internal/config"
+	"github.com/Borgels/clawcontrol-agent/internal/runtime"
+	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
+)
+
+var checkinCmd = &cobra.Command{
+	Use:   "checkin",
+	Short: "Perform a single check-in and exit",
+	Long: `Perform a single check-in to the ClawControl server.
+
+This command will:
+- Report machine metadata (hostname, addresses, hardware summary)
+- Pull pending commands from ClawControl
+- Execute any pending commands
+- Acknowledge command results
+- Exit after completion (does not start daemon)`,
+	Run: runCheckin,
+}
+
+func init() {
+	rootCmd.AddCommand(checkinCmd)
+}
+
+func runCheckin(cmd *cobra.Command, args []string) {
+	// Load configuration
+	cfg := loadConfig()
+
+	// Create API client
+	cl, err := client.New(cfg.ServerURL, cfg.Token, cfg.Insecure)
+	if err != nil {
+		log.Fatalf("create api client: %v", err)
+	}
+
+	// Create runtime manager and executor
+	runtimeManager := runtime.NewManager()
+	executor := commands.NewExecutor(runtimeManager, cfg, func(commandID string, details string) {
+		sendInProgressAck(cl, commandID, details)
+	})
+
+	// Run check-in
+	runCheckIn(cfg, cl, runtimeManager, executor)
+
+	fmt.Println("Check-in completed successfully")
+}
+
+// loadConfigForCheckin loads configuration for checkin command
+func loadConfigForCheckin() config.Config {
+	// Build config from viper and flags
+	intervalDuration, err := time.ParseDuration(viper.GetString("interval"))
+	if err != nil {
+		log.Fatalf("invalid interval duration: %v", err)
+	}
+
+	cfg := config.Config{
+		ServerURL: viper.GetString("server"),
+		Token:     viper.GetString("token"),
+		MachineID: viper.GetString("machine"),
+		Interval:  intervalDuration,
+		Insecure:  viper.GetBool("insecure"),
+		LogLevel:  viper.GetString("log-level"),
+	}
+
+	// Apply flag values if set (flags override config file)
+	if serverURL != "" {
+		cfg.ServerURL = serverURL
+	}
+	if token != "" {
+		cfg.Token = token
+	}
+	if machineID != "" {
+		cfg.MachineID = machineID
+	}
+	if insecure {
+		cfg.Insecure = insecure
+	}
+	if logLevel != "" {
+		cfg.LogLevel = logLevel
+	}
+
+	// Validate
+	if err := config.Validate(cfg); err != nil {
+		log.Fatalf("invalid config: %v", err)
+	}
+
+	// Persist config
+	configPath := cfgFile
+	if configPath == "" {
+		configPath = config.DefaultConfigPath()
+	}
+	if err := config.Save(configPath, cfg); err != nil {
+		log.Fatalf("persist config: %v", err)
+	}
+
+	return cfg
+}

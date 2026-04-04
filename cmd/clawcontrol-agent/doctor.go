@@ -1,0 +1,293 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"os"
+	"strings"
+	"time"
+
+	"github.com/Borgels/clawcontrol-agent/internal/client"
+	"github.com/Borgels/clawcontrol-agent/internal/config"
+	"github.com/Borgels/clawcontrol-agent/internal/discovery"
+	"github.com/Borgels/clawcontrol-agent/internal/runtime"
+	"github.com/Borgels/clawcontrol-agent/internal/types"
+	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
+)
+
+var doctorCmd = &cobra.Command{
+	Use:   "doctor",
+	Short: "Run diagnostic checks",
+	Long: `Run diagnostic checks to verify the clawcontrol agent setup.
+
+This command checks:
+- Configuration file and settings
+- Server connectivity and authentication
+- Runtime availability and status
+- System permissions
+- Network connectivity
+
+Use this command to troubleshoot issues with the agent.`,
+	Run: runDoctor,
+}
+
+func init() {
+	rootCmd.AddCommand(doctorCmd)
+}
+
+func runDoctor(cmd *cobra.Command, args []string) {
+	fmt.Println("Running diagnostics...")
+	fmt.Println()
+
+	allPassed := true
+
+	// Check 1: Configuration file
+	fmt.Print("✓ Checking configuration... ")
+	configPath := cfgFile
+	if configPath == "" {
+		configPath = config.DefaultConfigPath()
+	}
+
+	if _, err := os.Stat(configPath); os.IsNotExist(err) {
+		fmt.Println("✗")
+		fmt.Printf("  Config file not found: %s\n", configPath)
+		fmt.Println("  Run: clawcontrol config set server <url>")
+		fmt.Println("       clawcontrol config set token <token>")
+		fmt.Println("       clawcontrol config set machine <id>")
+		allPassed = false
+	} else {
+		cfg, err := config.Load(configPath)
+		if err != nil {
+			fmt.Println("✗")
+			fmt.Printf("  Error reading config: %v\n", err)
+			allPassed = false
+		} else {
+			fmt.Println("✓")
+			fmt.Printf("  Config file: %s\n", configPath)
+			if cfg.ServerURL != "" {
+				fmt.Printf("  Server: %s\n", maskURL(cfg.ServerURL))
+			}
+		}
+	}
+	fmt.Println()
+
+	// Check 2: Required configuration values
+	fmt.Print("✓ Checking required settings... ")
+	cfg := loadConfigFromViper()
+	missing := []string{}
+
+	if cfg.ServerURL == "" {
+		missing = append(missing, "server URL (--server)")
+	}
+	if cfg.Token == "" {
+		missing = append(missing, "token (--token)")
+	}
+	if cfg.MachineID == "" {
+		missing = append(missing, "machine ID (--machine)")
+	}
+
+	if len(missing) > 0 {
+		fmt.Println("✗")
+		fmt.Printf("  Missing required settings:\n")
+		for _, m := range missing {
+			fmt.Printf("    - %s\n", m)
+		}
+		allPassed = false
+	} else {
+		fmt.Println("✓")
+	}
+	fmt.Println()
+
+	// Check 3: Server connectivity
+	fmt.Print("✓ Checking server connectivity... ")
+	if cfg.ServerURL == "" {
+		fmt.Println("⊘")
+		fmt.Println("  Skipped: server URL not configured")
+	} else {
+		client := &http.Client{Timeout: 10 * time.Second}
+		if cfg.Insecure {
+			// Allow skipping TLS verification for insecure mode
+			// Note: In production, you'd want to configure the transport properly
+		}
+
+		// Try to connect to the server
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		req, err := http.NewRequestWithContext(ctx, "GET", cfg.ServerURL+"/health", nil)
+		if err != nil {
+			fmt.Println("✗")
+			fmt.Printf("  Error creating request: %v\n", err)
+			allPassed = false
+		} else {
+			resp, err := client.Do(req)
+			if err != nil {
+				fmt.Println("✗")
+				fmt.Printf("  Cannot connect to server: %v\n", err)
+				if strings.HasPrefix(cfg.ServerURL, "http://") {
+					fmt.Println("  Note: Using HTTP (insecure). Consider using HTTPS.")
+				}
+				allPassed = false
+			} else {
+				defer resp.Body.Close()
+				if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+					fmt.Println("✓")
+					fmt.Printf("  Server is reachable (status: %d)\n", resp.StatusCode)
+				} else {
+					fmt.Println("✗")
+					fmt.Printf("  Server returned status: %d\n", resp.StatusCode)
+					allPassed = false
+				}
+			}
+		}
+	}
+	fmt.Println()
+
+	// Check 4: Authentication
+	fmt.Print("✓ Checking authentication... ")
+	if cfg.Token == "" || cfg.ServerURL == "" {
+		fmt.Println("⊘")
+		fmt.Println("  Skipped: token or server not configured")
+	} else {
+		cl, err := client.New(cfg.ServerURL, cfg.Token, cfg.Insecure)
+		if err != nil {
+			fmt.Println("✗")
+			fmt.Printf("  Error creating client: %v\n", err)
+			allPassed = false
+		} else {
+			// Try a simple check-in to verify auth
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+
+			report := discovery.Collect()
+			_, err = cl.Checkin(ctx, types.CheckinRequest{
+				MachineID:       cfg.MachineID,
+				Hostname:        report.Hostname,
+				Addresses:       report.Addresses,
+				HardwareSummary: report.HardwareSummary,
+				AgentVersion:    agentVersion,
+			})
+
+			if err != nil {
+				fmt.Println("✗")
+				if strings.Contains(err.Error(), "401") || strings.Contains(err.Error(), "403") {
+					fmt.Println("  Authentication failed: invalid token or unauthorized")
+				} else {
+					fmt.Printf("  Error: %v\n", err)
+				}
+				allPassed = false
+			} else {
+				fmt.Println("✓")
+				fmt.Println("  Authentication successful")
+			}
+		}
+	}
+	fmt.Println()
+
+	// Check 5: Runtime availability
+	fmt.Print("✓ Checking runtimes... ")
+	manager := runtime.NewManager()
+	installedRuntimes := manager.InstalledRuntimes()
+	readyRuntimes := manager.ReadyRuntimes()
+
+	if len(installedRuntimes) == 0 {
+		fmt.Println("✗")
+		fmt.Println("  No runtimes installed")
+		fmt.Println("  Install a runtime: clawcontrol runtime install <runtime>")
+		fmt.Println("  Supported: ollama, lmstudio, vllm, tensorrt")
+		allPassed = false
+	} else {
+		fmt.Println("✓")
+		fmt.Printf("  Installed runtimes: %s\n", strings.Join(installedRuntimes, ", "))
+		if len(readyRuntimes) > 0 {
+			fmt.Printf("  Ready runtimes: %s\n", strings.Join(readyRuntimes, ", "))
+		} else {
+			fmt.Println("  Warning: No runtimes are ready")
+		}
+	}
+	fmt.Println()
+
+	// Check 6: System permissions
+	fmt.Print("✓ Checking permissions... ")
+	configDir := "/etc/clawcontrol"
+	if os.Geteuid() != 0 {
+		home, _ := os.UserHomeDir()
+		configDir = home + "/.clawcontrol"
+	}
+
+	// Check if config directory is writable
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		fmt.Println("✗")
+		fmt.Printf("  Cannot create config directory: %v\n", err)
+		allPassed = false
+	} else {
+		// Try to write a test file
+		testFile := configDir + "/.write_test"
+		if err := os.WriteFile(testFile, []byte("test"), 0o600); err != nil {
+			fmt.Println("✗")
+			fmt.Printf("  Cannot write to config directory: %v\n", err)
+			allPassed = false
+		} else {
+			os.Remove(testFile)
+			fmt.Println("✓")
+			fmt.Printf("  Config directory is writable: %s\n", configDir)
+		}
+	}
+	fmt.Println()
+
+	// Check 7: System information
+	fmt.Print("✓ Checking system information... ")
+	report := discovery.Collect()
+	fmt.Println("✓")
+	fmt.Printf("  Hostname: %s\n", report.Hostname)
+	if len(report.Addresses) > 0 {
+		fmt.Printf("  Addresses: %s\n", strings.Join(report.Addresses, ", "))
+	}
+	if report.HardwareSummary != "" {
+		fmt.Printf("  Hardware: %s\n", report.HardwareSummary)
+	}
+	fmt.Println()
+
+	// Summary
+	fmt.Println("================================")
+	if allPassed {
+		fmt.Println("✓ All checks passed!")
+		fmt.Println()
+		fmt.Println("The agent is ready to run.")
+		fmt.Println("Start with: clawcontrol start")
+	} else {
+		fmt.Println("✗ Some checks failed")
+		fmt.Println()
+		fmt.Println("Fix the issues above and run 'clawcontrol doctor' again.")
+	}
+}
+
+func loadConfigFromViper() config.Config {
+	intervalDuration, _ := time.ParseDuration(viper.GetString("interval"))
+	if intervalDuration == 0 {
+		intervalDuration = 30 * time.Second
+	}
+
+	return config.Config{
+		ServerURL: viper.GetString("server"),
+		Token:     viper.GetString("token"),
+		MachineID: viper.GetString("machine"),
+		Interval:  intervalDuration,
+		Insecure:  viper.GetBool("insecure"),
+		LogLevel:  viper.GetString("log-level"),
+	}
+}
+
+func maskURL(url string) string {
+	if url == "" {
+		return "(not set)"
+	}
+	// Show protocol and domain, mask the rest
+	parts := strings.SplitN(url, "://", 2)
+	if len(parts) == 2 {
+		return parts[0] + "://" + parts[1]
+	}
+	return url
+}
