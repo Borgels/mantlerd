@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -57,7 +58,9 @@ func (d *vllmDriver) Install() error {
 			return err
 		}
 		image := d.containerImage()
-		_ = runCommand("docker", "pull", image)
+		if err := d.pullContainerImage(image); err != nil {
+			return err
+		}
 		cfg, err := d.readConfig()
 		if err != nil {
 			return nil
@@ -129,6 +132,14 @@ func (d *vllmDriver) IsInstalled() bool {
 	}
 	// Backward compatibility for legacy installs outside the managed venv.
 	return runCommand("python3", "-c", "import vllm") == nil
+}
+
+func (d *vllmDriver) IsReady() bool {
+	if !d.IsInstalled() {
+		return false
+	}
+	_, err := d.fetchRemoteModels()
+	return err == nil
 }
 
 func (d *vllmDriver) Version() string {
@@ -510,11 +521,18 @@ func (d *vllmDriver) startOrRestartService(modelID string, port int, force bool)
 	if containerImage == "" {
 		containerImage = d.containerImage()
 	}
-	envContent := fmt.Sprintf("VLLM_MODEL=%q\nVLLM_PORT=%d\nVLLM_GPU_MEMORY_UTILIZATION=0.9\nVLLM_TRUST_REMOTE_CODE=%s\nVLLM_EXTRA_ARGS=%q\n",
+	if d.shouldUseContainer() {
+		if err := d.pullContainerImage(containerImage); err != nil {
+			return err
+		}
+	}
+	runtimeMode := d.runtimeMode()
+	envContent := fmt.Sprintf("VLLM_MODEL=%q\nVLLM_PORT=%d\nVLLM_GPU_MEMORY_UTILIZATION=0.9\nVLLM_TRUST_REMOTE_CODE=%s\nVLLM_EXTRA_ARGS=%q\nVLLM_RUNTIME_MODE=%q\n",
 		safeModelID,
 		port,
 		trustRemoteCode,
 		extraArgs,
+		runtimeMode,
 	)
 	if d.shouldUseContainer() {
 		envContent += fmt.Sprintf("VLLM_CONTAINER_IMAGE=%q\n", containerImage)
@@ -555,6 +573,39 @@ func (d *vllmDriver) startOrRestartService(modelID string, port int, force bool)
 		return fmt.Errorf("vllm service restarted but API not reachable yet: %w; %s", err, diagnostics)
 	}
 	return nil
+}
+
+func (d *vllmDriver) pullContainerImage(image string) error {
+	image = strings.TrimSpace(image)
+	if image == "" {
+		return fmt.Errorf("vllm container image is required")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "docker", "pull", image)
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		return nil
+	}
+	if ctx.Err() == context.DeadlineExceeded {
+		if d.containerImageExists(image) {
+			return nil
+		}
+		return fmt.Errorf("timed out pulling vllm container image %q and no local image fallback", image)
+	}
+	if d.containerImageExists(image) {
+		return nil
+	}
+	return fmt.Errorf("pull vllm container image %q failed: %w (%s)", image, err, strings.TrimSpace(string(output)))
+}
+
+func (d *vllmDriver) containerImageExists(image string) bool {
+	image = strings.TrimSpace(image)
+	if image == "" {
+		return false
+	}
+	cmd := exec.Command("docker", "image", "inspect", image)
+	return cmd.Run() == nil
 }
 
 func (d *vllmDriver) readConfig() (vllmConfig, error) {
@@ -839,10 +890,17 @@ func (d *vllmDriver) runtimeMode() string {
 	case "native", "container":
 		return mode
 	}
+	envCfg := d.readEnvConfigMap()
+	mode = strings.ToLower(strings.TrimSpace(envCfg["VLLM_RUNTIME_MODE"]))
+	switch mode {
+	case "native", "container":
+		return mode
+	}
+	if _, err := exec.LookPath("docker"); err == nil {
+		return "container"
+	}
 	if goruntime.GOARCH == "arm64" || goruntime.GOARCH == "aarch64" {
-		if _, err := exec.LookPath("docker"); err == nil {
-			return "container"
-		}
+		return "container"
 	}
 	return "native"
 }

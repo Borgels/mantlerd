@@ -6,6 +6,7 @@ type Driver interface {
 	Name() string
 	Install() error
 	IsInstalled() bool
+	IsReady() bool
 	Version() string
 	EnsureModelWithFlags(modelID string, flags *types.ModelFeatureFlags) error
 	ListModels() []string

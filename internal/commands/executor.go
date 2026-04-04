@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -40,6 +41,11 @@ func (e *Executor) Execute(command types.AgentCommand) (string, error) {
 		runtimeName, ok := rawRuntime.(string)
 		if !ok || runtimeName == "" {
 			return "", fmt.Errorf("invalid runtime param")
+		}
+		if strings.EqualFold(strings.TrimSpace(runtimeName), "vllm") {
+			return "", withVLLMRuntimeEnv(command.Params, func() error {
+				return e.runtimeManager.InstallRuntime(runtimeName)
+			})
 		}
 		return "", e.runtimeManager.InstallRuntime(runtimeName)
 	case "pull_model":
@@ -133,6 +139,11 @@ func (e *Executor) Execute(command types.AgentCommand) (string, error) {
 		if runtimeName == "" {
 			return "", e.runtimeManager.RestartRuntime()
 		}
+		if strings.EqualFold(strings.TrimSpace(runtimeName), "vllm") {
+			return "", withVLLMRuntimeEnv(command.Params, func() error {
+				return e.runtimeManager.RestartRuntimeNamed(runtimeName)
+			})
+		}
 		return "", e.runtimeManager.RestartRuntimeNamed(runtimeName)
 	case "update_agent":
 		version := "latest"
@@ -216,6 +227,110 @@ func optionalStringParam(params map[string]interface{}, key string) string {
 		return ""
 	}
 	return strings.TrimSpace(value)
+}
+
+func withVLLMRuntimeEnv(params map[string]interface{}, fn func() error) error {
+	mode := strings.ToLower(optionalStringParam(params, "runtimeMode"))
+	image := optionalStringParam(params, "containerImage")
+
+	var restoreMode *string
+	var restoreImage *string
+
+	if mode != "" {
+		if mode != "container" && mode != "native" {
+			return fmt.Errorf("invalid runtimeMode param for vllm: %s", mode)
+		}
+		if current, ok := os.LookupEnv("VLLM_RUNTIME_MODE"); ok {
+			tmp := current
+			restoreMode = &tmp
+		}
+		_ = os.Setenv("VLLM_RUNTIME_MODE", mode)
+	}
+	if image != "" {
+		if current, ok := os.LookupEnv("VLLM_CONTAINER_IMAGE"); ok {
+			tmp := current
+			restoreImage = &tmp
+		}
+		_ = os.Setenv("VLLM_CONTAINER_IMAGE", image)
+	}
+	if mode != "" || image != "" {
+		if err := persistVLLMEnvOverrides(mode, image); err != nil {
+			return err
+		}
+	}
+	defer func() {
+		if mode != "" {
+			if restoreMode != nil {
+				_ = os.Setenv("VLLM_RUNTIME_MODE", *restoreMode)
+			} else {
+				_ = os.Unsetenv("VLLM_RUNTIME_MODE")
+			}
+		}
+		if image != "" {
+			if restoreImage != nil {
+				_ = os.Setenv("VLLM_CONTAINER_IMAGE", *restoreImage)
+			} else {
+				_ = os.Unsetenv("VLLM_CONTAINER_IMAGE")
+			}
+		}
+	}()
+
+	return fn()
+}
+
+func persistVLLMEnvOverrides(mode string, image string) error {
+	const vllmEnvPath = "/etc/clawcontrol/vllm.env"
+	if mode == "" && image == "" {
+		return nil
+	}
+	values := map[string]string{}
+	order := make([]string, 0, 8)
+	addKey := func(key, value string) {
+		if _, exists := values[key]; !exists {
+			order = append(order, key)
+		}
+		values[key] = value
+	}
+	if raw, err := os.ReadFile(vllmEnvPath); err == nil {
+		for _, line := range strings.Split(string(raw), "\n") {
+			trimmed := strings.TrimSpace(line)
+			if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+				continue
+			}
+			parts := strings.SplitN(trimmed, "=", 2)
+			if len(parts) != 2 {
+				continue
+			}
+			key := strings.TrimSpace(parts[0])
+			val := strings.TrimSpace(parts[1])
+			if key == "" {
+				continue
+			}
+			val = strings.Trim(val, "\"")
+			addKey(key, val)
+		}
+	}
+	if mode != "" {
+		addKey("VLLM_RUNTIME_MODE", mode)
+	}
+	if image != "" {
+		addKey("VLLM_CONTAINER_IMAGE", image)
+	}
+	if err := os.MkdirAll(filepath.Dir(vllmEnvPath), 0o755); err != nil {
+		return fmt.Errorf("create vllm env directory: %w", err)
+	}
+	lines := make([]string, 0, len(order))
+	for _, key := range order {
+		lines = append(lines, fmt.Sprintf("%s=%s", key, values[key]))
+	}
+	payload := strings.Join(lines, "\n")
+	if payload != "" {
+		payload += "\n"
+	}
+	if err := os.WriteFile(vllmEnvPath, []byte(payload), 0o600); err != nil {
+		return fmt.Errorf("persist vllm runtime settings: %w", err)
+	}
+	return nil
 }
 
 func (e *Executor) startAgentUpdate(version string) (string, error) {
