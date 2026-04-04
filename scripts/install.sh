@@ -306,7 +306,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=${INSTALL_DIR}/${BINARY_NAME} --config ${CONFIG_PATH}
+ExecStart=${INSTALL_DIR}/${BINARY_NAME} start --config ${CONFIG_PATH}
 Restart=always
 RestartSec=5
 User=root
