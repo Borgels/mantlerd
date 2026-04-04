@@ -15,7 +15,6 @@ import (
 	"github.com/Borgels/clawcontrol-agent/internal/runtime"
 	"github.com/Borgels/clawcontrol-agent/internal/types"
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
 )
 
 var startCmd = &cobra.Command{
@@ -32,7 +31,7 @@ func init() {
 
 func runStart(cmd *cobra.Command, args []string) {
 	// Load configuration
-	cfg := loadConfig()
+	cfg := loadConfig(cmd)
 
 	// Create API client
 	cl, err := client.New(cfg.ServerURL, cfg.Token, cfg.Insecure)
@@ -68,37 +67,50 @@ func runStart(cmd *cobra.Command, args []string) {
 	}
 }
 
-func loadConfig() config.Config {
-	// Build config from viper and flags
-	intervalDuration, err := time.ParseDuration(viper.GetString("interval"))
-	if err != nil {
-		log.Fatalf("invalid interval duration: %v", err)
+func loadConfig(cmd *cobra.Command) config.Config {
+	configPath := cfgFile
+	if configPath == "" {
+		configPath = config.DefaultConfigPath()
 	}
 
-	cfg := config.Config{
-		ServerURL: viper.GetString("server"),
-		Token:     viper.GetString("token"),
-		MachineID: viper.GetString("machine"),
-		Interval:  intervalDuration,
-		Insecure:  viper.GetBool("insecure"),
-		LogLevel:  viper.GetString("log-level"),
+	fileCfg := config.Config{}
+	loadedCfg, err := config.Load(configPath)
+	if err == nil {
+		fileCfg = loadedCfg
+	} else if !os.IsNotExist(err) {
+		log.Fatalf("load config: %v", err)
 	}
 
-	// Apply flag values if set (flags override config file)
-	if serverURL != "" {
-		cfg.ServerURL = serverURL
+	flagsCfg := config.Config{}
+	if cmd.Flags().Changed("server") {
+		flagsCfg.ServerURL = serverURL
 	}
-	if token != "" {
-		cfg.Token = token
+	if cmd.Flags().Changed("token") {
+		flagsCfg.Token = token
 	}
-	if machineID != "" {
-		cfg.MachineID = machineID
+	if cmd.Flags().Changed("machine") {
+		flagsCfg.MachineID = machineID
 	}
-	if insecure {
-		cfg.Insecure = insecure
+	if cmd.Flags().Changed("interval") {
+		intervalDuration, parseErr := time.ParseDuration(interval)
+		if parseErr != nil {
+			log.Fatalf("invalid interval duration: %v", parseErr)
+		}
+		flagsCfg.Interval = intervalDuration
 	}
-	if logLevel != "" {
-		cfg.LogLevel = logLevel
+	if cmd.Flags().Changed("insecure") {
+		flagsCfg.Insecure = insecure
+	}
+	if cmd.Flags().Changed("log-level") {
+		flagsCfg.LogLevel = logLevel
+	}
+
+	cfg := config.Merge(fileCfg, flagsCfg)
+	if cfg.Interval <= 0 {
+		cfg.Interval = 30 * time.Second
+	}
+	if cfg.LogLevel == "" {
+		cfg.LogLevel = "info"
 	}
 
 	// Validate
@@ -107,10 +119,6 @@ func loadConfig() config.Config {
 	}
 
 	// Persist config
-	configPath := cfgFile
-	if configPath == "" {
-		configPath = config.DefaultConfigPath()
-	}
 	if err := config.Save(configPath, cfg); err != nil {
 		log.Fatalf("persist config: %v", err)
 	}

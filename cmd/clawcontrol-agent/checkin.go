@@ -33,7 +33,7 @@ func init() {
 
 func runCheckin(cmd *cobra.Command, args []string) {
 	// Load configuration
-	cfg := loadConfig()
+	cfg := loadConfig(cmd)
 
 	// Create API client
 	cl, err := client.New(cfg.ServerURL, cfg.Token, cfg.Insecure)
