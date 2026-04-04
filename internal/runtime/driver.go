@@ -5,6 +5,7 @@ import "github.com/Borgels/clawcontrol-agent/internal/types"
 type Driver interface {
 	Name() string
 	Install() error
+	Uninstall() error
 	IsInstalled() bool
 	IsReady() bool
 	Version() string

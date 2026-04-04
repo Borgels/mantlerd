@@ -17,6 +17,7 @@ func NewManager() *Manager {
 		"ollama":   newOllamaDriver(),
 		"vllm":     newVLLMDriver(),
 		"lmstudio": newLMStudioDriver(),
+		"tensorrt": newTensorRTDriver(),
 	}
 	return &Manager{drivers: drivers}
 }
@@ -87,6 +88,14 @@ func (m *Manager) InstallRuntime(runtimeName string) error {
 		return err
 	}
 	return driver.Install()
+}
+
+func (m *Manager) UninstallRuntime(runtimeName string) error {
+	driver, err := m.driverFor(runtimeName)
+	if err != nil {
+		return err
+	}
+	return driver.Uninstall()
 }
 
 func (m *Manager) IsRuntimeInstalled(runtimeName string) bool {

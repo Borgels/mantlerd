@@ -30,6 +30,17 @@ func (d *ollamaDriver) Install() error {
 	return runCommand("sh", "-c", "curl -fsSL https://ollama.com/install.sh | sh")
 }
 
+func (d *ollamaDriver) Uninstall() error {
+	_ = runCommand("systemctl", "stop", "ollama")
+	_ = runCommand("systemctl", "disable", "ollama")
+	_ = os.Remove("/etc/systemd/system/ollama.service")
+	_ = runCommand("systemctl", "daemon-reload")
+	for _, bin := range []string{"/usr/local/bin/ollama", "/usr/bin/ollama"} {
+		_ = os.Remove(bin)
+	}
+	return nil
+}
+
 func (d *ollamaDriver) IsInstalled() bool {
 	return runCommand("sh", "-c", "command -v ollama") == nil
 }
