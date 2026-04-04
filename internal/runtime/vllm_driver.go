@@ -532,6 +532,21 @@ func (d *vllmDriver) startOrRestartService(modelID string, port int, force bool)
 	if trustRemoteCode == "" {
 		trustRemoteCode = "false"
 	}
+	hfToken := strings.TrimSpace(existingEnv["HF_TOKEN"])
+	if hfToken == "" {
+		hfToken = strings.TrimSpace(os.Getenv("HF_TOKEN"))
+	}
+	hfHubToken := strings.TrimSpace(existingEnv["HUGGING_FACE_HUB_TOKEN"])
+	if hfHubToken == "" {
+		hfHubToken = strings.TrimSpace(os.Getenv("HUGGING_FACE_HUB_TOKEN"))
+	}
+	if hfHubToken == "" {
+		// Keep both env var names aligned for runtimes that only read one.
+		hfHubToken = hfToken
+	}
+	if hfToken == "" {
+		hfToken = hfHubToken
+	}
 	extraArgs := strings.TrimSpace(existingEnv["VLLM_EXTRA_ARGS"])
 	if existingLibrary := strings.TrimSpace(existingEnv["VLLM_LD_LIBRARY_PATH"]); existingLibrary != "" {
 		libraryPath = existingLibrary
@@ -553,6 +568,12 @@ func (d *vllmDriver) startOrRestartService(modelID string, port int, force bool)
 		extraArgs,
 		runtimeMode,
 	)
+	if hfToken != "" {
+		envContent += fmt.Sprintf("HF_TOKEN=%q\n", hfToken)
+	}
+	if hfHubToken != "" {
+		envContent += fmt.Sprintf("HUGGING_FACE_HUB_TOKEN=%q\n", hfHubToken)
+	}
 	if d.shouldUseContainer() {
 		envContent += fmt.Sprintf("VLLM_CONTAINER_IMAGE=%q\n", containerImage)
 	} else {
@@ -632,6 +653,8 @@ func (d *vllmDriver) enableTrustRemoteCodeInEnv() error {
 		"VLLM_TRUST_REMOTE_CODE",
 		"VLLM_EXTRA_ARGS",
 		"VLLM_RUNTIME_MODE",
+		"HF_TOKEN",
+		"HUGGING_FACE_HUB_TOKEN",
 		"VLLM_CONTAINER_IMAGE",
 		"VLLM_LD_LIBRARY_PATH",
 	}
@@ -1011,6 +1034,11 @@ func (d *vllmDriver) ensureDockerAvailable() error {
 func (d *vllmDriver) classifyKnownStartupFailure(diagnostics string) string {
 	text := strings.ToLower(diagnostics)
 	switch {
+	case strings.Contains(text, "401") && (strings.Contains(text, "huggingface") ||
+		strings.Contains(text, "gated") ||
+		strings.Contains(text, "authentication") ||
+		strings.Contains(text, "authorization")):
+		return "hint: model download needs Hugging Face auth; set HF_TOKEN (or HUGGING_FACE_HUB_TOKEN) in /etc/clawcontrol/vllm.env so vLLM can access gated repos"
 	case strings.Contains(text, "libcudart.so.12"):
 		return "hint: CUDA runtime libraries are missing from loader path; install nvidia-cuda-runtime-cu12 and set VLLM_LD_LIBRARY_PATH"
 	case strings.Contains(text, "libtorch_cuda.so"):
