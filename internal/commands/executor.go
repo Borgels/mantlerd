@@ -154,6 +154,19 @@ func (e *Executor) ExecuteWithContext(ctx context.Context, command types.AgentCo
 		}
 		runtimeName := optionalStringParam(command.Params, "runtime")
 		return ExecutionResult{}, e.runtimeManager.RemoveModelWithRuntime(modelID, runtimeName)
+	case "build_model":
+		modelID, err := stringParam(command.Params, "modelId")
+		if err != nil {
+			return ExecutionResult{}, err
+		}
+		opts := parseBuildOptions(command.Params)
+		if err := e.runtimeManager.BuildModel(cmdCtx, modelID, opts); err != nil {
+			if errors.Is(err, context.Canceled) {
+				return ExecutionResult{}, ErrCommandCancelled
+			}
+			return ExecutionResult{}, err
+		}
+		return ExecutionResult{Details: "engine built successfully"}, nil
 	case "health_check":
 		scope, _ := command.Params["scope"].(string)
 		if scope != "model_benchmark" {
@@ -374,6 +387,31 @@ func optionalStringParam(params map[string]interface{}, key string) string {
 		return ""
 	}
 	return strings.TrimSpace(value)
+}
+
+func parseBuildOptions(params map[string]interface{}) runtime.BuildOptions {
+	opts := runtime.BuildOptions{
+		Quantization: optionalStringParam(params, "quantization"),
+		TPSize:       intParam(params, "tpSize", 1),
+		MaxBatchSize: intParam(params, "maxBatchSize", 4),
+		MaxSeqLen:    intParam(params, "maxSeqLen", 8192),
+	}
+	// Also check nested buildOptions object
+	if raw, ok := params["buildOptions"].(map[string]interface{}); ok {
+		if q := optionalStringParam(raw, "quantization"); q != "" {
+			opts.Quantization = q
+		}
+		if v := intParam(raw, "tpSize", 0); v > 0 {
+			opts.TPSize = v
+		}
+		if v := intParam(raw, "maxBatchSize", 0); v > 0 {
+			opts.MaxBatchSize = v
+		}
+		if v := intParam(raw, "maxSeqLen", 0); v > 0 {
+			opts.MaxSeqLen = v
+		}
+	}
+	return opts
 }
 
 type requiredProfileFile struct {

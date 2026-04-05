@@ -27,6 +27,7 @@ const (
 	tensorrtDefaultPort     = 8000
 	tensorrtReadyTimeout    = 180 * time.Second
 	tensorrtRestartCooldown = 90 * time.Second
+	tensorrtEnginesDir      = "/var/lib/clawcontrol/trt-engines"
 )
 
 type tensorrtConfig struct {
@@ -219,6 +220,11 @@ func (d *tensorrtDriver) InstalledModels() []types.InstalledModel {
 			FailReason: failReason,
 		})
 	}
+	// Report built engines first (highest priority status)
+	for _, built := range d.builtModels() {
+		addModel(built, types.ModelBuilt, "")
+	}
+	// Report downloaded but not-yet-built models
 	for _, prepared := range d.preparedModels() {
 		addModel(prepared, types.ModelDownloaded, "")
 	}
@@ -272,6 +278,7 @@ func (d *tensorrtDriver) RemoveModel(modelID string) error {
 	}
 	_ = d.StopModel(modelID)
 	_ = d.unmarkPreparedModel(modelID)
+	_ = d.removeBuiltEngine(modelID)
 	return nil
 }
 
@@ -878,4 +885,168 @@ func markTensorRTRestart() {
 	tensorrtRestartMu.Lock()
 	lastTensorRTRestartAt = time.Now()
 	tensorrtRestartMu.Unlock()
+}
+
+// ---------------------------------------------------------------------------
+// TensorRT Engine Build Support (BuildableDriver interface)
+// ---------------------------------------------------------------------------
+
+func tensorrtEngineDir(modelID string) string {
+	return filepath.Join(tensorrtEnginesDir, safeModelPathSegment(modelID))
+}
+
+// IsModelBuilt checks if a TensorRT engine exists for the given model.
+func (d *tensorrtDriver) IsModelBuilt(modelID string) bool {
+	engineDir := tensorrtEngineDir(modelID)
+	// Check for engine file presence (config.json indicates completed build)
+	configPath := filepath.Join(engineDir, "config.json")
+	_, err := os.Stat(configPath)
+	return err == nil
+}
+
+// BuiltEnginePath returns the path to a built TensorRT engine directory.
+func (d *tensorrtDriver) BuiltEnginePath(modelID string) (string, bool) {
+	if !d.IsModelBuilt(modelID) {
+		return "", false
+	}
+	return tensorrtEngineDir(modelID), true
+}
+
+// BuildModel compiles a TensorRT-LLM engine from downloaded HuggingFace weights.
+func (d *tensorrtDriver) BuildModel(ctx context.Context, modelID string, opts BuildOptions) error {
+	trimmed := strings.TrimSpace(modelID)
+	if trimmed == "" {
+		return fmt.Errorf("model ID is required")
+	}
+
+	// 1. Ensure weights are downloaded
+	if err := d.PrepareModelWithFlagsCtx(ctx, trimmed, nil); err != nil {
+		return fmt.Errorf("download model weights: %w", err)
+	}
+
+	// 2. Check if already built
+	if d.IsModelBuilt(trimmed) {
+		return nil
+	}
+
+	// 3. Create engine output directory
+	engineDir := tensorrtEngineDir(trimmed)
+	if err := os.MkdirAll(engineDir, 0o755); err != nil {
+		return fmt.Errorf("create engine directory: %w", err)
+	}
+
+	// 4. Determine build parameters
+	quant := opts.Quantization
+	if quant == "" {
+		quant = "none"
+	}
+	tpSize := opts.TPSize
+	if tpSize <= 0 {
+		tpSize = 1
+	}
+	maxBatchSize := opts.MaxBatchSize
+	if maxBatchSize <= 0 {
+		maxBatchSize = 4
+	}
+	maxSeqLen := opts.MaxSeqLen
+	if maxSeqLen <= 0 {
+		maxSeqLen = 8192
+	}
+
+	// 5. Build the engine using trtllm-build in container
+	if err := d.ensureDockerAvailable(); err != nil {
+		return err
+	}
+	image := d.containerImage()
+	if !d.containerImageExists(image) {
+		if err := d.pullContainerImageCtx(ctx, image); err != nil {
+			return err
+		}
+	}
+
+	// Build arguments for trtllm-build
+	buildArgs := []string{
+		"--model_dir", "/root/.cache/huggingface/hub/models--" + strings.ReplaceAll(trimmed, "/", "--") + "/snapshots",
+		"--output_dir", "/output",
+		"--tp_size", fmt.Sprintf("%d", tpSize),
+		"--max_batch_size", fmt.Sprintf("%d", maxBatchSize),
+		"--max_seq_len", fmt.Sprintf("%d", maxSeqLen),
+	}
+	if quant != "none" {
+		buildArgs = append(buildArgs, "--quantization", quant)
+	}
+
+	// Run trtllm-build inside container
+	dockerArgs := []string{
+		"run", "--rm",
+		"--gpus", "all",
+		"--ipc=host",
+		"-v", "/root/.cache/huggingface:/root/.cache/huggingface",
+		"-v", engineDir + ":/output",
+		image,
+		"trtllm-build",
+	}
+	dockerArgs = append(dockerArgs, buildArgs...)
+
+	cmd := exec.CommandContext(ctx, "docker", dockerArgs...)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		// Clean up failed build directory
+		_ = os.RemoveAll(engineDir)
+		return fmt.Errorf("trtllm-build failed: %w (%s)", err, strings.TrimSpace(string(output)))
+	}
+
+	// 6. Write build config for tracking
+	configPath := filepath.Join(engineDir, "config.json")
+	configData := map[string]interface{}{
+		"modelId":      trimmed,
+		"quantization": quant,
+		"tpSize":       tpSize,
+		"maxBatchSize": maxBatchSize,
+		"maxSeqLen":    maxSeqLen,
+		"builtAt":      time.Now().UTC().Format(time.RFC3339),
+	}
+	configJSON, _ := json.MarshalIndent(configData, "", "  ")
+	if err := os.WriteFile(configPath, configJSON, 0o644); err != nil {
+		return fmt.Errorf("write engine config: %w", err)
+	}
+
+	return nil
+}
+
+// builtModels returns a list of models with built TensorRT engines.
+func (d *tensorrtDriver) builtModels() []string {
+	entries, err := os.ReadDir(tensorrtEnginesDir)
+	if err != nil {
+		return nil
+	}
+	models := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		configPath := filepath.Join(tensorrtEnginesDir, entry.Name(), "config.json")
+		raw, err := os.ReadFile(configPath)
+		if err != nil {
+			continue
+		}
+		var cfg map[string]interface{}
+		if json.Unmarshal(raw, &cfg) != nil {
+			continue
+		}
+		if modelID, ok := cfg["modelId"].(string); ok && modelID != "" {
+			models = append(models, modelID)
+		}
+	}
+	sort.Strings(models)
+	return models
+}
+
+// removeBuiltEngine removes a built TensorRT engine.
+func (d *tensorrtDriver) removeBuiltEngine(modelID string) error {
+	engineDir := tensorrtEngineDir(modelID)
+	return os.RemoveAll(engineDir)
 }
