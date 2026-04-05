@@ -182,6 +182,8 @@ func (e *Executor) Execute(command types.AgentCommand) (ExecutionResult, error) 
 		return ExecutionResult{Details: details}, nil
 	case "run_harness_exec":
 		return e.runHarnessExec(command)
+	case "run_orchestrator_exec":
+		return e.runOrchestratorExec(command)
 	case "sync_harnesses":
 		desiredHarnesses, err := desiredHarnessesParam(command.Params)
 		if err != nil {

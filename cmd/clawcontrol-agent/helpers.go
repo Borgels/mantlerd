@@ -434,6 +434,118 @@ func probeHarnessVersion(commandPath string) string {
 	return strings.TrimSpace(string(output))
 }
 
+func toInstalledOrchestrators(desired types.DesiredConfig) []types.InstalledOrchestrator {
+	result := make([]types.InstalledOrchestrator, 0, len(desired.Orchestrators))
+	for _, orchestrator := range desired.Orchestrators {
+		if strings.TrimSpace(orchestrator.Type) == "" {
+			continue
+		}
+		item := types.InstalledOrchestrator{
+			ID:           orchestrator.ID,
+			Name:         orchestrator.Name,
+			Type:         orchestrator.Type,
+			Status:       "configuring",
+			Capabilities: orchestrator.Capabilities,
+		}
+
+		switch orchestrator.Type {
+		case "builtin":
+			if item.Capabilities == nil {
+				item.Capabilities = defaultOrchestratorCapabilities(orchestrator.Type)
+			}
+			item.Status = "ready"
+			item.Detail = "Built-in orchestrator is managed by ClawControl."
+		case "crewai":
+			if item.Capabilities == nil {
+				item.Capabilities = defaultOrchestratorCapabilities(orchestrator.Type)
+			}
+			path, err := exec.LookPath(firstNonEmpty(orchestrator.Command, "crewai"))
+			if err != nil {
+				item.Status = "offline"
+				item.Detail = "CrewAI executable was not found in PATH"
+			} else {
+				item.Status = "ready"
+				item.Version = probeHarnessVersion(path)
+				item.Detail = executableDetail(path, item.Version)
+			}
+		case "langgraph":
+			if item.Capabilities == nil {
+				item.Capabilities = defaultOrchestratorCapabilities(orchestrator.Type)
+			}
+			path, err := exec.LookPath(firstNonEmpty(orchestrator.Command, "langgraph"))
+			if err != nil {
+				item.Status = "offline"
+				item.Detail = "LangGraph executable was not found in PATH"
+			} else {
+				item.Status = "ready"
+				item.Version = probeHarnessVersion(path)
+				item.Detail = executableDetail(path, item.Version)
+			}
+		case "autogen":
+			if item.Capabilities == nil {
+				item.Capabilities = defaultOrchestratorCapabilities(orchestrator.Type)
+			}
+			path, err := exec.LookPath(firstNonEmpty(orchestrator.Command, "autogen"))
+			if err != nil {
+				item.Status = "offline"
+				item.Detail = "AutoGen executable was not found in PATH"
+			} else {
+				item.Status = "ready"
+				item.Version = probeHarnessVersion(path)
+				item.Detail = executableDetail(path, item.Version)
+			}
+		default:
+			item.Status = "failed"
+			item.Detail = fmt.Sprintf("Unknown orchestrator type %s", orchestrator.Type)
+		}
+
+		result = append(result, item)
+	}
+	return result
+}
+
+func defaultOrchestratorCapabilities(orchestratorType string) *types.OrchestratorCapabilities {
+	switch orchestratorType {
+	case "builtin":
+		return &types.OrchestratorCapabilities{
+			SupportsQualityGates:     boolPtr(true),
+			SupportsSkillInjection:   boolPtr(true),
+			SupportsSubTasks:         boolPtr(true),
+			SupportsConcurrentAgents: boolPtr(false),
+		}
+	case "crewai", "langgraph", "autogen":
+		return &types.OrchestratorCapabilities{
+			SupportsQualityGates:     boolPtr(true),
+			SupportsSkillInjection:   boolPtr(true),
+			SupportsSubTasks:         boolPtr(true),
+			SupportsConcurrentAgents: boolPtr(true),
+		}
+	default:
+		return nil
+	}
+}
+
+func boolPtr(value bool) *bool {
+	return &value
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
+func executableDetail(path string, version string) string {
+	if version != "" {
+		return "Detected " + version
+	}
+	return "Detected executable at " + path
+}
+
 func harnessReportsDiffer(a []types.InstalledHarness, b []types.InstalledHarness) bool {
 	if len(a) != len(b) {
 		return true
@@ -481,6 +593,55 @@ func harnessReportsDiffer(a []types.InstalledHarness, b []types.InstalledHarness
 					}
 					return ""
 				}(),
+			}
+		}
+		return result
+	}
+
+	left := toMap(a)
+	right := toMap(b)
+	if len(left) != len(right) {
+		return true
+	}
+	for key, value := range left {
+		if right[key] != value {
+			return true
+		}
+	}
+	return false
+}
+
+func orchestratorReportsDiffer(a []types.InstalledOrchestrator, b []types.InstalledOrchestrator) bool {
+	if len(a) != len(b) {
+		return true
+	}
+	if len(a) == 0 {
+		return false
+	}
+
+	type comparableOrchestrator struct {
+		ID      string
+		Name    string
+		Type    string
+		Status  string
+		Version string
+		Detail  string
+	}
+
+	toMap := func(items []types.InstalledOrchestrator) map[string]comparableOrchestrator {
+		result := make(map[string]comparableOrchestrator, len(items))
+		for _, item := range items {
+			key := strings.TrimSpace(item.ID)
+			if key == "" {
+				key = strings.TrimSpace(item.Type + "::" + item.Name)
+			}
+			result[key] = comparableOrchestrator{
+				ID:      item.ID,
+				Name:    item.Name,
+				Type:    item.Type,
+				Status:  item.Status,
+				Version: item.Version,
+				Detail:  item.Detail,
 			}
 		}
 		return result

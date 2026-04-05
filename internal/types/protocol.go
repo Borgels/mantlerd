@@ -64,15 +64,16 @@ type CheckinRequest struct {
 	GPUs                  []GPUInfo                     `json:"gpus,omitempty"`
 	AgentVersion          string                        `json:"agentVersion,omitempty"`
 	RuntimeStatus         RuntimeStatus                 `json:"runtimeStatus,omitempty"`
-	RuntimeStatuses       map[RuntimeType]RuntimeStatus `json:"runtimeStatuses,omitempty"`
-	RuntimeType           RuntimeType                   `json:"runtimeType,omitempty"`
-	InstalledRuntimeTypes []RuntimeType                 `json:"installedRuntimeTypes,omitempty"`
-	RuntimeVersion        string                        `json:"runtimeVersion,omitempty"`
-	RuntimeVersions       map[RuntimeType]string        `json:"runtimeVersions,omitempty"`
-	InstalledModels       []InstalledModel              `json:"installedModels,omitempty"`
-	InstalledHarnesses    []InstalledHarness            `json:"installedHarnesses,omitempty"`
-	Uptime                int64                         `json:"uptime,omitempty"`
-	LoadAvg               []float64                     `json:"loadAvg,omitempty"`
+	RuntimeStatuses        map[RuntimeType]RuntimeStatus `json:"runtimeStatuses,omitempty"`
+	RuntimeType            RuntimeType                   `json:"runtimeType,omitempty"`
+	InstalledRuntimeTypes  []RuntimeType                 `json:"installedRuntimeTypes,omitempty"`
+	RuntimeVersion         string                        `json:"runtimeVersion,omitempty"`
+	RuntimeVersions        map[RuntimeType]string        `json:"runtimeVersions,omitempty"`
+	InstalledModels        []InstalledModel              `json:"installedModels,omitempty"`
+	InstalledHarnesses     []InstalledHarness            `json:"installedHarnesses,omitempty"`
+	InstalledOrchestrators []InstalledOrchestrator       `json:"installedOrchestrators,omitempty"`
+	Uptime                 int64                         `json:"uptime,omitempty"`
+	LoadAvg                []float64                     `json:"loadAvg,omitempty"`
 }
 
 type HarnessCapabilities struct {
@@ -108,6 +109,23 @@ type InstalledHarness struct {
 	Capabilities   *HarnessCapabilities    `json:"capabilities,omitempty"`
 }
 
+type OrchestratorCapabilities struct {
+	SupportsQualityGates     *bool `json:"supportsQualityGates,omitempty"`
+	SupportsSkillInjection   *bool `json:"supportsSkillInjection,omitempty"`
+	SupportsSubTasks         *bool `json:"supportsSubTasks,omitempty"`
+	SupportsConcurrentAgents *bool `json:"supportsConcurrentAgents,omitempty"`
+}
+
+type InstalledOrchestrator struct {
+	ID           string                    `json:"id,omitempty"`
+	Name         string                    `json:"name,omitempty"`
+	Type         string                    `json:"type"`
+	Status       string                    `json:"status"`
+	Version      string                    `json:"version,omitempty"`
+	Detail       string                    `json:"detail,omitempty"`
+	Capabilities *OrchestratorCapabilities `json:"capabilities,omitempty"`
+}
+
 type AgentCommand struct {
 	ID     string                 `json:"id"`
 	Type   string                 `json:"type"`
@@ -133,10 +151,11 @@ type ModelTarget struct {
 }
 
 type DesiredConfig struct {
-	Runtimes     []RuntimeType    `json:"runtimes"`
-	Models       []string         `json:"models"`
-	ModelTargets []ModelTarget    `json:"modelTargets,omitempty"`
-	Harnesses    []DesiredHarness `json:"harnesses,omitempty"`
+	Runtimes      []RuntimeType         `json:"runtimes"`
+	Models        []string              `json:"models"`
+	ModelTargets  []ModelTarget         `json:"modelTargets,omitempty"`
+	Harnesses     []DesiredHarness      `json:"harnesses,omitempty"`
+	Orchestrators []DesiredOrchestrator `json:"orchestrators,omitempty"`
 }
 
 type DesiredHarness struct {
@@ -150,6 +169,18 @@ type DesiredHarness struct {
 	ManagedModelID string                 `json:"managedModelId,omitempty"`
 	Description    string                 `json:"description,omitempty"`
 	Capabilities   *HarnessCapabilities   `json:"capabilities,omitempty"`
+}
+
+type DesiredOrchestrator struct {
+	ID           string                    `json:"id,omitempty"`
+	Name         string                    `json:"name,omitempty"`
+	Type         string                    `json:"type"`
+	Status       string                    `json:"status,omitempty"`
+	Version      string                    `json:"version,omitempty"`
+	Detail       string                    `json:"detail,omitempty"`
+	Command      string                    `json:"command,omitempty"`
+	WorkingDir   string                    `json:"workingDir,omitempty"`
+	Capabilities *OrchestratorCapabilities `json:"capabilities,omitempty"`
 }
 
 type CommandStreamUsage struct {
