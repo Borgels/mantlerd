@@ -42,6 +42,7 @@ func runDoctor(cmd *cobra.Command, args []string) {
 	fmt.Println()
 
 	allPassed := true
+	fileCfg := config.Config{}
 
 	// Check 1: Configuration file
 	fmt.Print("✓ Checking configuration... ")
@@ -64,6 +65,7 @@ func runDoctor(cmd *cobra.Command, args []string) {
 			fmt.Printf("  Error reading config: %v\n", err)
 			allPassed = false
 		} else {
+			fileCfg = cfg
 			fmt.Println("✓")
 			fmt.Printf("  Config file: %s\n", configPath)
 			if cfg.ServerURL != "" {
@@ -75,7 +77,7 @@ func runDoctor(cmd *cobra.Command, args []string) {
 
 	// Check 2: Required configuration values
 	fmt.Print("✓ Checking required settings... ")
-	cfg := loadConfigFromViper()
+	cfg := mergeDoctorConfig(fileCfg, loadConfigFromViper())
 	missing := []string{}
 
 	if cfg.ServerURL == "" {
@@ -278,6 +280,23 @@ func loadConfigFromViper() config.Config {
 		Insecure:  viper.GetBool("insecure"),
 		LogLevel:  viper.GetString("log-level"),
 	}
+}
+
+func mergeDoctorConfig(fileCfg config.Config, viperCfg config.Config) config.Config {
+	merged := fileCfg
+	if viperCfg.ServerURL != "" {
+		merged.ServerURL = viperCfg.ServerURL
+	}
+	if viperCfg.Token != "" {
+		merged.Token = viperCfg.Token
+	}
+	if viperCfg.MachineID != "" {
+		merged.MachineID = viperCfg.MachineID
+	}
+	if viperCfg.Insecure {
+		merged.Insecure = true
+	}
+	return merged
 }
 
 func maskURL(url string) string {
