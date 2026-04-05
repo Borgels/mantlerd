@@ -86,23 +86,26 @@ func (d *lmstudioDriver) Uninstall() error {
 }
 
 func (d *lmstudioDriver) IsInstalled() bool {
-	return strings.TrimSpace(d.resolveLMSPath()) != ""
+	cliPath := strings.TrimSpace(d.resolveLMSPath())
+	if cliPath != "" {
+		return true
+	}
+	// Under hardened systemd settings (ProtectHome=true), the daemon may not
+	// be able to stat /home/*/.lmstudio/bin/lms even when LM Studio is
+	// installed and managed via systemd. Treat managed artifacts as installed.
+	if _, err := os.Stat(lmsServiceUnitPath); err == nil {
+		return true
+	}
+	if _, err := os.Stat(lmsConfigPath); err == nil {
+		return true
+	}
+	return false
 }
 
 func (d *lmstudioDriver) IsReady() bool {
-	path := d.resolveLMSPath()
-	if path == "" {
-		return false
-	}
-	if _, err := exec.LookPath("systemctl"); err == nil {
-		active, activeErr := isSystemdServiceActive("lmstudio")
-		if activeErr == nil && !active {
-			return false
-		}
-	}
-	if running, known := d.daemonRunning(path); known && !running {
-		return false
-	}
+	// LM Studio's CLI often daemonizes/returns immediately, which can make the
+	// systemd unit report transient "deactivating" states even while the API is
+	// healthy. Treat API health as the source of truth for readiness.
 	_, err := d.fetchRemoteModels()
 	return err == nil
 }
@@ -175,9 +178,14 @@ func (d *lmstudioDriver) EnsureModelWithFlags(modelID string, _ *types.ModelFeat
 	if err := d.Install(); err != nil {
 		return err
 	}
-	resolvedModelID, err := d.loadModel(modelID)
-	if err != nil {
-		return err
+	normalizedModelID := normalizeLMStudioModelID(modelID)
+	resolvedModelID := normalizedModelID
+	if !d.HasModel(normalizedModelID) {
+		loadedModelID, err := d.loadModel(modelID)
+		if err != nil {
+			return err
+		}
+		resolvedModelID = normalizeLMStudioModelID(loadedModelID)
 	}
 	cfg, _ := d.readConfig()
 	cfg.Model = resolvedModelID
@@ -195,23 +203,22 @@ func (d *lmstudioDriver) ListModels() []string {
 	if err != nil {
 		return nil
 	}
-	return models
+	return collapseLMStudioModelIDs(models)
 }
 
 func (d *lmstudioDriver) InstalledModels() []types.InstalledModel {
 	result := make([]types.InstalledModel, 0)
 	seen := map[string]struct{}{}
 	cfg, _ := d.readConfig()
-	configured := strings.TrimSpace(cfg.Model)
+	configured := normalizeLMStudioModelID(strings.TrimSpace(cfg.Model))
 
 	models, err := d.fetchRemoteModels()
 	if err == nil {
-		for _, model := range models {
-			model = strings.TrimSpace(model)
+		for _, model := range collapseLMStudioModelIDs(models) {
 			if model == "" {
 				continue
 			}
-			seen[model] = struct{}{}
+			seen[strings.ToLower(model)] = struct{}{}
 			result = append(result, types.InstalledModel{
 				ModelID: model,
 				Runtime: types.RuntimeLMStudio,
@@ -219,7 +226,7 @@ func (d *lmstudioDriver) InstalledModels() []types.InstalledModel {
 			})
 		}
 		if configured != "" {
-			if _, ok := seen[configured]; !ok {
+			if _, ok := seen[strings.ToLower(configured)]; !ok {
 				result = append(result, types.InstalledModel{
 					ModelID: configured,
 					Runtime: types.RuntimeLMStudio,
@@ -246,7 +253,7 @@ func (d *lmstudioDriver) HasModel(modelID string) bool {
 		return false
 	}
 	for _, model := range d.ListModels() {
-		if model == modelID {
+		if lmstudioModelIDsEquivalent(model, modelID) {
 			return true
 		}
 	}
@@ -263,32 +270,35 @@ func (d *lmstudioDriver) RemoveModel(modelID string) error {
 		return fmt.Errorf("lmstudio cli not installed")
 	}
 
-	var sawPasskeyFailure bool
-	var firstErr error
-	for _, ctx := range contexts {
-		cmd := exec.Command(ctx.path, "unload", modelID)
-		cmd.Env = d.envForPathWithHome(ctx.path, ctx.home)
-		output, err := cmd.CombinedOutput()
-		outText := strings.TrimSpace(string(output))
-
-		if err == nil || lmstudioModelAlreadyRemoved(outText) {
-			d.clearConfiguredModel(modelID)
-			return nil
+	targets := []string{modelID}
+	normalizedModelID := normalizeLMStudioModelID(modelID)
+	if normalizedModelID != "" && !lmstudioModelIDsEquivalent(normalizedModelID, modelID) {
+		targets = append(targets, normalizedModelID)
+	}
+	if remoteModels, err := d.fetchRemoteModels(); err == nil {
+		for _, remoteModel := range remoteModels {
+			if lmstudioModelIDsEquivalent(remoteModel, modelID) {
+				targets = append(targets, strings.TrimSpace(remoteModel))
+			}
 		}
-		if lmstudioAuthPasskeyError(outText) {
-			sawPasskeyFailure = true
+	}
+	targets = uniqueStrings(targets)
+
+	var hadSuccess bool
+	var lastErr error
+	for _, target := range targets {
+		if err := d.unloadModelAcrossContexts(target, contexts); err != nil {
+			lastErr = err
 			continue
 		}
-		if firstErr == nil {
-			firstErr = fmt.Errorf("unload lmstudio model %q via %s (HOME=%s): %w (%s)", modelID, ctx.path, ctx.home, err, outText)
-		}
+		hadSuccess = true
 	}
-
-	if firstErr != nil {
-		return firstErr
+	if hadSuccess {
+		d.clearConfiguredModel(modelID)
+		return nil
 	}
-	if sawPasskeyFailure {
-		return fmt.Errorf("unload lmstudio model %q failed due to lmstudio CLI passkey mismatch; ensure agent uses the LM Studio-shipped lms binary", modelID)
+	if lastErr != nil {
+		return lastErr
 	}
 	return fmt.Errorf("unload lmstudio model %q failed", modelID)
 }
@@ -505,6 +515,51 @@ func normalizeLMStudioModelID(modelID string) string {
 	return modelID
 }
 
+func collapseLMStudioModelIDs(models []string) []string {
+	result := make([]string, 0, len(models))
+	seen := map[string]struct{}{}
+	for _, model := range models {
+		normalized := normalizeLMStudioModelID(model)
+		if normalized == "" {
+			continue
+		}
+		key := strings.ToLower(normalized)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, normalized)
+	}
+	return result
+}
+
+func lmstudioModelIDsEquivalent(left string, right string) bool {
+	l := normalizeLMStudioModelID(left)
+	r := normalizeLMStudioModelID(right)
+	if l == "" || r == "" {
+		return false
+	}
+	return strings.EqualFold(l, r)
+}
+
+func uniqueStrings(values []string) []string {
+	result := make([]string, 0, len(values))
+	seen := map[string]struct{}{}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		key := strings.ToLower(value)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, value)
+	}
+	return result
+}
+
 func shouldAvoidInteractiveLMStudioGet(output string) bool {
 	text := strings.ToLower(strings.TrimSpace(output))
 	if text == "" {
@@ -535,6 +590,38 @@ func lmstudioModelAlreadyRemoved(output string) bool {
 		strings.Contains(text, "already unloaded") ||
 		strings.Contains(text, "no model is loaded") ||
 		strings.Contains(text, "cannot find a model")
+}
+
+func (d *lmstudioDriver) unloadModelAcrossContexts(
+	modelID string,
+	contexts []lmstudioCommandContext,
+) error {
+	var sawPasskeyFailure bool
+	var firstErr error
+	for _, ctx := range contexts {
+		cmd := exec.Command(ctx.path, "unload", modelID)
+		cmd.Env = d.envForPathWithHome(ctx.path, ctx.home)
+		output, err := cmd.CombinedOutput()
+		outText := strings.TrimSpace(string(output))
+
+		if err == nil || lmstudioModelAlreadyRemoved(outText) {
+			return nil
+		}
+		if lmstudioAuthPasskeyError(outText) {
+			sawPasskeyFailure = true
+			continue
+		}
+		if firstErr == nil {
+			firstErr = fmt.Errorf("unload lmstudio model %q via %s (HOME=%s): %w (%s)", modelID, ctx.path, ctx.home, err, outText)
+		}
+	}
+	if firstErr != nil {
+		return firstErr
+	}
+	if sawPasskeyFailure {
+		return fmt.Errorf("unload lmstudio model %q failed due to lmstudio CLI passkey mismatch; ensure agent uses the LM Studio-shipped lms binary", modelID)
+	}
+	return fmt.Errorf("unload lmstudio model %q failed", modelID)
 }
 
 func (d *lmstudioDriver) baseURL() string {
@@ -817,7 +904,7 @@ func (d *lmstudioDriver) clearConfiguredModel(modelID string) {
 	if configured == "" {
 		return
 	}
-	if strings.EqualFold(configured, modelID) || strings.EqualFold(normalizeLMStudioModelID(configured), normalizeLMStudioModelID(modelID)) {
+	if lmstudioModelIDsEquivalent(configured, modelID) {
 		cfg.Model = ""
 		_ = d.writeConfig(cfg)
 	}

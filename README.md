@@ -4,15 +4,7 @@ ClawControl machine agent for runtime and model orchestration.
 
 The agent runs on each worker machine, checks in with ClawControl, executes typed commands, and reports runtime/model state back to the control plane.
 
-<<<<<<< HEAD
 ## Overview
-=======
-- Performs periodic authenticated check-ins to `POST /api/agent/checkin`
-- Reports discovered machine metadata (hostname, addresses, hardware summary)
-- Pulls pending commands from ClawControl
-- Executes allowlisted commands (`install_runtime`, `pull_model`, `remove_model`, `restart_runtime`, `health_check`, `update_agent`, `sync_harnesses`, `run_harness_exec`)
-- Acknowledges command result to `POST /api/agent/ack`
->>>>>>> 1e0794c (feat: add harness sync lifecycle and bump to v0.2.8)
 
 `clawcontrol-agent` does three core things:
 
@@ -76,7 +68,7 @@ curl -sSL https://raw.githubusercontent.com/Borgels/clawcontrol-agent/master/scr
 Pin to a specific version:
 
 ```bash
-... --version v0.2.7
+... --version v0.2.9
 ```
 
 ### What the installer sets up

@@ -49,7 +49,7 @@ var updateApplyCmd = &cobra.Command{
 	Long: `Download and install a clawcontrol-agent release binary.
 
 By default this installs the latest release. Use --version to install
-a specific version tag such as v0.2.7.`,
+a specific version tag such as v0.2.9.`,
 	RunE: runUpdateApply,
 }
 
@@ -111,7 +111,7 @@ func runUpdateApply(cmd *cobra.Command, args []string) error {
 	}
 	targetVersion = normalizeVersion(targetVersion)
 	if !strings.HasPrefix(targetVersion, "v") {
-		return fmt.Errorf("invalid version %q: expected v-prefixed semantic version (e.g. v0.2.7)", targetVersion)
+		return fmt.Errorf("invalid version %q: expected v-prefixed semantic version (e.g. v0.2.9)", targetVersion)
 	}
 
 	current := normalizeVersion(agentVersion)
