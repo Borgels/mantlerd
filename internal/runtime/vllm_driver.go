@@ -304,11 +304,12 @@ func (d *vllmDriver) HasModel(modelID string) bool {
 }
 
 func (d *vllmDriver) RemoveModel(modelID string) error {
-	cfg, err := d.readConfig()
-	if err == nil && cfg.Model == modelID {
-		if err := d.writeConfig(vllmConfig{Port: 8000}); err != nil {
-			return err
-		}
+	modelID = strings.TrimSpace(modelID)
+	if modelID == "" {
+		return fmt.Errorf("model ID is required")
+	}
+	if configuredModel, known := d.configuredModelState(); known && strings.EqualFold(strings.TrimSpace(configuredModel), modelID) {
+		d.disarmConfiguredModel()
 	}
 	return runCommand("systemctl", "stop", "vllm")
 }

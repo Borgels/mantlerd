@@ -206,8 +206,12 @@ func (d *tensorrtDriver) HasModel(modelID string) bool {
 }
 
 func (d *tensorrtDriver) RemoveModel(modelID string) error {
+	modelID = strings.TrimSpace(modelID)
+	if modelID == "" {
+		return fmt.Errorf("model ID is required")
+	}
 	cfg, err := d.readConfig()
-	if err == nil && cfg.Model == modelID {
+	if err == nil && strings.EqualFold(strings.TrimSpace(cfg.Model), modelID) {
 		if err := d.writeConfig(tensorrtConfig{Port: tensorrtDefaultPort}); err != nil {
 			return err
 		}
