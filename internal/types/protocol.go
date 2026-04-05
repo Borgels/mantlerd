@@ -23,6 +23,8 @@ type ModelInstallStatus string
 const (
 	ModelDownloading ModelInstallStatus = "downloading"
 	ModelDownloaded  ModelInstallStatus = "downloaded"
+	ModelBuilding    ModelInstallStatus = "building" // TensorRT engine compilation
+	ModelBuilt       ModelInstallStatus = "built"    // Engine ready, not serving
 	ModelInstalling  ModelInstallStatus = "installing"
 	ModelStarting    ModelInstallStatus = "starting"
 	ModelReady       ModelInstallStatus = "ready"

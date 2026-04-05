@@ -348,6 +348,34 @@ func (m *Manager) StopModelWithRuntime(modelID string, runtimeName string) error
 	return driver.StopModel(modelID)
 }
 
+// BuildModel compiles a TensorRT engine from downloaded weights.
+// Only works with runtimes that implement BuildableDriver (currently tensorrt).
+func (m *Manager) BuildModel(ctx context.Context, modelID string, opts BuildOptions) error {
+	// Build is only supported for TensorRT runtime
+	driver, err := m.driverFor("tensorrt")
+	if err != nil {
+		return fmt.Errorf("tensorrt runtime not available: %w", err)
+	}
+	buildable, ok := driver.(BuildableDriver)
+	if !ok {
+		return fmt.Errorf("tensorrt driver does not support build operations")
+	}
+	return buildable.BuildModel(ctx, modelID, opts)
+}
+
+// IsModelBuilt checks if a TensorRT engine exists for the given model.
+func (m *Manager) IsModelBuilt(modelID string) bool {
+	driver, err := m.driverFor("tensorrt")
+	if err != nil {
+		return false
+	}
+	buildable, ok := driver.(BuildableDriver)
+	if !ok {
+		return false
+	}
+	return buildable.IsModelBuilt(modelID)
+}
+
 func (m *Manager) BenchmarkModel(
 	modelID string,
 	samplePromptTokens int,
