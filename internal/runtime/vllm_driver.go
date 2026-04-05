@@ -211,12 +211,17 @@ func (d *vllmDriver) Version() string {
 	return ""
 }
 
-func (d *vllmDriver) PrepareModelWithFlags(modelID string, _ *types.ModelFeatureFlags) error {
+func (d *vllmDriver) PrepareModelWithFlags(modelID string, flags *types.ModelFeatureFlags) error {
+	return d.PrepareModelWithFlagsCtx(context.Background(), modelID, flags)
+}
+
+// PrepareModelWithFlagsCtx downloads model weights with cancellation support.
+func (d *vllmDriver) PrepareModelWithFlagsCtx(ctx context.Context, modelID string, _ *types.ModelFeatureFlags) error {
 	trimmedModel := strings.TrimSpace(modelID)
 	if trimmedModel == "" {
 		return fmt.Errorf("model ID is required")
 	}
-	if err := d.downloadModelSnapshot(trimmedModel); err != nil {
+	if err := d.downloadModelSnapshotCtx(ctx, trimmedModel); err != nil {
 		return err
 	}
 	return d.markPreparedModel(trimmedModel)
@@ -592,7 +597,8 @@ Wants=network-online.target
 Type=simple
 EnvironmentFile=-` + vllmEnvPath + `
 ExecStartPre=-/bin/sh -c 'DOCKER_BIN="$(command -v docker)"; if [ -n "$DOCKER_BIN" ]; then "$DOCKER_BIN" rm -f ` + vllmContainerName + ` >/dev/null 2>&1 || true; fi'
-ExecStart=/bin/sh -c 'DOCKER_BIN="$(command -v docker)"; [ -n "$DOCKER_BIN" ] || exit 1; exec "$DOCKER_BIN" run --rm --name ` + vllmContainerName + ` --gpus all --ipc=host --network host -e HF_TOKEN="${HF_TOKEN:-}" -e HUGGING_FACE_HUB_TOKEN="${HUGGING_FACE_HUB_TOKEN:-}" -e NVIDIA_VISIBLE_DEVICES=all -e NVIDIA_DRIVER_CAPABILITIES=compute,utility -v /root/.cache/huggingface:/root/.cache/huggingface "${VLLM_CONTAINER_IMAGE:-` + vllmDefaultContainerImage + `}" vllm serve "${VLLM_MODEL}" --host 0.0.0.0 --port "${VLLM_PORT:-8000}" --gpu-memory-utilization "${VLLM_GPU_MEMORY_UTILIZATION:-0.9}" ${VLLM_EXTRA_ARGS:-}'
+ExecStartPre=-/bin/sh -c 'mkdir -p /opt/clawcontrol/vllm-app'
+ExecStart=/bin/sh -c 'DOCKER_BIN="$(command -v docker)"; [ -n "$DOCKER_BIN" ] || exit 1; exec "$DOCKER_BIN" run --rm --name ` + vllmContainerName + ` --gpus all --ipc=host --network host -e HF_TOKEN="${HF_TOKEN:-}" -e HUGGING_FACE_HUB_TOKEN="${HUGGING_FACE_HUB_TOKEN:-}" -e NVIDIA_VISIBLE_DEVICES=all -e NVIDIA_DRIVER_CAPABILITIES=compute,utility -v /root/.cache/huggingface:/root/.cache/huggingface -v /opt/clawcontrol/vllm-app:/app "${VLLM_CONTAINER_IMAGE:-` + vllmDefaultContainerImage + `}" vllm serve "${VLLM_MODEL}" --host 0.0.0.0 --port "${VLLM_PORT:-8000}" --gpu-memory-utilization "${VLLM_GPU_MEMORY_UTILIZATION:-0.9}" ${VLLM_EXTRA_ARGS:-}'
 ExecStop=-/bin/sh -c 'DOCKER_BIN="$(command -v docker)"; if [ -n "$DOCKER_BIN" ]; then "$DOCKER_BIN" stop ` + vllmContainerName + ` >/dev/null 2>&1 || true; fi'
 Restart=always
 RestartSec=5
@@ -1332,6 +1338,11 @@ func (d *vllmDriver) unmarkPreparedModel(modelID string) error {
 }
 
 func (d *vllmDriver) downloadModelSnapshot(modelID string) error {
+	return d.downloadModelSnapshotCtx(context.Background(), modelID)
+}
+
+// downloadModelSnapshotCtx downloads HuggingFace model weights with cancellation support.
+func (d *vllmDriver) downloadModelSnapshotCtx(ctx context.Context, modelID string) error {
 	modelID = strings.TrimSpace(modelID)
 	if modelID == "" {
 		return fmt.Errorf("model ID is required")
@@ -1345,9 +1356,14 @@ func (d *vllmDriver) downloadModelSnapshot(modelID string) error {
 		if _, err := exec.LookPath(python); err != nil && python != vllmPythonPath {
 			continue
 		}
-		if err := runCommand(python, "-c", script); err == nil {
-			return nil
+		cmd := exec.CommandContext(ctx, python, "-c", script)
+		if err := cmd.Run(); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			continue
 		}
+		return nil
 	}
 	if d.shouldUseContainer() {
 		if err := d.ensureDockerAvailable(); err != nil {
@@ -1355,17 +1371,32 @@ func (d *vllmDriver) downloadModelSnapshot(modelID string) error {
 		}
 		image := d.effectiveContainerImage()
 		if !d.containerImageExists(image) {
-			if err := d.pullContainerImage(image); err != nil {
+			if err := d.pullContainerImageCtx(ctx, image); err != nil {
 				return err
 			}
 		}
-		cmd := exec.Command("docker", "run", "--rm", "--network", "host", "-v", "/root/.cache/huggingface:/root/.cache/huggingface", image, "python3", "-c", script)
+		cmd := exec.CommandContext(ctx, "docker", "run", "--rm", "--network", "host", "-v", "/root/.cache/huggingface:/root/.cache/huggingface", image, "python3", "-c", script)
 		if output, err := cmd.CombinedOutput(); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			return fmt.Errorf("download model snapshot in container: %w (%s)", err, strings.TrimSpace(string(output)))
 		}
 		return nil
 	}
 	return fmt.Errorf("failed to download model snapshot for %s (huggingface_hub unavailable)", modelID)
+}
+
+// pullContainerImageCtx pulls a container image with cancellation support.
+func (d *vllmDriver) pullContainerImageCtx(ctx context.Context, image string) error {
+	cmd := exec.CommandContext(ctx, "docker", "pull", image)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return fmt.Errorf("pull container image %s: %w (%s)", image, err, strings.TrimSpace(string(output)))
+	}
+	return nil
 }
 
 func inferVLLMInstalled(hasNativeImport bool, hasServiceUnit bool, hasConfig bool, hasEnv bool) bool {

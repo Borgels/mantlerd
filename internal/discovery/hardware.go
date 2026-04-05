@@ -27,6 +27,46 @@ type GPUInfo struct {
 	UnifiedMemory     *bool
 }
 
+// DetectUnifiedMemory checks for unified CPU/GPU memory architecture (e.g., DGX Spark / Grace-Blackwell).
+func DetectUnifiedMemory() *bool {
+	// Method 1: nvidia-smi memory query returns "[N/A]" on unified memory systems
+	out, err := exec.Command("nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader").Output()
+	if err == nil && strings.Contains(string(out), "[N/A]") {
+		unified := true
+		return &unified
+	}
+
+	// Method 2: Check for Grace CPU (ARM + NVIDIA GPU = likely unified)
+	cpuInfo, _ := os.ReadFile("/proc/cpuinfo")
+	cpuStr := strings.ToLower(string(cpuInfo))
+	isARM := strings.Contains(cpuStr, "aarch64") || strings.Contains(cpuStr, "arm")
+
+	// Method 3: Check GPU name for known unified memory chips
+	out, err = exec.Command("nvidia-smi", "--query-gpu=name", "--format=csv,noheader").Output()
+	if err == nil {
+		name := strings.ToLower(string(out))
+		// GB10 is DGX Spark, Grace-Blackwell has GB200
+		if strings.Contains(name, "gb10") || strings.Contains(name, "grace") ||
+			(isARM && strings.Contains(name, "blackwell")) {
+			unified := true
+			return &unified
+		}
+	}
+
+	// Method 4: Check for /sys/devices/system/cpu/cpu0/cacheinfo presence of grace indicators
+	if isARM {
+		// Grace-Hopper and Grace-Blackwell are ARM-based with unified memory
+		if _, err := exec.Command("nvidia-smi").Output(); err == nil {
+			// ARM CPU with NVIDIA GPU present - likely unified memory system
+			unified := true
+			return &unified
+		}
+	}
+
+	unified := false
+	return &unified
+}
+
 func Collect() HardwareReport {
 	hostname, _ := os.Hostname()
 	addresses := collectAddresses()
@@ -167,11 +207,13 @@ func readGPUInfo() (string, []GPUInfo) {
 					computeCapability = strings.TrimSpace(parts[2])
 				}
 				architecture := architectureFromComputeCapability(name, computeCapability)
+				unifiedMemory := DetectUnifiedMemory()
 				gpus = append(gpus, GPUInfo{
 					Name:              name,
 					MemoryTotalMB:     memoryTotalMB,
 					Architecture:      architecture,
 					ComputeCapability: computeCapability,
+					UnifiedMemory:     unifiedMemory,
 				})
 				labelParts := []string{name}
 				if memoryTotalMB > 0 {
