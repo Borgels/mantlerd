@@ -214,7 +214,6 @@ func runCheckIn(cfg config.Config, cl *client.Client, runtimeManager *runtime.Ma
 	}
 }
 
-<<<<<<< HEAD
 func buildRuntimeStatuses(installedRuntimeNames []string, readyRuntimeNames []string) map[types.RuntimeType]types.RuntimeStatus {
 	statuses := make(map[types.RuntimeType]types.RuntimeStatus, len(installedRuntimeNames))
 	for _, runtimeName := range installedRuntimeNames {
@@ -229,12 +228,8 @@ func buildRuntimeStatuses(installedRuntimeNames []string, readyRuntimeNames []st
 	return statuses
 }
 
-func sendInProgressAck(cl *client.Client, commandID string, details string) {
-	if commandID == "" || details == "" {
-=======
 func sendInProgressAck(cl *client.Client, payload types.AckRequest) {
 	if payload.CommandID == "" || (payload.Details == "" && len(payload.StreamEvents) == 0) {
->>>>>>> 1e0794c (feat: add harness sync lifecycle and bump to v0.2.8)
 		return
 	}
 	payload.Status = "in_progress"
