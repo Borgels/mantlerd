@@ -330,7 +330,17 @@ func (d *ollamaDriver) RemoveModel(modelID string) error {
 	if modelID == "" {
 		return fmt.Errorf("model ID is required")
 	}
-	return runCommand("ollama", "rm", modelID)
+	cmd := exec.Command("ollama", "rm", modelID)
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		return nil
+	}
+	text := strings.ToLower(strings.TrimSpace(string(output)))
+	if strings.Contains(text, "not found") || strings.Contains(text, "does not exist") {
+		// Idempotent remove: treat already-missing models as removed.
+		return nil
+	}
+	return fmt.Errorf("remove ollama model %q: %w (%s)", modelID, err, strings.TrimSpace(string(output)))
 }
 
 func (d *ollamaDriver) RestartRuntime() error {

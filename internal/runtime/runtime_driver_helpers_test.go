@@ -225,3 +225,77 @@ func TestKnownModelImageIncompatibility(t *testing.T) {
 		})
 	}
 }
+
+func TestLMStudioAuthPasskeyError(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name   string
+		output string
+		want   bool
+	}{
+		{
+			name:   "matches invalid passkey message",
+			output: "Invalid passkey for lms CLI client. Please make sure you are using the lms shipped with LM Studio.",
+			want:   true,
+		},
+		{
+			name:   "matches shipped lms hint",
+			output: "Please make sure you are using the lms shipped with LM Studio.",
+			want:   true,
+		},
+		{
+			name:   "ignores unrelated output",
+			output: "model unloaded successfully",
+			want:   false,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := lmstudioAuthPasskeyError(tc.output)
+			if got != tc.want {
+				t.Fatalf("lmstudioAuthPasskeyError() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestLMStudioModelAlreadyRemoved(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name   string
+		output string
+		want   bool
+	}{
+		{
+			name:   "matches not loaded error",
+			output: "Model is not loaded",
+			want:   true,
+		},
+		{
+			name:   "matches no model loaded error",
+			output: "No model is loaded",
+			want:   true,
+		},
+		{
+			name:   "ignores unknown failure",
+			output: "network timeout",
+			want:   false,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := lmstudioModelAlreadyRemoved(tc.output)
+			if got != tc.want {
+				t.Fatalf("lmstudioModelAlreadyRemoved() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

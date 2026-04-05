@@ -8,7 +8,7 @@ import (
 )
 
 // Agent version - set at build time via -ldflags
-var agentVersion = "0.2.6"
+var agentVersion = "0.2.7"
 
 func main() {
 	// Execute cobra CLI

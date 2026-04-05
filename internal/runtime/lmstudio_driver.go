@@ -31,6 +31,11 @@ type lmstudioConfig struct {
 	Port  int    `json:"port"`
 }
 
+type lmstudioCommandContext struct {
+	path string
+	home string
+}
+
 type lmstudioDriver struct{}
 
 func newLMStudioDriver() Driver {
@@ -253,21 +258,39 @@ func (d *lmstudioDriver) RemoveModel(modelID string) error {
 	if modelID == "" {
 		return fmt.Errorf("model ID is required")
 	}
-	path := d.resolveLMSPath()
-	if path == "" {
+	contexts := d.resolveLMSContexts()
+	if len(contexts) == 0 {
 		return fmt.Errorf("lmstudio cli not installed")
 	}
-	cmd := exec.Command(path, "unload", modelID)
-	cmd.Env = d.envForPath(path)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("unload lmstudio model %q: %w (%s)", modelID, err, strings.TrimSpace(string(output)))
+
+	var sawPasskeyFailure bool
+	var firstErr error
+	for _, ctx := range contexts {
+		cmd := exec.Command(ctx.path, "unload", modelID)
+		cmd.Env = d.envForPathWithHome(ctx.path, ctx.home)
+		output, err := cmd.CombinedOutput()
+		outText := strings.TrimSpace(string(output))
+
+		if err == nil || lmstudioModelAlreadyRemoved(outText) {
+			d.clearConfiguredModel(modelID)
+			return nil
+		}
+		if lmstudioAuthPasskeyError(outText) {
+			sawPasskeyFailure = true
+			continue
+		}
+		if firstErr == nil {
+			firstErr = fmt.Errorf("unload lmstudio model %q via %s (HOME=%s): %w (%s)", modelID, ctx.path, ctx.home, err, outText)
+		}
 	}
-	cfg, err := d.readConfig()
-	if err == nil && strings.EqualFold(strings.TrimSpace(cfg.Model), modelID) {
-		cfg.Model = ""
-		_ = d.writeConfig(cfg)
+
+	if firstErr != nil {
+		return firstErr
 	}
-	return nil
+	if sawPasskeyFailure {
+		return fmt.Errorf("unload lmstudio model %q failed due to lmstudio CLI passkey mismatch; ensure agent uses the LM Studio-shipped lms binary", modelID)
+	}
+	return fmt.Errorf("unload lmstudio model %q failed", modelID)
 }
 
 func (d *lmstudioDriver) BenchmarkModel(
@@ -468,6 +491,7 @@ func (d *lmstudioDriver) loadModel(modelID string) (string, error) {
 }
 
 var lmstudioNumericSuffixPattern = regexp.MustCompile(`^(.*):[0-9]+$`)
+var lmstudioBinaryPathPattern = regexp.MustCompile(`(/[^'"\s;]+/lms)\b`)
 
 func normalizeLMStudioModelID(modelID string) string {
 	modelID = strings.TrimSpace(modelID)
@@ -490,6 +514,27 @@ func shouldAvoidInteractiveLMStudioGet(output string) bool {
 		strings.Contains(text, "not a typewriter") ||
 		strings.Contains(text, "please select one from the list below") ||
 		strings.Contains(text, "cannot find a model matching the provided model key")
+}
+
+func lmstudioAuthPasskeyError(output string) bool {
+	text := strings.ToLower(strings.TrimSpace(output))
+	if text == "" {
+		return false
+	}
+	return strings.Contains(text, "invalid passkey for lms cli client") ||
+		strings.Contains(text, "using the lms shipped with lm studio")
+}
+
+func lmstudioModelAlreadyRemoved(output string) bool {
+	text := strings.ToLower(strings.TrimSpace(output))
+	if text == "" {
+		return false
+	}
+	return strings.Contains(text, "model is not loaded") ||
+		strings.Contains(text, "not currently loaded") ||
+		strings.Contains(text, "already unloaded") ||
+		strings.Contains(text, "no model is loaded") ||
+		strings.Contains(text, "cannot find a model")
 }
 
 func (d *lmstudioDriver) baseURL() string {
@@ -675,17 +720,18 @@ func (d *lmstudioDriver) writeConfig(cfg lmstudioConfig) error {
 
 func (d *lmstudioDriver) resolveLMSPath() string {
 	if path, err := exec.LookPath("lms"); err == nil {
-		return path
+		path = strings.TrimSpace(path)
+		if info, statErr := os.Stat(path); statErr == nil && !info.IsDir() {
+			return path
+		}
 	}
-	candidates := []string{
-		"/root/.lmstudio/bin/lms",
-		filepath.Join(os.Getenv("HOME"), ".lmstudio", "bin", "lms"),
-	}
+	candidates := []string{"/root/.lmstudio/bin/lms"}
 	if paths, err := filepath.Glob("/home/*/.lmstudio/bin/lms"); err == nil {
 		candidates = append(candidates, paths...)
 	}
 	for _, candidate := range candidates {
-		if strings.TrimSpace(candidate) == "" {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" {
 			continue
 		}
 		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
@@ -693,6 +739,88 @@ func (d *lmstudioDriver) resolveLMSPath() string {
 		}
 	}
 	return ""
+}
+
+func (d *lmstudioDriver) resolveLMSContexts() []lmstudioCommandContext {
+	contexts := make([]lmstudioCommandContext, 0, 6)
+	seen := map[string]struct{}{}
+	add := func(path string, home string) {
+		path = strings.TrimSpace(path)
+		home = strings.TrimSpace(home)
+		if path == "" {
+			return
+		}
+		if info, err := os.Stat(path); err != nil || info.IsDir() {
+			return
+		}
+		if home == "" {
+			home = d.homeForPath(path)
+		}
+		key := path + "|" + home
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		contexts = append(contexts, lmstudioCommandContext{
+			path: path,
+			home: home,
+		})
+	}
+
+	unitPath, unitHome := d.resolveLMSFromServiceUnit()
+	add(unitPath, unitHome)
+	add(d.resolveLMSPath(), "")
+
+	candidates := []string{
+		"/root/.lmstudio/bin/lms",
+	}
+	if paths, err := filepath.Glob("/home/*/.lmstudio/bin/lms"); err == nil {
+		candidates = append(candidates, paths...)
+	}
+	for _, candidate := range candidates {
+		add(candidate, "")
+	}
+	if path, err := exec.LookPath("lms"); err == nil {
+		add(path, "")
+	}
+	return contexts
+}
+
+func (d *lmstudioDriver) resolveLMSFromServiceUnit() (string, string) {
+	raw, err := os.ReadFile(lmsServiceUnitPath)
+	if err != nil {
+		return "", ""
+	}
+	unit := string(raw)
+	home := ""
+	for _, line := range strings.Split(unit, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "Environment=HOME=") {
+			home = strings.TrimSpace(strings.TrimPrefix(line, "Environment=HOME="))
+			home = strings.Trim(home, `"`)
+			break
+		}
+	}
+	matches := lmstudioBinaryPathPattern.FindStringSubmatch(unit)
+	if len(matches) < 2 {
+		return "", home
+	}
+	return strings.TrimSpace(matches[1]), home
+}
+
+func (d *lmstudioDriver) clearConfiguredModel(modelID string) {
+	cfg, err := d.readConfig()
+	if err != nil {
+		return
+	}
+	configured := strings.TrimSpace(cfg.Model)
+	if configured == "" {
+		return
+	}
+	if strings.EqualFold(configured, modelID) || strings.EqualFold(normalizeLMStudioModelID(configured), normalizeLMStudioModelID(modelID)) {
+		cfg.Model = ""
+		_ = d.writeConfig(cfg)
+	}
 }
 
 func (d *lmstudioDriver) homeForPath(path string) string {
@@ -708,7 +836,14 @@ func (d *lmstudioDriver) homeForPath(path string) string {
 }
 
 func (d *lmstudioDriver) envForPath(path string) []string {
-	home := d.homeForPath(path)
+	return d.envForPathWithHome(path, d.homeForPath(path))
+}
+
+func (d *lmstudioDriver) envForPathWithHome(path string, home string) []string {
+	home = strings.TrimSpace(home)
+	if home == "" {
+		home = d.homeForPath(path)
+	}
 	binDir := filepath.Dir(path)
 	env := os.Environ()
 	env = append(env, "HOME="+home)
