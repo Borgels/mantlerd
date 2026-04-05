@@ -19,8 +19,10 @@ import (
 )
 
 const desiredConfigCachePath = "/etc/clawcontrol/desired-config.json"
+const lmstudioKeepWarmEnv = "CLAWCONTROL_LMSTUDIO_KEEP_WARM"
 
 func enforceDesiredConfig(runtimeManager *runtime.Manager, desired types.DesiredConfig) {
+	ejectLMStudio := shouldAutoEjectLMStudio(desired)
 	for _, runtimeType := range desired.Runtimes {
 		if err := runtimeManager.EnsureRuntime(string(runtimeType)); err != nil {
 			log.Printf("failed to ensure runtime %s: %v", runtimeType, err)
@@ -30,6 +32,15 @@ func enforceDesiredConfig(runtimeManager *runtime.Manager, desired types.Desired
 	modelsHandled := map[string]bool{}
 	for _, target := range desired.ModelTargets {
 		modelsHandled[target.ModelID] = true
+		runtimeName := strings.ToLower(strings.TrimSpace(string(target.Runtime)))
+		if ejectLMStudio && runtimeName == string(types.RuntimeLMStudio) {
+			log.Printf(
+				"skipping lmstudio ensure for %s due to idle-eject policy; set %s=true to keep warm",
+				strings.TrimSpace(target.ModelID),
+				lmstudioKeepWarmEnv,
+			)
+			continue
+		}
 		flags := target.FeatureFlags
 		if err := runtimeManager.EnsureModelWithRuntime(target.ModelID, string(target.Runtime), &flags); err != nil {
 			log.Printf("failed to ensure model target %s: %v", target.ModelID, err)
@@ -46,6 +57,7 @@ func enforceDesiredConfig(runtimeManager *runtime.Manager, desired types.Desired
 }
 
 func reconcileStaleModels(runtimeManager *runtime.Manager, desired types.DesiredConfig) {
+	ejectLMStudio := shouldAutoEjectLMStudio(desired)
 	desiredGlobal := map[string]struct{}{}
 	desiredByRuntime := map[string]map[string]struct{}{}
 
@@ -92,11 +104,13 @@ func reconcileStaleModels(runtimeManager *runtime.Manager, desired types.Desired
 			if modelID == "" {
 				continue
 			}
-			if _, ok := desiredGlobal[modelID]; ok {
-				continue
-			}
-			if _, ok := runtimeDesired[modelID]; ok {
-				continue
+			if !(ejectLMStudio && runtimeName == string(types.RuntimeLMStudio)) {
+				if _, ok := desiredGlobal[modelID]; ok {
+					continue
+				}
+				if _, ok := runtimeDesired[modelID]; ok {
+					continue
+				}
 			}
 			if err := runtimeManager.RemoveModelWithRuntime(modelID, runtimeName); err != nil {
 				log.Printf(
@@ -109,6 +123,20 @@ func reconcileStaleModels(runtimeManager *runtime.Manager, desired types.Desired
 			}
 			log.Printf("reconciled stale model %s on runtime %s", modelID, runtimeName)
 		}
+	}
+}
+
+func shouldAutoEjectLMStudio(_ types.DesiredConfig) bool {
+	return !lmstudioKeepWarmEnabled()
+}
+
+func lmstudioKeepWarmEnabled() bool {
+	value := strings.ToLower(strings.TrimSpace(os.Getenv(lmstudioKeepWarmEnv)))
+	switch value {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
 	}
 }
 
