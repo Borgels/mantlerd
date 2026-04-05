@@ -45,19 +45,35 @@ func newLMStudioDriver() Driver {
 func (d *lmstudioDriver) Name() string { return "lmstudio" }
 
 func (d *lmstudioDriver) Install() error {
+	path := strings.TrimSpace(d.resolveLMSPath())
+	if path == "" {
+		// If LM Studio API is already healthy, avoid failing the ensure loop just
+		// because the CLI path is not currently resolvable in this environment.
+		if d.IsReady() {
+			return nil
+		}
+	}
 	if !d.IsInstalled() {
 		if err := runCommand("sh", "-c", "curl -fsSL "+lmsInstallScriptURL+" | bash"); err != nil {
 			return fmt.Errorf("install lmstudio cli: %w", err)
 		}
+		path = strings.TrimSpace(d.resolveLMSPath())
 	}
-	if err := d.ensureServiceUnit(); err != nil {
-		return err
-	}
-	if err := d.startOrRestartService(); err != nil {
-		return err
+	if path != "" {
+		if err := d.ensureServiceUnit(); err != nil {
+			return err
+		}
+		if err := d.startOrRestartService(); err != nil {
+			return err
+		}
+	} else if !d.IsReady() {
+		return fmt.Errorf("lmstudio cli not installed")
 	}
 	cfg, err := d.readConfig()
 	if err == nil && strings.TrimSpace(cfg.Model) != "" {
+		if path == "" {
+			return nil
+		}
 		resolvedModelID, err := d.loadModel(cfg.Model)
 		if err != nil {
 			return fmt.Errorf("load configured lmstudio model %q: %w", cfg.Model, err)
@@ -238,10 +254,15 @@ func (d *lmstudioDriver) InstalledModels() []types.InstalledModel {
 	}
 
 	if configured != "" {
+		failReason := ""
+		if serviceLikelyOutOfMemory("lmstudio", err) {
+			failReason = modelFailReasonInsufficientMemory
+		}
 		result = append(result, types.InstalledModel{
-			ModelID: configured,
-			Runtime: types.RuntimeLMStudio,
-			Status:  types.ModelFailed,
+			ModelID:    configured,
+			Runtime:    types.RuntimeLMStudio,
+			Status:     types.ModelFailed,
+			FailReason: failReason,
 		})
 	}
 	return result
@@ -806,6 +827,12 @@ func (d *lmstudioDriver) writeConfig(cfg lmstudioConfig) error {
 }
 
 func (d *lmstudioDriver) resolveLMSPath() string {
+	if unitPath, _ := d.resolveLMSFromServiceUnit(); unitPath != "" {
+		unitPath = strings.TrimSpace(unitPath)
+		if info, statErr := os.Stat(unitPath); statErr == nil && !info.IsDir() {
+			return unitPath
+		}
+	}
 	if path, err := exec.LookPath("lms"); err == nil {
 		path = strings.TrimSpace(path)
 		if info, statErr := os.Stat(path); statErr == nil && !info.IsDir() {

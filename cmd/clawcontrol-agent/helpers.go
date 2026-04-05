@@ -45,6 +45,73 @@ func enforceDesiredConfig(runtimeManager *runtime.Manager, desired types.Desired
 	}
 }
 
+func reconcileStaleModels(runtimeManager *runtime.Manager, desired types.DesiredConfig) {
+	desiredGlobal := map[string]struct{}{}
+	desiredByRuntime := map[string]map[string]struct{}{}
+
+	addRuntimeDesired := func(runtimeName string, modelID string) {
+		runtimeName = strings.ToLower(strings.TrimSpace(runtimeName))
+		modelID = strings.TrimSpace(modelID)
+		if runtimeName == "" || modelID == "" {
+			return
+		}
+		if _, ok := desiredByRuntime[runtimeName]; !ok {
+			desiredByRuntime[runtimeName] = map[string]struct{}{}
+		}
+		desiredByRuntime[runtimeName][modelID] = struct{}{}
+	}
+
+	for _, target := range desired.ModelTargets {
+		modelID := strings.TrimSpace(target.ModelID)
+		if modelID == "" {
+			continue
+		}
+		desiredGlobal[modelID] = struct{}{}
+		addRuntimeDesired(string(target.Runtime), modelID)
+	}
+
+	for _, modelID := range desired.Models {
+		modelID = strings.TrimSpace(modelID)
+		if modelID == "" {
+			continue
+		}
+		desiredGlobal[modelID] = struct{}{}
+	}
+
+	for _, runtimeName := range runtimeManager.InstalledRuntimes() {
+		driver, err := runtimeManager.DriverFor(runtimeName)
+		if err != nil {
+			log.Printf("failed to inspect runtime %s during stale reconciliation: %v", runtimeName, err)
+			continue
+		}
+
+		models := driver.ListModels()
+		runtimeDesired := desiredByRuntime[runtimeName]
+		for _, modelID := range models {
+			modelID = strings.TrimSpace(modelID)
+			if modelID == "" {
+				continue
+			}
+			if _, ok := desiredGlobal[modelID]; ok {
+				continue
+			}
+			if _, ok := runtimeDesired[modelID]; ok {
+				continue
+			}
+			if err := runtimeManager.RemoveModelWithRuntime(modelID, runtimeName); err != nil {
+				log.Printf(
+					"failed to reconcile stale model %s on runtime %s: %v",
+					modelID,
+					runtimeName,
+					err,
+				)
+				continue
+			}
+			log.Printf("reconciled stale model %s on runtime %s", modelID, runtimeName)
+		}
+	}
+}
+
 func loadCachedDesiredConfig() types.DesiredConfig {
 	raw, err := os.ReadFile(desiredConfigCachePath)
 	if err != nil {

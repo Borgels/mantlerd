@@ -282,13 +282,18 @@ func (d *vllmDriver) InstalledModels() []types.InstalledModel {
 	// while very large models are still loading.
 	if configuredModel != "" {
 		status := types.ModelFailed
+		failReason := ""
 		if d.isLikelyServiceWarmup(err) {
 			status = types.ModelInstalling
 		}
+		if status == types.ModelFailed && serviceLikelyOutOfMemory("vllm", err) {
+			failReason = modelFailReasonInsufficientMemory
+		}
 		models = append(models, types.InstalledModel{
-			ModelID: configuredModel,
-			Runtime: types.RuntimeVLLM,
-			Status:  status,
+			ModelID:    configuredModel,
+			Runtime:    types.RuntimeVLLM,
+			Status:     status,
+			FailReason: failReason,
 		})
 	}
 	return models

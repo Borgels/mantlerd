@@ -7,6 +7,8 @@ import (
 	"strings"
 )
 
+const modelFailReasonInsufficientMemory = "insufficient_memory"
+
 func runCommand(name string, args ...string) error {
 	cmd := exec.Command(name, args...)
 	output, err := cmd.CombinedOutput()
@@ -14,6 +16,54 @@ func runCommand(name string, args ...string) error {
 		return fmt.Errorf("%s %s failed: %w (%s)", name, strings.Join(args, " "), err, strings.TrimSpace(string(output)))
 	}
 	return nil
+}
+
+func isLikelyOutOfMemoryError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return containsOOMSignal(err.Error())
+}
+
+func serviceLikelyOutOfMemory(serviceName string, cause error) bool {
+	if isLikelyOutOfMemoryError(cause) {
+		return true
+	}
+	serviceName = strings.TrimSpace(serviceName)
+	if serviceName == "" {
+		return false
+	}
+	out, err := exec.Command("journalctl", "-u", serviceName, "-n", "120", "--no-pager").CombinedOutput()
+	if err != nil && len(out) == 0 {
+		return false
+	}
+	return containsOOMSignal(string(out))
+}
+
+func containsOOMSignal(value string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	if normalized == "" {
+		return false
+	}
+	signals := []string{
+		"out of memory",
+		"cuda out of memory",
+		"torch.cuda.outofmemoryerror",
+		"std::bad_alloc",
+		"resourceexhausted",
+		"resource exhausted",
+		"not enough memory",
+		"insufficient memory",
+		"failed to allocate memory",
+		"oom-kill",
+		"killed process",
+	}
+	for _, signal := range signals {
+		if strings.Contains(normalized, signal) {
+			return true
+		}
+	}
+	return false
 }
 
 func isSystemdServiceActive(serviceName string) (bool, error) {

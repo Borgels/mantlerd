@@ -154,6 +154,8 @@ func runCheckIn(cfg config.Config, cl *client.Client, runtimeManager *runtime.Ma
 		Hostname:              report.Hostname,
 		Addresses:             report.Addresses,
 		HardwareSummary:       report.HardwareSummary,
+		RAMTotalMB:            report.RAMTotalMB,
+		GPUs:                  toProtocolGPUInfo(report.GPUs),
 		AgentVersion:          agentVersion,
 		RuntimeStatus:         runtimeStatus,
 		RuntimeStatuses:       runtimeStatuses,
@@ -188,6 +190,7 @@ func runCheckIn(cfg config.Config, cl *client.Client, runtimeManager *runtime.Ma
 		}
 	}
 	enforceDesiredConfig(runtimeManager, resp.DesiredConfig)
+	reconcileStaleModels(runtimeManager, resp.DesiredConfig)
 
 	// Execute commands
 	for _, command := range resp.Commands {
@@ -212,6 +215,27 @@ func runCheckIn(cfg config.Config, cl *client.Client, runtimeManager *runtime.Ma
 			log.Printf("ack failed for %s: %v", command.ID, ackErr)
 		}
 	}
+}
+
+func toProtocolGPUInfo(values []discovery.GPUInfo) []types.GPUInfo {
+	if len(values) == 0 {
+		return nil
+	}
+	result := make([]types.GPUInfo, 0, len(values))
+	for _, value := range values {
+		name := strings.TrimSpace(value.Name)
+		if name == "" {
+			continue
+		}
+		result = append(result, types.GPUInfo{
+			Name:          name,
+			MemoryTotalMB: value.MemoryTotalMB,
+		})
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
 }
 
 func buildRuntimeStatuses(installedRuntimeNames []string, readyRuntimeNames []string) map[types.RuntimeType]types.RuntimeStatus {
