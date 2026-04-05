@@ -150,21 +150,22 @@ func runCheckIn(cfg config.Config, cl *client.Client, runtimeManager *runtime.Ma
 	}
 
 	payload := types.CheckinRequest{
-		MachineID:             cfg.MachineID,
-		Hostname:              report.Hostname,
-		Addresses:             report.Addresses,
-		HardwareSummary:       report.HardwareSummary,
-		RAMTotalMB:            report.RAMTotalMB,
-		GPUs:                  toProtocolGPUInfo(report.GPUs),
-		AgentVersion:          agentVersion,
-		RuntimeStatus:         runtimeStatus,
-		RuntimeStatuses:       runtimeStatuses,
-		RuntimeType:           runtimeType,
-		RuntimeVersion:        runtimeVersion,
-		RuntimeVersions:       runtimeManager.RuntimeVersions(),
-		InstalledRuntimeTypes: installedRuntimeTypes,
-		InstalledModels:       toInstalledModels(runtimeManager),
-		InstalledHarnesses:    toInstalledHarnesses(cachedDesired),
+		MachineID:              cfg.MachineID,
+		Hostname:               report.Hostname,
+		Addresses:              report.Addresses,
+		HardwareSummary:        report.HardwareSummary,
+		RAMTotalMB:             report.RAMTotalMB,
+		GPUs:                   toProtocolGPUInfo(report.GPUs),
+		AgentVersion:           agentVersion,
+		RuntimeStatus:          runtimeStatus,
+		RuntimeStatuses:        runtimeStatuses,
+		RuntimeType:            runtimeType,
+		RuntimeVersion:         runtimeVersion,
+		RuntimeVersions:        runtimeManager.RuntimeVersions(),
+		InstalledRuntimeTypes:  installedRuntimeTypes,
+		InstalledModels:        toInstalledModels(runtimeManager),
+		InstalledHarnesses:     toInstalledHarnesses(cachedDesired),
+		InstalledOrchestrators: toInstalledOrchestrators(cachedDesired),
 	}
 
 	resp, err := client.Retry(context.Background(), 3, func() (types.CheckinResponse, error) {
@@ -180,13 +181,15 @@ func runCheckIn(cfg config.Config, cl *client.Client, runtimeManager *runtime.Ma
 		log.Printf("failed to persist desired config cache: %v", err)
 	}
 	desiredHarnesses := toInstalledHarnesses(resp.DesiredConfig)
-	if harnessReportsDiffer(payload.InstalledHarnesses, desiredHarnesses) {
+	desiredOrchestrators := toInstalledOrchestrators(resp.DesiredConfig)
+	if harnessReportsDiffer(payload.InstalledHarnesses, desiredHarnesses) || orchestratorReportsDiffer(payload.InstalledOrchestrators, desiredOrchestrators) {
 		refreshPayload := payload
 		refreshPayload.InstalledHarnesses = desiredHarnesses
+		refreshPayload.InstalledOrchestrators = desiredOrchestrators
 		refreshCtx, refreshCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer refreshCancel()
 		if _, err := cl.Checkin(refreshCtx, refreshPayload); err != nil {
-			log.Printf("follow-up harness refresh checkin failed: %v", err)
+			log.Printf("follow-up harness/orchestrator refresh checkin failed: %v", err)
 		}
 	}
 	enforceDesiredConfig(runtimeManager, resp.DesiredConfig)
