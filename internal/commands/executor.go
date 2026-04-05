@@ -30,6 +30,8 @@ type ExecutionResult struct {
 	ResultPayload interface{}
 }
 
+const gooseInstallScriptURL = "https://github.com/block/goose/raw/main/download_cli.sh"
+
 func NewExecutor(runtimeManager *runtime.Manager, cfg config.Config, progress func(payload types.AckRequest)) *Executor {
 	return &Executor{
 		runtimeManager: runtimeManager,
@@ -192,6 +194,7 @@ func (e *Executor) Execute(command types.AgentCommand) (ExecutionResult, error) 
 				Details:   fmt.Sprintf("Checking %d harness(es)...", len(desiredHarnesses)),
 			})
 		}
+		e.prepareHarnessesForSync(desiredHarnesses, command.ID)
 		installedHarnesses := probeInstalledHarnesses(desiredHarnesses)
 		readyCount := 0
 		offlineCount := 0
@@ -494,17 +497,18 @@ func probeInstalledHarnesses(desired []types.DesiredHarness) []types.InstalledHa
 			}
 			item.Transport = &types.HarnessTransportConfig{Kind: "cli", Command: commandName, Args: args}
 
-			path, err := exec.LookPath(commandName)
+			path, err := resolveCommandPath(commandName)
 			if err != nil {
 				item.Status = "offline"
 				item.Detail = fmt.Sprintf("%s was not found in PATH", commandName)
 				result = append(result, item)
 				continue
 			}
+			item.Transport.Command = path
 
 			item.Status = "ready"
 			item.ExecutablePath = path
-			item.Version = probeHarnessVersion(commandName)
+			item.Version = probeHarnessVersion(path)
 			if item.Version != "" {
 				item.Detail = "Detected " + item.Version
 			} else {
@@ -538,17 +542,18 @@ func probeInstalledHarnesses(desired []types.DesiredHarness) []types.InstalledHa
 				continue
 			}
 
-			path, err := exec.LookPath(commandName)
+			path, err := resolveCommandPath(commandName)
 			if err != nil {
 				item.Status = "offline"
 				item.Detail = fmt.Sprintf("Goose daemon not reachable at %s and %s was not found in PATH", baseURL, commandName)
 				result = append(result, item)
 				continue
 			}
+			item.Transport.Command = path
 
 			item.Status = "ready"
 			item.ExecutablePath = path
-			item.Version = probeHarnessVersion(commandName)
+			item.Version = probeHarnessVersion(path)
 			if item.Version != "" {
 				item.Detail = fmt.Sprintf("Detected %s. Daemon is not currently reachable, but %s can be started on demand.", item.Version, commandName)
 			} else {
@@ -590,16 +595,17 @@ func probeInstalledHarnesses(desired []types.DesiredHarness) []types.InstalledHa
 				result = append(result, item)
 				continue
 			}
-			path, err := exec.LookPath(commandName)
+			path, err := resolveCommandPath(commandName)
 			if err != nil {
 				item.Status = "offline"
 				item.Detail = fmt.Sprintf("%s was not found in PATH", commandName)
 				result = append(result, item)
 				continue
 			}
+			item.Transport.Command = path
 
 			item.ExecutablePath = path
-			item.Version = probeHarnessVersion(commandName)
+			item.Version = probeHarnessVersion(path)
 			if supportsAgentHarnessExecution(harness.Type) {
 				item.Status = "ready"
 				if item.Version != "" {
@@ -648,6 +654,97 @@ func defaultCLIHarnessCommand(harnessType string) string {
 
 func supportsAgentHarnessExecution(harnessType string) bool {
 	return harnessType == "codex_cli" || harnessType == "goose"
+}
+
+func (e *Executor) prepareHarnessesForSync(desired []types.DesiredHarness, commandID string) {
+	for _, harness := range desired {
+		if harness.Type != "goose" {
+			continue
+		}
+		if err := e.prepareGooseHarness(harness); err != nil {
+			if e.progress != nil {
+				e.progress(types.AckRequest{
+					CommandID: commandID,
+					Status:    "in_progress",
+					Details:   fmt.Sprintf("Goose setup check: %v", err),
+				})
+			}
+			continue
+		}
+		if e.progress != nil {
+			e.progress(types.AckRequest{
+				CommandID: commandID,
+				Status:    "in_progress",
+				Details:   "Goose setup verified.",
+			})
+		}
+	}
+}
+
+func (e *Executor) prepareGooseHarness(harness types.DesiredHarness) error {
+	baseURL := strings.TrimSpace(harness.Transport.BaseURL)
+	if baseURL == "" {
+		baseURL = "https://127.0.0.1:3000"
+	}
+	if gooseDaemonReachable(baseURL) {
+		return nil
+	}
+	commandName := strings.TrimSpace(harness.Transport.Command)
+	if commandName == "" {
+		commandName = "goosed"
+	}
+	if _, err := resolveCommandPath(commandName); err == nil {
+		return nil
+	}
+	if err := installGooseCLI(); err != nil {
+		return fmt.Errorf("unable to bootstrap Goose CLI: %w", err)
+	}
+	if _, err := resolveCommandPath(commandName); err != nil {
+		return fmt.Errorf("Goose CLI bootstrap completed but %s is still unavailable", commandName)
+	}
+	return nil
+}
+
+func installGooseCLI() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	command := fmt.Sprintf("set -euo pipefail; tmp_script=$(mktemp); trap 'rm -f \"$tmp_script\"' EXIT; curl -fsSL %s -o \"$tmp_script\"; chmod +x \"$tmp_script\"; CONFIGURE=false \"$tmp_script\"", shellQuote(gooseInstallScriptURL))
+	cmd := exec.CommandContext(ctx, "bash", "-lc", command)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		trimmed := strings.TrimSpace(string(output))
+		if trimmed == "" {
+			return err
+		}
+		return fmt.Errorf("%w: %s", err, trimmed)
+	}
+	return nil
+}
+
+func resolveCommandPath(commandName string) (string, error) {
+	commandName = strings.TrimSpace(commandName)
+	if commandName == "" {
+		return "", fmt.Errorf("empty command")
+	}
+	if path, err := exec.LookPath(commandName); err == nil {
+		return path, nil
+	}
+	home, _ := os.UserHomeDir()
+	candidates := []string{
+		filepath.Join(home, ".local", "bin", commandName),
+		filepath.Join("/usr/local/bin", commandName),
+	}
+	for _, candidate := range candidates {
+		info, err := os.Stat(candidate)
+		if err != nil || info.IsDir() {
+			continue
+		}
+		if info.Mode()&0111 == 0 {
+			continue
+		}
+		return candidate, nil
+	}
+	return "", fmt.Errorf("%s not found", commandName)
 }
 
 func gooseDaemonReachable(baseURL string) bool {
