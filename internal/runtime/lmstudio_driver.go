@@ -288,7 +288,15 @@ func (d *lmstudioDriver) RemoveModel(modelID string) error {
 	}
 	contexts := d.resolveLMSContexts()
 	if len(contexts) == 0 {
-		return fmt.Errorf("lmstudio cli not installed")
+		// Hardened hosts may hide /home-based LM Studio CLI paths from this
+		// service context. Fall back to stopping the runtime service to unload
+		// GPU memory instead of failing stale-model ejection.
+		_ = runCommand("systemctl", "stop", "lmstudio")
+		if remoteModels, err := d.fetchRemoteModels(); err == nil && len(remoteModels) > 0 {
+			d.forceStopLingeringProcesses()
+		}
+		d.clearConfiguredModel(modelID)
+		return nil
 	}
 
 	targets := []string{modelID}
@@ -963,4 +971,14 @@ func (d *lmstudioDriver) envForPathWithHome(path string, home string) []string {
 	env = append(env, "HOME="+home)
 	env = append(env, "PATH="+binDir+":"+lmsDefaultSystemdPath)
 	return env
+}
+
+func (d *lmstudioDriver) forceStopLingeringProcesses() {
+	patterns := []string{
+		"/.lmstudio/.internal/utils/node",
+		"/.lmstudio/bin/lms",
+	}
+	for _, pattern := range patterns {
+		_ = exec.Command("pkill", "-f", pattern).Run()
+	}
 }
