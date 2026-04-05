@@ -212,23 +212,33 @@ func resolveExecutableWithUserPath(commandName string) (string, error) {
 }
 
 func autoInstallOrchestratorBinary(orchestratorType string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
 	defer cancel()
 
 	type installStep struct {
 		binary string
 		args   []string
 	}
-	var steps []installStep
+	pkg := ""
+	commandName := ""
 	switch strings.ToLower(strings.TrimSpace(orchestratorType)) {
 	case "crewai":
-		steps = []installStep{{binary: "python3", args: []string{"-m", "pip", "install", "--user", "--upgrade", "crewai"}}}
+		pkg = "crewai"
+		commandName = "crewai"
 	case "langgraph":
-		steps = []installStep{{binary: "python3", args: []string{"-m", "pip", "install", "--user", "--upgrade", "langgraph-cli"}}}
+		pkg = "langgraph-cli"
+		commandName = "langgraph"
 	case "autogen":
-		steps = []installStep{{binary: "python3", args: []string{"-m", "pip", "install", "--user", "--upgrade", "pyautogen"}}}
+		pkg = "pyautogen"
+		commandName = "autogen"
 	default:
 		return fmt.Errorf("unsupported orchestrator type: %s", orchestratorType)
+	}
+
+	steps := []installStep{
+		{binary: "pipx", args: []string{"install", "--force", pkg}},
+		{binary: "uv", args: []string{"tool", "install", "--force", pkg}},
+		{binary: "python3", args: []string{"-m", "pip", "install", "--user", "--upgrade", "--break-system-packages", pkg}},
 	}
 
 	var lastErr error
@@ -242,12 +252,55 @@ func autoInstallOrchestratorBinary(orchestratorType string) error {
 			lastErr = fmt.Errorf("%s %s failed: %w (%s)", step.binary, strings.Join(step.args, " "), err, strings.TrimSpace(string(output)))
 			continue
 		}
-		return nil
+		if _, err := resolveExecutableWithUserPath(commandName); err == nil {
+			return nil
+		}
 	}
+
+	if err := installOrchestratorViaVenv(ctx, orchestratorType, pkg, commandName); err == nil {
+		return nil
+	} else {
+		lastErr = err
+	}
+
 	if lastErr != nil {
 		return lastErr
 	}
 	return fmt.Errorf("no installer available")
+}
+
+func installOrchestratorViaVenv(ctx context.Context, orchestratorType, pkg, commandName string) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	venvDir := filepath.Join(home, ".local", "share", "clawcontrol", "orchestrators", strings.ToLower(orchestratorType))
+	if err := os.MkdirAll(filepath.Dir(venvDir), 0o755); err != nil {
+		return err
+	}
+	if _, err := os.Stat(filepath.Join(venvDir, "bin", "python")); err != nil {
+		if output, venvErr := exec.CommandContext(ctx, "python3", "-m", "venv", venvDir).CombinedOutput(); venvErr != nil {
+			return fmt.Errorf("python3 -m venv %s: %w (%s)", venvDir, venvErr, strings.TrimSpace(string(output)))
+		}
+	}
+	pythonBin := filepath.Join(venvDir, "bin", "python")
+	if output, pipErr := exec.CommandContext(ctx, pythonBin, "-m", "pip", "install", "--upgrade", pkg).CombinedOutput(); pipErr != nil {
+		return fmt.Errorf("%s -m pip install --upgrade %s: %w (%s)", pythonBin, pkg, pipErr, strings.TrimSpace(string(output)))
+	}
+	localBinDir := filepath.Join(home, ".local", "bin")
+	if err := os.MkdirAll(localBinDir, 0o755); err != nil {
+		return err
+	}
+	target := filepath.Join(venvDir, "bin", commandName)
+	if _, err := os.Stat(target); err != nil {
+		return fmt.Errorf("venv installed package but command %s not found", target)
+	}
+	shim := filepath.Join(localBinDir, commandName)
+	_ = os.Remove(shim)
+	if err := os.Symlink(target, shim); err != nil {
+		return fmt.Errorf("create shim %s -> %s: %w", shim, target, err)
+	}
+	return nil
 }
 
 func writeOrchestratorPayloadFile(prefix string, payload any) (string, error) {
