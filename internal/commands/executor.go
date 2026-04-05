@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -21,10 +22,17 @@ import (
 	"github.com/Borgels/clawcontrol-agent/internal/types"
 )
 
+// ErrCommandCancelled is returned when a command is cancelled via CancelCommand.
+var ErrCommandCancelled = errors.New("command cancelled")
+
 type Executor struct {
 	runtimeManager *runtime.Manager
 	cfg            config.Config
 	progress       func(payload types.AckRequest)
+
+	// Active command cancellation support
+	activeCancelMu sync.Mutex
+	activeCancel   map[string]context.CancelFunc
 }
 
 type ExecutionResult struct {
@@ -39,11 +47,56 @@ func NewExecutor(runtimeManager *runtime.Manager, cfg config.Config, progress fu
 		runtimeManager: runtimeManager,
 		cfg:            cfg,
 		progress:       progress,
+		activeCancel:   make(map[string]context.CancelFunc),
 	}
 }
 
+// CancelCommand attempts to cancel an in-flight command by its ID.
+// Returns true if the command was found and cancellation was signalled.
+func (e *Executor) CancelCommand(commandID string) bool {
+	e.activeCancelMu.Lock()
+	defer e.activeCancelMu.Unlock()
+	if cancel, ok := e.activeCancel[commandID]; ok {
+		cancel()
+		return true
+	}
+	return false
+}
+
+func (e *Executor) registerCancel(commandID string, cancel context.CancelFunc) {
+	e.activeCancelMu.Lock()
+	e.activeCancel[commandID] = cancel
+	e.activeCancelMu.Unlock()
+}
+
+func (e *Executor) unregisterCancel(commandID string) {
+	e.activeCancelMu.Lock()
+	delete(e.activeCancel, commandID)
+	e.activeCancelMu.Unlock()
+}
+
+// Execute runs a command without cancellation support (legacy).
 func (e *Executor) Execute(command types.AgentCommand) (ExecutionResult, error) {
+	return e.ExecuteWithContext(context.Background(), command)
+}
+
+// ExecuteWithContext runs a command with cancellation support.
+func (e *Executor) ExecuteWithContext(ctx context.Context, command types.AgentCommand) (ExecutionResult, error) {
+	// Create a cancellable context for this command
+	cmdCtx, cancel := context.WithCancel(ctx)
+	e.registerCancel(command.ID, cancel)
+	defer e.unregisterCancel(command.ID)
+
 	switch command.Type {
+	case "cancel_command":
+		targetID := optionalStringParam(command.Params, "targetCommandId")
+		if targetID == "" {
+			return ExecutionResult{}, fmt.Errorf("missing targetCommandId param")
+		}
+		if e.CancelCommand(targetID) {
+			return ExecutionResult{Details: "cancellation signalled"}, nil
+		}
+		return ExecutionResult{Details: "command not found or already completed"}, nil
 	case "install_runtime":
 		rawRuntime, ok := command.Params["runtime"]
 		if !ok {
@@ -69,7 +122,13 @@ func (e *Executor) Execute(command types.AgentCommand) (ExecutionResult, error) 
 		if err := applyRuntimeProfileOverrides(command.Params, runtimeName); err != nil {
 			return ExecutionResult{}, err
 		}
-		return ExecutionResult{}, e.runtimeManager.PrepareModelWithRuntime(modelID, runtimeName, flags)
+		if err := e.runtimeManager.PrepareModelWithRuntimeCtx(cmdCtx, modelID, runtimeName, flags); err != nil {
+			if errors.Is(err, context.Canceled) {
+				return ExecutionResult{}, ErrCommandCancelled
+			}
+			return ExecutionResult{}, err
+		}
+		return ExecutionResult{}, nil
 	case "start_model":
 		modelID, err := stringParam(command.Params, "modelId")
 		if err != nil {
@@ -322,6 +381,36 @@ type requiredProfileFile struct {
 	Destination string `json:"destination"`
 }
 
+// runtimeMountPaths maps container mount points to host paths.
+// Container paths like /app/* are written to host equivalents.
+var runtimeMountPaths = map[string]map[string]string{
+	"vllm": {
+		"/app": "/opt/clawcontrol/vllm-app",
+	},
+	"tensorrt": {
+		"/app": "/opt/clawcontrol/tensorrt-app",
+	},
+}
+
+// resolveHostPath converts a container destination path to a host path.
+// If the destination starts with a known mount prefix, it's rewritten.
+// Otherwise, the destination is used as-is (assumed to be a host path).
+func resolveHostPath(runtimeName string, containerPath string) string {
+	mounts, ok := runtimeMountPaths[strings.ToLower(runtimeName)]
+	if !ok {
+		return containerPath
+	}
+	for containerPrefix, hostPrefix := range mounts {
+		if strings.HasPrefix(containerPath, containerPrefix+"/") {
+			return hostPrefix + containerPath[len(containerPrefix):]
+		}
+		if containerPath == containerPrefix {
+			return hostPrefix
+		}
+	}
+	return containerPath
+}
+
 type runtimeProfileParams struct {
 	Runtime              string                `json:"runtime"`
 	ContainerImage       string                `json:"containerImage"`
@@ -356,7 +445,9 @@ func applyRuntimeProfileOverrides(params map[string]interface{}, runtimeHint str
 		if src == "" || dst == "" {
 			continue
 		}
-		if err := downloadProfileFile(src, dst); err != nil {
+		// Resolve container path to host path based on runtime mount mapping
+		hostPath := resolveHostPath(runtimeName, dst)
+		if err := downloadProfileFile(src, hostPath); err != nil {
 			return err
 		}
 	}

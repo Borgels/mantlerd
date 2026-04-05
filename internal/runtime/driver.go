@@ -1,6 +1,10 @@
 package runtime
 
-import "github.com/Borgels/clawcontrol-agent/internal/types"
+import (
+	"context"
+
+	"github.com/Borgels/clawcontrol-agent/internal/types"
+)
 
 type Driver interface {
 	Name() string
@@ -25,4 +29,10 @@ type Driver interface {
 		onProgress func(BenchmarkProgress),
 	) (BenchmarkResult, error)
 	RestartRuntime() error
+}
+
+// CancellableDriver extends Driver with context-aware preparation for cancellation support.
+type CancellableDriver interface {
+	Driver
+	PrepareModelWithFlagsCtx(ctx context.Context, modelID string, flags *types.ModelFeatureFlags) error
 }

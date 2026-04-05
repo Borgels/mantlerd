@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -130,12 +131,17 @@ func (d *tensorrtDriver) Version() string {
 	return ""
 }
 
-func (d *tensorrtDriver) PrepareModelWithFlags(modelID string, _ *types.ModelFeatureFlags) error {
+func (d *tensorrtDriver) PrepareModelWithFlags(modelID string, flags *types.ModelFeatureFlags) error {
+	return d.PrepareModelWithFlagsCtx(context.Background(), modelID, flags)
+}
+
+// PrepareModelWithFlagsCtx downloads model weights with cancellation support.
+func (d *tensorrtDriver) PrepareModelWithFlagsCtx(ctx context.Context, modelID string, _ *types.ModelFeatureFlags) error {
 	trimmed := strings.TrimSpace(modelID)
 	if trimmed == "" {
 		return fmt.Errorf("model ID is required")
 	}
-	if err := d.downloadModelSnapshot(trimmed); err != nil {
+	if err := d.downloadModelSnapshotCtx(ctx, trimmed); err != nil {
 		return err
 	}
 	return d.markPreparedModel(trimmed)
@@ -563,7 +569,8 @@ Wants=network-online.target
 Type=simple
 EnvironmentFile=-` + tensorrtEnvPath + `
 ExecStartPre=-/bin/sh -c 'DOCKER_BIN="$(command -v docker)"; if [ -n "$DOCKER_BIN" ]; then "$DOCKER_BIN" rm -f ` + tensorrtContainerName + ` >/dev/null 2>&1 || true; fi'
-ExecStart=/bin/sh -c 'DOCKER_BIN="$(command -v docker)"; [ -n "$DOCKER_BIN" ] || exit 1; exec "$DOCKER_BIN" run --rm --name ` + tensorrtContainerName + ` --gpus all --ipc=host --network host -e HF_TOKEN="${HF_TOKEN:-}" -e HUGGING_FACE_HUB_TOKEN="${HUGGING_FACE_HUB_TOKEN:-}" -e NVIDIA_VISIBLE_DEVICES=all -e NVIDIA_DRIVER_CAPABILITIES=compute,utility -v /root/.cache/huggingface:/root/.cache/huggingface "${TENSORRT_CONTAINER_IMAGE:-` + tensorrtDefaultImage + `}" trtllm-serve "${TENSORRT_MODEL}" --host 0.0.0.0 --port "${TENSORRT_PORT:-8000}" ${TENSORRT_EXTRA_ARGS:-}'
+ExecStartPre=-/bin/sh -c 'mkdir -p /opt/clawcontrol/tensorrt-app'
+ExecStart=/bin/sh -c 'DOCKER_BIN="$(command -v docker)"; [ -n "$DOCKER_BIN" ] || exit 1; exec "$DOCKER_BIN" run --rm --name ` + tensorrtContainerName + ` --gpus all --ipc=host --network host -e HF_TOKEN="${HF_TOKEN:-}" -e HUGGING_FACE_HUB_TOKEN="${HUGGING_FACE_HUB_TOKEN:-}" -e NVIDIA_VISIBLE_DEVICES=all -e NVIDIA_DRIVER_CAPABILITIES=compute,utility -v /root/.cache/huggingface:/root/.cache/huggingface -v /opt/clawcontrol/tensorrt-app:/app "${TENSORRT_CONTAINER_IMAGE:-` + tensorrtDefaultImage + `}" trtllm-serve "${TENSORRT_MODEL}" --host 0.0.0.0 --port "${TENSORRT_PORT:-8000}" ${TENSORRT_EXTRA_ARGS:-}'
 ExecStop=-/bin/sh -c 'DOCKER_BIN="$(command -v docker)"; if [ -n "$DOCKER_BIN" ]; then "$DOCKER_BIN" stop ` + tensorrtContainerName + ` >/dev/null 2>&1 || true; fi'
 Restart=always
 RestartSec=5
@@ -772,28 +779,53 @@ func (d *tensorrtDriver) unmarkPreparedModel(modelID string) error {
 }
 
 func (d *tensorrtDriver) downloadModelSnapshot(modelID string) error {
+	return d.downloadModelSnapshotCtx(context.Background(), modelID)
+}
+
+// downloadModelSnapshotCtx downloads HuggingFace model weights with cancellation support.
+func (d *tensorrtDriver) downloadModelSnapshotCtx(ctx context.Context, modelID string) error {
 	modelID = strings.TrimSpace(modelID)
 	if modelID == "" {
 		return fmt.Errorf("model ID is required")
 	}
 	script := "from huggingface_hub import snapshot_download; snapshot_download(repo_id='" + strings.ReplaceAll(modelID, "'", "\\'") + "', cache_dir='/root/.cache/huggingface', resume_download=True)"
 	for _, python := range []string{"python3"} {
-		if err := runCommand(python, "-c", script); err == nil {
-			return nil
+		cmd := exec.CommandContext(ctx, python, "-c", script)
+		if err := cmd.Run(); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			continue
 		}
+		return nil
 	}
 	if err := d.ensureDockerAvailable(); err != nil {
 		return err
 	}
 	image := d.containerImage()
 	if !d.containerImageExists(image) {
-		if err := d.pullContainerImage(image); err != nil {
+		if err := d.pullContainerImageCtx(ctx, image); err != nil {
 			return err
 		}
 	}
-	cmd := exec.Command("docker", "run", "--rm", "--network", "host", "-v", "/root/.cache/huggingface:/root/.cache/huggingface", image, "python3", "-c", script)
+	cmd := exec.CommandContext(ctx, "docker", "run", "--rm", "--network", "host", "-v", "/root/.cache/huggingface:/root/.cache/huggingface", image, "python3", "-c", script)
 	if output, err := cmd.CombinedOutput(); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		return fmt.Errorf("download model snapshot in tensorrt container: %w (%s)", err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
+// pullContainerImageCtx pulls a container image with cancellation support.
+func (d *tensorrtDriver) pullContainerImageCtx(ctx context.Context, image string) error {
+	cmd := exec.CommandContext(ctx, "docker", "pull", image)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return fmt.Errorf("pull tensorrt container image %s: %w (%s)", image, err, strings.TrimSpace(string(output)))
 	}
 	return nil
 }

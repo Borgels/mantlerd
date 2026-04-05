@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"strings"
@@ -197,8 +198,13 @@ func (m *Manager) PrepareModelWithFlags(modelID string, flags *types.ModelFeatur
 }
 
 func (m *Manager) PrepareModelWithRuntime(modelID string, runtimeName string, flags *types.ModelFeatureFlags) error {
+	return m.PrepareModelWithRuntimeCtx(context.Background(), modelID, runtimeName, flags)
+}
+
+// PrepareModelWithRuntimeCtx prepares a model with cancellation support.
+func (m *Manager) PrepareModelWithRuntimeCtx(ctx context.Context, modelID string, runtimeName string, flags *types.ModelFeatureFlags) error {
 	if strings.TrimSpace(runtimeName) == "" {
-		return m.PrepareModelWithFlags(modelID, flags)
+		return m.PrepareModelWithFlagsCtx(ctx, modelID, flags)
 	}
 	normalizedRuntime := strings.ToLower(strings.TrimSpace(runtimeName))
 	if err := m.EnsureRuntime(normalizedRuntime); err != nil {
@@ -208,7 +214,53 @@ func (m *Manager) PrepareModelWithRuntime(modelID string, runtimeName string, fl
 	if err != nil {
 		return err
 	}
+	// Use context-aware method if available
+	if cancellable, ok := driver.(CancellableDriver); ok {
+		return cancellable.PrepareModelWithFlagsCtx(ctx, modelID, flags)
+	}
 	return driver.PrepareModelWithFlags(modelID, flags)
+}
+
+// PrepareModelWithFlagsCtx prepares a model with cancellation support (no explicit runtime).
+func (m *Manager) PrepareModelWithFlagsCtx(ctx context.Context, modelID string, flags *types.ModelFeatureFlags) error {
+	trimmedModel := strings.TrimSpace(modelID)
+	if trimmedModel == "" {
+		return fmt.Errorf("model ID is required")
+	}
+
+	if strings.Contains(trimmedModel, "/") {
+		if err := m.EnsureRuntime("vllm"); err != nil {
+			return fmt.Errorf("ensure vllm runtime: %w", err)
+		}
+		driver, err := m.driverFor("vllm")
+		if err != nil {
+			return err
+		}
+		if cancellable, ok := driver.(CancellableDriver); ok {
+			return cancellable.PrepareModelWithFlagsCtx(ctx, trimmedModel, flags)
+		}
+		return driver.PrepareModelWithFlags(trimmedModel, flags)
+	}
+	if strings.Contains(trimmedModel, ":") {
+		if err := m.EnsureRuntime("ollama"); err == nil {
+			driver, drvErr := m.driverFor("ollama")
+			if drvErr == nil {
+				if cancellable, ok := driver.(CancellableDriver); ok {
+					return cancellable.PrepareModelWithFlagsCtx(ctx, trimmedModel, flags)
+				}
+				return driver.PrepareModelWithFlags(trimmedModel, flags)
+			}
+		}
+	}
+
+	driver, err := m.preferredDriverForModel(trimmedModel)
+	if err != nil {
+		return err
+	}
+	if cancellable, ok := driver.(CancellableDriver); ok {
+		return cancellable.PrepareModelWithFlagsCtx(ctx, trimmedModel, flags)
+	}
+	return driver.PrepareModelWithFlags(trimmedModel, flags)
 }
 
 func (m *Manager) StartModelWithFlags(modelID string, flags *types.ModelFeatureFlags) error {
