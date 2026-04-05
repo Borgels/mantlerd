@@ -231,8 +231,11 @@ func toProtocolGPUInfo(values []discovery.GPUInfo) []types.GPUInfo {
 			continue
 		}
 		result = append(result, types.GPUInfo{
-			Name:          name,
-			MemoryTotalMB: value.MemoryTotalMB,
+			Name:              name,
+			MemoryTotalMB:     value.MemoryTotalMB,
+			Architecture:      strings.TrimSpace(value.Architecture),
+			ComputeCapability: strings.TrimSpace(value.ComputeCapability),
+			UnifiedMemory:     value.UnifiedMemory,
 		})
 	}
 	if len(result) == 0 {

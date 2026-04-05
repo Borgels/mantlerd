@@ -20,8 +20,11 @@ type HardwareReport struct {
 }
 
 type GPUInfo struct {
-	Name          string
-	MemoryTotalMB int
+	Name              string
+	MemoryTotalMB     int
+	Architecture      string
+	ComputeCapability string
+	UnifiedMemory     *bool
 }
 
 func Collect() HardwareReport {
@@ -100,8 +103,39 @@ func readRAMMiB() int {
 	return 0
 }
 
+func architectureFromComputeCapability(name string, computeCapability string) string {
+	cc := strings.TrimSpace(computeCapability)
+	if cc != "" {
+		major := cc
+		if dot := strings.Index(cc, "."); dot > 0 {
+			major = cc[:dot]
+		}
+		switch major {
+		case "10":
+			return "Blackwell"
+		case "9":
+			return "Hopper"
+		case "8":
+			return "Ampere/Ada"
+		case "7":
+			return "Turing/Volta"
+		}
+	}
+	lower := strings.ToLower(strings.TrimSpace(name))
+	switch {
+	case strings.Contains(lower, "blackwell"):
+		return "Blackwell"
+	case strings.Contains(lower, "hopper"):
+		return "Hopper"
+	case strings.Contains(lower, "ampere") || strings.Contains(lower, "ada"):
+		return "Ampere/Ada"
+	default:
+		return ""
+	}
+}
+
 func readGPUInfo() (string, []GPUInfo) {
-	cmd := exec.Command("nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader")
+	cmd := exec.Command("nvidia-smi", "--query-gpu=name,memory.total,compute_cap", "--format=csv,noheader")
 	out, err := cmd.Output()
 	if err == nil {
 		summary := strings.TrimSpace(string(out))
@@ -114,8 +148,11 @@ func readGPUInfo() (string, []GPUInfo) {
 				if line == "" {
 					continue
 				}
-				parts := strings.SplitN(line, ",", 2)
-				name := strings.TrimSpace(parts[0])
+				parts := strings.Split(line, ",")
+				name := ""
+				if len(parts) > 0 {
+					name = strings.TrimSpace(parts[0])
+				}
 				memoryTotalMB := 0
 				if len(parts) > 1 {
 					fields := strings.Fields(strings.TrimSpace(parts[1]))
@@ -125,15 +162,25 @@ func readGPUInfo() (string, []GPUInfo) {
 						}
 					}
 				}
-				gpus = append(gpus, GPUInfo{
-					Name:          name,
-					MemoryTotalMB: memoryTotalMB,
-				})
-				if memoryTotalMB > 0 {
-					labels = append(labels, fmt.Sprintf("%s, %d MiB", name, memoryTotalMB))
-					continue
+				computeCapability := ""
+				if len(parts) > 2 {
+					computeCapability = strings.TrimSpace(parts[2])
 				}
-				labels = append(labels, name)
+				architecture := architectureFromComputeCapability(name, computeCapability)
+				gpus = append(gpus, GPUInfo{
+					Name:              name,
+					MemoryTotalMB:     memoryTotalMB,
+					Architecture:      architecture,
+					ComputeCapability: computeCapability,
+				})
+				labelParts := []string{name}
+				if memoryTotalMB > 0 {
+					labelParts = append(labelParts, fmt.Sprintf("%d MiB", memoryTotalMB))
+				}
+				if architecture != "" {
+					labelParts = append(labelParts, architecture)
+				}
+				labels = append(labels, strings.Join(labelParts, ", "))
 			}
 			return strings.Join(labels, " | "), gpus
 		}

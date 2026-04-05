@@ -21,9 +21,13 @@ const (
 type ModelInstallStatus string
 
 const (
-	ModelInstalling ModelInstallStatus = "installing"
-	ModelReady      ModelInstallStatus = "ready"
-	ModelFailed     ModelInstallStatus = "failed"
+	ModelDownloading ModelInstallStatus = "downloading"
+	ModelDownloaded  ModelInstallStatus = "downloaded"
+	ModelInstalling  ModelInstallStatus = "installing"
+	ModelStarting    ModelInstallStatus = "starting"
+	ModelReady       ModelInstallStatus = "ready"
+	ModelStopping    ModelInstallStatus = "stopping"
+	ModelFailed      ModelInstallStatus = "failed"
 )
 
 type InstalledModel struct {
@@ -35,8 +39,11 @@ type InstalledModel struct {
 }
 
 type GPUInfo struct {
-	Name          string `json:"name"`
-	MemoryTotalMB int    `json:"memoryTotalMb,omitempty"`
+	Name              string `json:"name"`
+	MemoryTotalMB     int    `json:"memoryTotalMb,omitempty"`
+	Architecture      string `json:"architecture,omitempty"`
+	ComputeCapability string `json:"computeCapability,omitempty"`
+	UnifiedMemory     *bool  `json:"unifiedMemory,omitempty"`
 }
 
 type ModelCapabilities struct {
@@ -56,14 +63,14 @@ type ModelBenchmarkMetrics struct {
 }
 
 type CheckinRequest struct {
-	MachineID             string                        `json:"machineId"`
-	Hostname              string                        `json:"hostname,omitempty"`
-	Addresses             []string                      `json:"addresses,omitempty"`
-	HardwareSummary       string                        `json:"hardwareSummary,omitempty"`
-	RAMTotalMB            int                           `json:"ramTotalMb,omitempty"`
-	GPUs                  []GPUInfo                     `json:"gpus,omitempty"`
-	AgentVersion          string                        `json:"agentVersion,omitempty"`
-	RuntimeStatus         RuntimeStatus                 `json:"runtimeStatus,omitempty"`
+	MachineID              string                        `json:"machineId"`
+	Hostname               string                        `json:"hostname,omitempty"`
+	Addresses              []string                      `json:"addresses,omitempty"`
+	HardwareSummary        string                        `json:"hardwareSummary,omitempty"`
+	RAMTotalMB             int                           `json:"ramTotalMb,omitempty"`
+	GPUs                   []GPUInfo                     `json:"gpus,omitempty"`
+	AgentVersion           string                        `json:"agentVersion,omitempty"`
+	RuntimeStatus          RuntimeStatus                 `json:"runtimeStatus,omitempty"`
 	RuntimeStatuses        map[RuntimeType]RuntimeStatus `json:"runtimeStatuses,omitempty"`
 	RuntimeType            RuntimeType                   `json:"runtimeType,omitempty"`
 	InstalledRuntimeTypes  []RuntimeType                 `json:"installedRuntimeTypes,omitempty"`

@@ -155,13 +155,21 @@ func (m *Manager) preferredDriverForModel(modelID string) (Driver, error) {
 }
 
 func (m *Manager) EnsureModelWithFlags(modelID string, flags *types.ModelFeatureFlags) error {
+	// Backward-compatible behavior: ensure means prepare+start.
+	return m.StartModelWithFlags(modelID, flags)
+}
+
+func (m *Manager) EnsureModelWithRuntime(modelID string, runtimeName string, flags *types.ModelFeatureFlags) error {
+	// Backward-compatible behavior: ensure means prepare+start.
+	return m.StartModelWithRuntime(modelID, runtimeName, flags)
+}
+
+func (m *Manager) PrepareModelWithFlags(modelID string, flags *types.ModelFeatureFlags) error {
 	trimmedModel := strings.TrimSpace(modelID)
 	if trimmedModel == "" {
 		return fmt.Errorf("model ID is required")
 	}
 
-	// If the model format strongly implies a runtime, make sure that runtime is
-	// installed first so UI-driven "add model" can self-heal missing runtimes.
 	if strings.Contains(trimmedModel, "/") {
 		if err := m.EnsureRuntime("vllm"); err != nil {
 			return fmt.Errorf("ensure vllm runtime: %w", err)
@@ -170,13 +178,13 @@ func (m *Manager) EnsureModelWithFlags(modelID string, flags *types.ModelFeature
 		if err != nil {
 			return err
 		}
-		return driver.EnsureModelWithFlags(trimmedModel, flags)
+		return driver.PrepareModelWithFlags(trimmedModel, flags)
 	}
 	if strings.Contains(trimmedModel, ":") {
 		if err := m.EnsureRuntime("ollama"); err == nil {
 			driver, drvErr := m.driverFor("ollama")
 			if drvErr == nil {
-				return driver.EnsureModelWithFlags(trimmedModel, flags)
+				return driver.PrepareModelWithFlags(trimmedModel, flags)
 			}
 		}
 	}
@@ -185,12 +193,12 @@ func (m *Manager) EnsureModelWithFlags(modelID string, flags *types.ModelFeature
 	if err != nil {
 		return err
 	}
-	return driver.EnsureModelWithFlags(trimmedModel, flags)
+	return driver.PrepareModelWithFlags(trimmedModel, flags)
 }
 
-func (m *Manager) EnsureModelWithRuntime(modelID string, runtimeName string, flags *types.ModelFeatureFlags) error {
+func (m *Manager) PrepareModelWithRuntime(modelID string, runtimeName string, flags *types.ModelFeatureFlags) error {
 	if strings.TrimSpace(runtimeName) == "" {
-		return m.EnsureModelWithFlags(modelID, flags)
+		return m.PrepareModelWithFlags(modelID, flags)
 	}
 	normalizedRuntime := strings.ToLower(strings.TrimSpace(runtimeName))
 	if err := m.EnsureRuntime(normalizedRuntime); err != nil {
@@ -200,7 +208,37 @@ func (m *Manager) EnsureModelWithRuntime(modelID string, runtimeName string, fla
 	if err != nil {
 		return err
 	}
-	return driver.EnsureModelWithFlags(modelID, flags)
+	return driver.PrepareModelWithFlags(modelID, flags)
+}
+
+func (m *Manager) StartModelWithFlags(modelID string, flags *types.ModelFeatureFlags) error {
+	if err := m.PrepareModelWithFlags(modelID, flags); err != nil {
+		return err
+	}
+	trimmedModel := strings.TrimSpace(modelID)
+	driver, err := m.preferredDriverForModel(trimmedModel)
+	if err != nil {
+		return err
+	}
+	return driver.StartModelWithFlags(trimmedModel, flags)
+}
+
+func (m *Manager) StartModelWithRuntime(modelID string, runtimeName string, flags *types.ModelFeatureFlags) error {
+	if strings.TrimSpace(runtimeName) == "" {
+		return m.StartModelWithFlags(modelID, flags)
+	}
+	normalizedRuntime := strings.ToLower(strings.TrimSpace(runtimeName))
+	if err := m.EnsureRuntime(normalizedRuntime); err != nil {
+		return fmt.Errorf("ensure runtime %s: %w", normalizedRuntime, err)
+	}
+	driver, err := m.driverFor(normalizedRuntime)
+	if err != nil {
+		return err
+	}
+	if err := driver.PrepareModelWithFlags(modelID, flags); err != nil {
+		return err
+	}
+	return driver.StartModelWithFlags(modelID, flags)
 }
 
 func (m *Manager) ListModels() []string {
@@ -241,6 +279,21 @@ func (m *Manager) RemoveModelWithRuntime(modelID string, runtimeName string) err
 		return err
 	}
 	return driver.RemoveModel(modelID)
+}
+
+func (m *Manager) StopModelWithRuntime(modelID string, runtimeName string) error {
+	if strings.TrimSpace(runtimeName) == "" {
+		driver, err := m.preferredDriverForModel(modelID)
+		if err != nil {
+			return err
+		}
+		return driver.StopModel(modelID)
+	}
+	driver, err := m.driverFor(runtimeName)
+	if err != nil {
+		return err
+	}
+	return driver.StopModel(modelID)
 }
 
 func (m *Manager) BenchmarkModel(

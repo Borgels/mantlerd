@@ -10,6 +10,9 @@ type Driver interface {
 	IsReady() bool
 	Version() string
 	EnsureModelWithFlags(modelID string, flags *types.ModelFeatureFlags) error
+	PrepareModelWithFlags(modelID string, flags *types.ModelFeatureFlags) error
+	StartModelWithFlags(modelID string, flags *types.ModelFeatureFlags) error
+	StopModel(modelID string) error
 	ListModels() []string
 	HasModel(modelID string) bool
 	RemoveModel(modelID string) error
