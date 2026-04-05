@@ -73,6 +73,7 @@ type harnessExecParams struct {
 	TransportEndpoint string
 	TransportCommand  string
 	TransportArgs     []string
+	CredentialEnv     map[string]string
 }
 
 type codexExecutionState struct {
@@ -178,6 +179,37 @@ func parseHarnessExecParams(params map[string]interface{}) (harnessExecParams, e
 		}
 	}
 
+	if rawCredentialEnv, ok := params["credentialEnv"]; ok {
+		result.CredentialEnv = map[string]string{}
+		switch value := rawCredentialEnv.(type) {
+		case map[string]interface{}:
+			for key, raw := range value {
+				name := strings.TrimSpace(key)
+				if name == "" {
+					continue
+				}
+				text, ok := raw.(string)
+				if !ok {
+					continue
+				}
+				text = strings.TrimSpace(text)
+				if text == "" {
+					continue
+				}
+				result.CredentialEnv[name] = text
+			}
+		case map[string]string:
+			for key, raw := range value {
+				name := strings.TrimSpace(key)
+				text := strings.TrimSpace(raw)
+				if name == "" || text == "" {
+					continue
+				}
+				result.CredentialEnv[name] = text
+			}
+		}
+	}
+
 	rawMessages, ok := params["messages"].([]interface{})
 	if !ok || len(rawMessages) == 0 {
 		return result, fmt.Errorf("missing messages param")
@@ -249,6 +281,9 @@ func (e *Executor) runCodexExec(commandID string, params harnessExecParams) (Exe
 	if workingDir != "" {
 		cmd.Dir = workingDir
 	}
+	if len(params.CredentialEnv) > 0 {
+		cmd.Env = withCredentialEnv(os.Environ(), params.CredentialEnv)
+	}
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -267,6 +302,7 @@ func (e *Executor) runCodexExec(commandID string, params harnessExecParams) (Exe
 		commandID:  commandID,
 		workingDir: workingDir,
 	}
+	secretValues := credentialSecretValues(params.CredentialEnv)
 	var stderrLines []string
 	var stderrMu sync.Mutex
 	var wg sync.WaitGroup
@@ -275,24 +311,25 @@ func (e *Executor) runCodexExec(commandID string, params harnessExecParams) (Exe
 	go func() {
 		defer wg.Done()
 		consumeCodexStdout(stdout, state, func(event types.CommandStreamEvent) {
-			e.emitHarnessProgress(commandID, state.currentDetail(), &event)
+			redactedEvent := redactStreamEvent(event, secretValues)
+			e.emitHarnessProgress(commandID, redactSecrets(state.currentDetail(), secretValues), &redactedEvent)
 		})
 	}()
 
 	go func() {
 		defer wg.Done()
-		stderrLines = readCommandStderr(stderr, &stderrMu)
+		stderrLines = readCommandStderr(stderr, &stderrMu, secretValues)
 	}()
 
 	waitErr := cmd.Wait()
 	wg.Wait()
 
 	if errors := strings.TrimSpace(strings.Join(stderrLines, "\n")); errors != "" && state.lastMessage == "" {
-		state.lastDetail = errors
+		state.lastDetail = redactSecrets(errors, secretValues)
 	}
 
 	result := ExecutionResult{
-		Details: state.finalDetail(),
+		Details: redactSecrets(state.finalDetail(), secretValues),
 		ResultPayload: map[string]interface{}{
 			"harnessId":      params.HarnessID,
 			"harnessType":    params.HarnessType,
@@ -346,11 +383,12 @@ func (e *Executor) runGooseExec(commandID string, params harnessExecParams) (Exe
 	}
 
 	state := &gooseExecutionState{}
+	secretValues := credentialSecretValues(params.CredentialEnv)
 	replyRequest := buildGooseReplyRequest(sessionID, params.Messages)
-	finalUsage, err := e.streamGooseReply(ctx, commandID, daemon, replyRequest, state)
+	finalUsage, err := e.streamGooseReply(ctx, commandID, daemon, replyRequest, state, secretValues)
 	if err != nil {
 		return ExecutionResult{
-			Details: state.finalDetail("Goose execution failed."),
+			Details: redactSecrets(state.finalDetail("Goose execution failed."), secretValues),
 			ResultPayload: map[string]interface{}{
 				"harnessId":        params.HarnessID,
 				"harnessType":      params.HarnessType,
@@ -380,7 +418,7 @@ func (e *Executor) runGooseExec(commandID string, params harnessExecParams) (Exe
 	}
 
 	return ExecutionResult{
-		Details:       state.finalDetail("Goose execution completed."),
+		Details:       redactSecrets(state.finalDetail("Goose execution completed."), secretValues),
 		ResultPayload: resultPayload,
 	}, nil
 }
@@ -422,7 +460,7 @@ func ensureGooseDaemon(ctx context.Context, params harnessExecParams, workingDir
 	if commandName == "" {
 		commandName = defaultGooseCommand
 	}
-	daemon, err := startManagedGooseDaemon(ctx, params.HarnessID, baseURL, commandName, params.TransportArgs, workingDir)
+	daemon, err := startManagedGooseDaemon(ctx, params.HarnessID, baseURL, commandName, params.TransportArgs, workingDir, params.CredentialEnv)
 	if err != nil {
 		return nil, err
 	}
@@ -453,6 +491,7 @@ func startManagedGooseDaemon(
 	commandName string,
 	transportArgs []string,
 	workingDir string,
+	credentialEnv map[string]string,
 ) (*gooseManagedDaemon, error) {
 	parsedURL, err := normalizeGooseBaseURL(baseURL)
 	if err != nil {
@@ -475,6 +514,9 @@ func startManagedGooseDaemon(
 		"GOOSE_PORT="+port,
 		"GOOSE_SERVER__SECRET_KEY="+secret,
 	)
+	if len(credentialEnv) > 0 {
+		cmd.Env = withCredentialEnv(cmd.Env, credentialEnv)
+	}
 	if host := parsedURL.Hostname(); host != "" {
 		cmd.Env = append(cmd.Env, "GOOSE_HOST="+host)
 	}
@@ -662,6 +704,7 @@ func (e *Executor) streamGooseReply(
 	daemon *gooseDaemonHandle,
 	replyRequest map[string]interface{},
 	state *gooseExecutionState,
+	secrets []string,
 ) (*types.CommandStreamUsage, error) {
 	resp, err := gooseStreamRequest(ctx, daemon, "/reply", replyRequest)
 	if err != nil {
@@ -680,7 +723,8 @@ func (e *Executor) streamGooseReply(
 			usageCopy := *event.Usage
 			finalUsage = &usageCopy
 		}
-		e.emitHarnessProgress(commandID, state.currentDetail(), &event)
+		redactedEvent := redactStreamEvent(event, secrets)
+		e.emitHarnessProgress(commandID, redactSecrets(state.currentDetail(), secrets), &redactedEvent)
 	})
 	if err != nil {
 		return finalUsage, err
@@ -1190,7 +1234,7 @@ func consumeCodexStdout(stdout io.Reader, state *codexExecutionState, emit func(
 	}
 }
 
-func readCommandStderr(stderr io.Reader, mu *sync.Mutex) []string {
+func readCommandStderr(stderr io.Reader, mu *sync.Mutex, secrets []string) []string {
 	lines := make([]string, 0, 8)
 	scanner := bufio.NewScanner(stderr)
 	buf := make([]byte, 0, 32*1024)
@@ -1201,7 +1245,7 @@ func readCommandStderr(stderr io.Reader, mu *sync.Mutex) []string {
 			continue
 		}
 		mu.Lock()
-		lines = append(lines, line)
+		lines = append(lines, redactSecrets(line, secrets))
 		mu.Unlock()
 	}
 	mu.Lock()
@@ -1407,6 +1451,63 @@ func min(a int, b int) int {
 		return a
 	}
 	return b
+}
+
+func withCredentialEnv(base []string, credentialEnv map[string]string) []string {
+	next := append([]string{}, base...)
+	for key, value := range credentialEnv {
+		k := strings.TrimSpace(key)
+		v := strings.TrimSpace(value)
+		if k == "" || v == "" {
+			continue
+		}
+		next = append(next, fmt.Sprintf("%s=%s", k, v))
+	}
+	return next
+}
+
+func credentialSecretValues(credentialEnv map[string]string) []string {
+	if len(credentialEnv) == 0 {
+		return nil
+	}
+	values := make([]string, 0, len(credentialEnv))
+	for _, value := range credentialEnv {
+		trimmed := strings.TrimSpace(value)
+		if len(trimmed) < 4 {
+			continue
+		}
+		values = append(values, trimmed)
+	}
+	return values
+}
+
+func redactSecrets(input string, secrets []string) string {
+	output := input
+	for _, secret := range secrets {
+		if secret == "" {
+			continue
+		}
+		output = strings.ReplaceAll(output, secret, "[REDACTED]")
+	}
+	return output
+}
+
+func redactStreamEvent(event types.CommandStreamEvent, secrets []string) types.CommandStreamEvent {
+	next := event
+	if next.Content != "" {
+		next.Content = redactSecrets(next.Content, secrets)
+	}
+	if next.Detail != "" {
+		next.Detail = redactSecrets(next.Detail, secrets)
+	}
+	if len(next.Actions) > 0 {
+		actions := make([]string, 0, len(next.Actions))
+		for _, action := range next.Actions {
+			actions = append(actions, redactSecrets(action, secrets))
+		}
+		next.Actions = actions
+	}
+	return next
 }
 
 func newContentEvent(content string) types.CommandStreamEvent {
