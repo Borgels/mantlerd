@@ -30,7 +30,13 @@ type InstalledModel struct {
 	ModelID      string             `json:"modelId"`
 	Runtime      RuntimeType        `json:"runtime,omitempty"`
 	Status       ModelInstallStatus `json:"status"`
+	FailReason   string             `json:"failReason,omitempty"`
 	Capabilities *ModelCapabilities `json:"capabilities,omitempty"`
+}
+
+type GPUInfo struct {
+	Name          string `json:"name"`
+	MemoryTotalMB int    `json:"memoryTotalMb,omitempty"`
 }
 
 type ModelCapabilities struct {
@@ -50,21 +56,23 @@ type ModelBenchmarkMetrics struct {
 }
 
 type CheckinRequest struct {
-	MachineID             string                 `json:"machineId"`
-	Hostname              string                 `json:"hostname,omitempty"`
-	Addresses             []string               `json:"addresses,omitempty"`
-	HardwareSummary       string                 `json:"hardwareSummary,omitempty"`
-	AgentVersion          string                 `json:"agentVersion,omitempty"`
-	RuntimeStatus         RuntimeStatus          `json:"runtimeStatus,omitempty"`
+	MachineID             string                        `json:"machineId"`
+	Hostname              string                        `json:"hostname,omitempty"`
+	Addresses             []string                      `json:"addresses,omitempty"`
+	HardwareSummary       string                        `json:"hardwareSummary,omitempty"`
+	RAMTotalMB            int                           `json:"ramTotalMb,omitempty"`
+	GPUs                  []GPUInfo                     `json:"gpus,omitempty"`
+	AgentVersion          string                        `json:"agentVersion,omitempty"`
+	RuntimeStatus         RuntimeStatus                 `json:"runtimeStatus,omitempty"`
 	RuntimeStatuses       map[RuntimeType]RuntimeStatus `json:"runtimeStatuses,omitempty"`
-	RuntimeType           RuntimeType            `json:"runtimeType,omitempty"`
-	InstalledRuntimeTypes []RuntimeType          `json:"installedRuntimeTypes,omitempty"`
-	RuntimeVersion        string                 `json:"runtimeVersion,omitempty"`
-	RuntimeVersions       map[RuntimeType]string `json:"runtimeVersions,omitempty"`
-	InstalledModels       []InstalledModel       `json:"installedModels,omitempty"`
-	InstalledHarnesses    []InstalledHarness     `json:"installedHarnesses,omitempty"`
-	Uptime                int64                  `json:"uptime,omitempty"`
-	LoadAvg               []float64              `json:"loadAvg,omitempty"`
+	RuntimeType           RuntimeType                   `json:"runtimeType,omitempty"`
+	InstalledRuntimeTypes []RuntimeType                 `json:"installedRuntimeTypes,omitempty"`
+	RuntimeVersion        string                        `json:"runtimeVersion,omitempty"`
+	RuntimeVersions       map[RuntimeType]string        `json:"runtimeVersions,omitempty"`
+	InstalledModels       []InstalledModel              `json:"installedModels,omitempty"`
+	InstalledHarnesses    []InstalledHarness            `json:"installedHarnesses,omitempty"`
+	Uptime                int64                         `json:"uptime,omitempty"`
+	LoadAvg               []float64                     `json:"loadAvg,omitempty"`
 }
 
 type HarnessCapabilities struct {

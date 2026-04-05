@@ -359,3 +359,40 @@ func TestLMStudioModelIDsEquivalent(t *testing.T) {
 		})
 	}
 }
+
+func TestContainsOOMSignal(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name  string
+		value string
+		want  bool
+	}{
+		{
+			name:  "detects cuda oom",
+			value: "torch.cuda.OutOfMemoryError: CUDA out of memory",
+			want:  true,
+		},
+		{
+			name:  "detects generic insufficient memory",
+			value: "failed to start model: insufficient memory for allocation",
+			want:  true,
+		},
+		{
+			name:  "ignores unrelated error",
+			value: "dial tcp 127.0.0.1:8000: connect: connection refused",
+			want:  false,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := containsOOMSignal(tc.value)
+			if got != tc.want {
+				t.Fatalf("containsOOMSignal() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

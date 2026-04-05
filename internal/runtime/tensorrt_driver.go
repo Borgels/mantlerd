@@ -187,10 +187,15 @@ func (d *tensorrtDriver) InstalledModels() []types.InstalledModel {
 		return models
 	}
 	if configuredModel != "" {
+		failReason := ""
+		if serviceLikelyOutOfMemory("tensorrt-llm", err) {
+			failReason = modelFailReasonInsufficientMemory
+		}
 		models = append(models, types.InstalledModel{
-			ModelID: configuredModel,
-			Runtime: types.RuntimeTensorRT,
-			Status:  types.ModelFailed,
+			ModelID:    configuredModel,
+			Runtime:    types.RuntimeTensorRT,
+			Status:     types.ModelFailed,
+			FailReason: failReason,
 		})
 	}
 	return models

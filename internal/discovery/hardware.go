@@ -15,19 +15,29 @@ type HardwareReport struct {
 	Hostname        string
 	Addresses       []string
 	HardwareSummary string
+	RAMTotalMB      int
+	GPUs            []GPUInfo
+}
+
+type GPUInfo struct {
+	Name          string
+	MemoryTotalMB int
 }
 
 func Collect() HardwareReport {
 	hostname, _ := os.Hostname()
 	addresses := collectAddresses()
 	cpu := runtime.NumCPU()
-	ram := readRAMGiB()
-	gpu := readGPUInfo()
+	ramTotalMB := readRAMMiB()
+	gpuSummary, gpus := readGPUInfo()
+	ramGiB := ramTotalMB / 1024
 
 	return HardwareReport{
 		Hostname:        hostname,
 		Addresses:       addresses,
-		HardwareSummary: fmt.Sprintf("%d vCPU / %d GB / %s", cpu, ram, gpu),
+		HardwareSummary: fmt.Sprintf("%d vCPU / %d GB / %s", cpu, ramGiB, gpuSummary),
+		RAMTotalMB:      ramTotalMB,
+		GPUs:            gpus,
 	}
 }
 
@@ -64,7 +74,7 @@ func collectAddresses() []string {
 	return result
 }
 
-func readRAMGiB() int {
+func readRAMMiB() int {
 	file, err := os.Open("/proc/meminfo")
 	if err != nil {
 		return 0
@@ -85,24 +95,52 @@ func readRAMGiB() int {
 		if err != nil {
 			return 0
 		}
-		return int(kib / 1024 / 1024)
+		return int(kib / 1024)
 	}
 	return 0
 }
 
-func readGPUInfo() string {
+func readGPUInfo() (string, []GPUInfo) {
 	cmd := exec.Command("nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader")
 	out, err := cmd.Output()
 	if err == nil {
 		summary := strings.TrimSpace(string(out))
 		if summary != "" {
 			lines := strings.Split(summary, "\n")
-			return strings.Join(lines, " | ")
+			gpus := make([]GPUInfo, 0, len(lines))
+			labels := make([]string, 0, len(lines))
+			for _, rawLine := range lines {
+				line := strings.TrimSpace(rawLine)
+				if line == "" {
+					continue
+				}
+				parts := strings.SplitN(line, ",", 2)
+				name := strings.TrimSpace(parts[0])
+				memoryTotalMB := 0
+				if len(parts) > 1 {
+					fields := strings.Fields(strings.TrimSpace(parts[1]))
+					if len(fields) > 0 {
+						if value, parseErr := strconv.Atoi(fields[0]); parseErr == nil {
+							memoryTotalMB = value
+						}
+					}
+				}
+				gpus = append(gpus, GPUInfo{
+					Name:          name,
+					MemoryTotalMB: memoryTotalMB,
+				})
+				if memoryTotalMB > 0 {
+					labels = append(labels, fmt.Sprintf("%s, %d MiB", name, memoryTotalMB))
+					continue
+				}
+				labels = append(labels, name)
+			}
+			return strings.Join(labels, " | "), gpus
 		}
 	}
 
 	if _, err := os.Stat("/proc/driver/nvidia/version"); err == nil {
-		return "NVIDIA GPU (details unavailable)"
+		return "NVIDIA GPU (details unavailable)", nil
 	}
-	return "No GPU detected"
+	return "No GPU detected", nil
 }
