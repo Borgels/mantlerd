@@ -6,10 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -64,7 +66,28 @@ func (e *Executor) Execute(command types.AgentCommand) (ExecutionResult, error) 
 		}
 		flags := modelFeatureFlagsParam(command.Params)
 		runtimeName := optionalStringParam(command.Params, "runtime")
-		return ExecutionResult{}, e.runtimeManager.EnsureModelWithRuntime(modelID, runtimeName, flags)
+		if err := applyRuntimeProfileOverrides(command.Params, runtimeName); err != nil {
+			return ExecutionResult{}, err
+		}
+		return ExecutionResult{}, e.runtimeManager.PrepareModelWithRuntime(modelID, runtimeName, flags)
+	case "start_model":
+		modelID, err := stringParam(command.Params, "modelId")
+		if err != nil {
+			return ExecutionResult{}, err
+		}
+		flags := modelFeatureFlagsParam(command.Params)
+		runtimeName := optionalStringParam(command.Params, "runtime")
+		if err := applyRuntimeProfileOverrides(command.Params, runtimeName); err != nil {
+			return ExecutionResult{}, err
+		}
+		return ExecutionResult{}, e.runtimeManager.StartModelWithRuntime(modelID, runtimeName, flags)
+	case "stop_model":
+		modelID, err := stringParam(command.Params, "modelId")
+		if err != nil {
+			return ExecutionResult{}, err
+		}
+		runtimeName := optionalStringParam(command.Params, "runtime")
+		return ExecutionResult{}, e.runtimeManager.StopModelWithRuntime(modelID, runtimeName)
 	case "remove_model":
 		modelID, err := stringParam(command.Params, "modelId")
 		if err != nil {
@@ -292,6 +315,152 @@ func optionalStringParam(params map[string]interface{}, key string) string {
 		return ""
 	}
 	return strings.TrimSpace(value)
+}
+
+type requiredProfileFile struct {
+	Source      string `json:"source"`
+	Destination string `json:"destination"`
+}
+
+type runtimeProfileParams struct {
+	Runtime              string                `json:"runtime"`
+	ContainerImage       string                `json:"containerImage"`
+	EnvironmentVariables map[string]string     `json:"environmentVariables"`
+	ExtraArgs            []string              `json:"extraArgs"`
+	RequiredFiles        []requiredProfileFile `json:"requiredFiles"`
+}
+
+func applyRuntimeProfileOverrides(params map[string]interface{}, runtimeHint string) error {
+	raw, ok := params["runtimeProfile"]
+	if !ok || raw == nil {
+		return nil
+	}
+	payload, err := json.Marshal(raw)
+	if err != nil {
+		return fmt.Errorf("encode runtime profile: %w", err)
+	}
+	var profile runtimeProfileParams
+	if err := json.Unmarshal(payload, &profile); err != nil {
+		return fmt.Errorf("decode runtime profile: %w", err)
+	}
+	runtimeName := strings.ToLower(strings.TrimSpace(runtimeHint))
+	if runtimeName == "" {
+		runtimeName = strings.ToLower(strings.TrimSpace(profile.Runtime))
+	}
+	if runtimeName == "" {
+		return nil
+	}
+	for _, file := range profile.RequiredFiles {
+		src := strings.TrimSpace(file.Source)
+		dst := strings.TrimSpace(file.Destination)
+		if src == "" || dst == "" {
+			continue
+		}
+		if err := downloadProfileFile(src, dst); err != nil {
+			return err
+		}
+	}
+
+	switch runtimeName {
+	case "vllm":
+		values := readEnvFile("/etc/clawcontrol/vllm.env")
+		if strings.TrimSpace(profile.ContainerImage) != "" {
+			values["VLLM_CONTAINER_IMAGE"] = strings.TrimSpace(profile.ContainerImage)
+		}
+		if len(profile.ExtraArgs) > 0 {
+			values["VLLM_EXTRA_ARGS"] = strings.TrimSpace(strings.Join(profile.ExtraArgs, " "))
+		}
+		for key, value := range profile.EnvironmentVariables {
+			if strings.TrimSpace(key) == "" {
+				continue
+			}
+			values[strings.TrimSpace(key)] = strings.TrimSpace(value)
+		}
+		return writeEnvFile("/etc/clawcontrol/vllm.env", values)
+	case "tensorrt":
+		values := readEnvFile("/etc/clawcontrol/tensorrt.env")
+		if strings.TrimSpace(profile.ContainerImage) != "" {
+			values["TENSORRT_CONTAINER_IMAGE"] = strings.TrimSpace(profile.ContainerImage)
+		}
+		if len(profile.ExtraArgs) > 0 {
+			values["TENSORRT_EXTRA_ARGS"] = strings.TrimSpace(strings.Join(profile.ExtraArgs, " "))
+		}
+		for key, value := range profile.EnvironmentVariables {
+			if strings.TrimSpace(key) == "" {
+				continue
+			}
+			values[strings.TrimSpace(key)] = strings.TrimSpace(value)
+		}
+		return writeEnvFile("/etc/clawcontrol/tensorrt.env", values)
+	default:
+		return nil
+	}
+}
+
+func downloadProfileFile(source string, destination string) error {
+	resp, err := (&http.Client{Timeout: 30 * time.Second}).Get(source)
+	if err != nil {
+		return fmt.Errorf("download required profile file %s: %w", source, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("download required profile file %s failed with status %d", source, resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("read required profile file %s: %w", source, err)
+	}
+	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
+		return fmt.Errorf("create required profile file directory: %w", err)
+	}
+	if err := os.WriteFile(destination, body, 0o644); err != nil {
+		return fmt.Errorf("write required profile file: %w", err)
+	}
+	return nil
+}
+
+func readEnvFile(path string) map[string]string {
+	values := map[string]string{}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return values
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		parts := strings.SplitN(trimmed, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key := strings.TrimSpace(parts[0])
+		val := strings.Trim(strings.TrimSpace(parts[1]), "\"")
+		if key != "" {
+			values[key] = val
+		}
+	}
+	return values
+}
+
+func writeEnvFile(path string, values map[string]string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	lines := make([]string, 0, len(keys))
+	for _, key := range keys {
+		lines = append(lines, fmt.Sprintf("%s=%q", key, values[key]))
+	}
+	payload := strings.Join(lines, "\n")
+	if payload != "" {
+		payload += "\n"
+	}
+	return os.WriteFile(path, []byte(payload), 0o600)
 }
 
 func withVLLMRuntimeEnv(params map[string]interface{}, fn func() error) error {

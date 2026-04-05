@@ -311,7 +311,7 @@ func (d *ollamaDriver) baseURL() string {
 	return strings.TrimRight(base, "/")
 }
 
-func (d *ollamaDriver) EnsureModelWithFlags(modelID string, flags *types.ModelFeatureFlags) error {
+func (d *ollamaDriver) PrepareModelWithFlags(modelID string, flags *types.ModelFeatureFlags) error {
 	if modelID == "" {
 		return fmt.Errorf("model ID is required")
 	}
@@ -324,6 +324,18 @@ func (d *ollamaDriver) EnsureModelWithFlags(modelID string, flags *types.ModelFe
 		return nil
 	}
 	return d.upsertModelFlags(modelID, *flags)
+}
+
+func (d *ollamaDriver) StartModelWithFlags(modelID string, flags *types.ModelFeatureFlags) error {
+	return d.PrepareModelWithFlags(modelID, flags)
+}
+
+func (d *ollamaDriver) StopModel(modelID string) error {
+	return nil
+}
+
+func (d *ollamaDriver) EnsureModelWithFlags(modelID string, flags *types.ModelFeatureFlags) error {
+	return d.StartModelWithFlags(modelID, flags)
 }
 
 func (d *ollamaDriver) RemoveModel(modelID string) error {

@@ -211,10 +211,24 @@ func (d *vllmDriver) Version() string {
 	return ""
 }
 
-func (d *vllmDriver) EnsureModelWithFlags(modelID string, _ *types.ModelFeatureFlags) error {
+func (d *vllmDriver) PrepareModelWithFlags(modelID string, _ *types.ModelFeatureFlags) error {
 	trimmedModel := strings.TrimSpace(modelID)
 	if trimmedModel == "" {
 		return fmt.Errorf("model ID is required")
+	}
+	if err := d.downloadModelSnapshot(trimmedModel); err != nil {
+		return err
+	}
+	return d.markPreparedModel(trimmedModel)
+}
+
+func (d *vllmDriver) StartModelWithFlags(modelID string, _ *types.ModelFeatureFlags) error {
+	trimmedModel := strings.TrimSpace(modelID)
+	if trimmedModel == "" {
+		return fmt.Errorf("model ID is required")
+	}
+	if err := d.PrepareModelWithFlags(trimmedModel, nil); err != nil {
+		return err
 	}
 	containerImage := d.effectiveContainerImage()
 	if incompatibility := d.knownModelImageIncompatibility(trimmedModel, containerImage); incompatibility != "" {
@@ -228,8 +242,30 @@ func (d *vllmDriver) EnsureModelWithFlags(modelID string, _ *types.ModelFeatureF
 	return d.startOrRestartService(trimmedModel, 8000, false)
 }
 
+func (d *vllmDriver) StopModel(modelID string) error {
+	modelID = strings.TrimSpace(modelID)
+	if modelID == "" {
+		return fmt.Errorf("model ID is required")
+	}
+	if configuredModel, known := d.configuredModelState(); known && strings.EqualFold(strings.TrimSpace(configuredModel), modelID) {
+		d.disarmConfiguredModel()
+	}
+	_ = runCommand("systemctl", "stop", "vllm")
+	_ = runCommand("systemctl", "reset-failed", "vllm")
+	return nil
+}
+
+func (d *vllmDriver) EnsureModelWithFlags(modelID string, flags *types.ModelFeatureFlags) error {
+	return d.StartModelWithFlags(modelID, flags)
+}
+
 func (d *vllmDriver) ListModels() []string {
 	set := map[string]struct{}{}
+	for _, model := range d.preparedModels() {
+		if strings.TrimSpace(model) != "" {
+			set[model] = struct{}{}
+		}
+	}
 	remoteModels, _ := d.fetchRemoteModels()
 	for _, model := range remoteModels {
 		if strings.TrimSpace(model) != "" {
@@ -247,54 +283,63 @@ func (d *vllmDriver) ListModels() []string {
 
 func (d *vllmDriver) InstalledModels() []types.InstalledModel {
 	models := make([]types.InstalledModel, 0)
+	seen := map[string]struct{}{}
+	addModel := func(modelID string, status types.ModelInstallStatus, failReason string) {
+		trimmed := strings.TrimSpace(modelID)
+		if trimmed == "" {
+			return
+		}
+		if _, exists := seen[trimmed]; exists {
+			return
+		}
+		seen[trimmed] = struct{}{}
+		models = append(models, types.InstalledModel{
+			ModelID:    trimmed,
+			Runtime:    types.RuntimeVLLM,
+			Status:     status,
+			FailReason: failReason,
+		})
+	}
+
+	for _, prepared := range d.preparedModels() {
+		addModel(prepared, types.ModelDownloaded, "")
+	}
+
 	cfg, _ := d.readConfig()
 	configuredModel := strings.TrimSpace(cfg.Model)
 	remoteModels, err := d.fetchRemoteModels()
-	seen := map[string]struct{}{}
 	if err == nil {
 		for _, modelID := range remoteModels {
-			trimmed := strings.TrimSpace(modelID)
-			if trimmed == "" {
-				continue
-			}
-			seen[trimmed] = struct{}{}
-			models = append(models, types.InstalledModel{
-				ModelID: trimmed,
-				Runtime: types.RuntimeVLLM,
-				Status:  types.ModelReady,
-			})
+			addModel(modelID, types.ModelReady, "")
 		}
 		if configuredModel != "" {
 			if _, ok := seen[configuredModel]; !ok {
-				models = append(models, types.InstalledModel{
-					ModelID: configuredModel,
-					Runtime: types.RuntimeVLLM,
-					Status:  types.ModelInstalling,
-				})
+				addModel(configuredModel, types.ModelStarting, "")
 			}
 		}
 		return models
 	}
 
-	// Endpoint unreachable: preserve configured model but mark failed so server/UI
-	// can show actionable state instead of a false-ready model.
-	// Treat active service warm-up as installing to avoid false "needs attention"
-	// while very large models are still loading.
 	if configuredModel != "" {
 		status := types.ModelFailed
 		failReason := ""
 		if d.isLikelyServiceWarmup(err) {
-			status = types.ModelInstalling
+			status = types.ModelStarting
 		}
 		if status == types.ModelFailed && serviceLikelyOutOfMemory("vllm", err) {
 			failReason = modelFailReasonInsufficientMemory
 		}
-		models = append(models, types.InstalledModel{
-			ModelID:    configuredModel,
-			Runtime:    types.RuntimeVLLM,
-			Status:     status,
-			FailReason: failReason,
-		})
+		if _, ok := seen[configuredModel]; ok {
+			for i := range models {
+				if models[i].ModelID == configuredModel {
+					models[i].Status = status
+					models[i].FailReason = failReason
+					break
+				}
+			}
+		} else {
+			addModel(configuredModel, status, failReason)
+		}
 	}
 	return models
 }
@@ -313,10 +358,9 @@ func (d *vllmDriver) RemoveModel(modelID string) error {
 	if modelID == "" {
 		return fmt.Errorf("model ID is required")
 	}
-	if configuredModel, known := d.configuredModelState(); known && strings.EqualFold(strings.TrimSpace(configuredModel), modelID) {
-		d.disarmConfiguredModel()
-	}
-	return runCommand("systemctl", "stop", "vllm")
+	_ = d.StopModel(modelID)
+	_ = d.unmarkPreparedModel(modelID)
+	return nil
 }
 
 func (d *vllmDriver) BenchmarkModel(
@@ -1227,6 +1271,101 @@ func (d *vllmDriver) runtimeMode() string {
 
 func (d *vllmDriver) shouldUseContainer() bool {
 	return d.runtimeMode() == "container"
+}
+
+func vllmPreparedModelsDir() string {
+	return "/var/lib/clawcontrol/models/vllm"
+}
+
+func safeModelPathSegment(modelID string) string {
+	replacer := strings.NewReplacer("/", "--", "\\", "--", ":", "_", " ", "_")
+	return replacer.Replace(strings.TrimSpace(modelID))
+}
+
+func (d *vllmDriver) preparedModels() []string {
+	dir := vllmPreparedModelsDir()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	models := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		raw, readErr := os.ReadFile(filepath.Join(dir, entry.Name()))
+		if readErr != nil {
+			continue
+		}
+		modelID := strings.TrimSpace(string(raw))
+		if modelID != "" {
+			models = append(models, modelID)
+		}
+	}
+	sort.Strings(models)
+	return models
+}
+
+func (d *vllmDriver) markPreparedModel(modelID string) error {
+	trimmed := strings.TrimSpace(modelID)
+	if trimmed == "" {
+		return nil
+	}
+	dir := vllmPreparedModelsDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	path := filepath.Join(dir, safeModelPathSegment(trimmed)+".model")
+	return os.WriteFile(path, []byte(trimmed+"\n"), 0o600)
+}
+
+func (d *vllmDriver) unmarkPreparedModel(modelID string) error {
+	trimmed := strings.TrimSpace(modelID)
+	if trimmed == "" {
+		return nil
+	}
+	path := filepath.Join(vllmPreparedModelsDir(), safeModelPathSegment(trimmed)+".model")
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+func (d *vllmDriver) downloadModelSnapshot(modelID string) error {
+	modelID = strings.TrimSpace(modelID)
+	if modelID == "" {
+		return fmt.Errorf("model ID is required")
+	}
+	pythonCandidates := []string{vllmPythonPath, "python3"}
+	script := "from huggingface_hub import snapshot_download; snapshot_download(repo_id='" + strings.ReplaceAll(modelID, "'", "\\'") + "', cache_dir='/root/.cache/huggingface', resume_download=True)"
+	for _, python := range pythonCandidates {
+		if strings.TrimSpace(python) == "" {
+			continue
+		}
+		if _, err := exec.LookPath(python); err != nil && python != vllmPythonPath {
+			continue
+		}
+		if err := runCommand(python, "-c", script); err == nil {
+			return nil
+		}
+	}
+	if d.shouldUseContainer() {
+		if err := d.ensureDockerAvailable(); err != nil {
+			return err
+		}
+		image := d.effectiveContainerImage()
+		if !d.containerImageExists(image) {
+			if err := d.pullContainerImage(image); err != nil {
+				return err
+			}
+		}
+		cmd := exec.Command("docker", "run", "--rm", "--network", "host", "-v", "/root/.cache/huggingface:/root/.cache/huggingface", image, "python3", "-c", script)
+		if output, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("download model snapshot in container: %w (%s)", err, strings.TrimSpace(string(output)))
+		}
+		return nil
+	}
+	return fmt.Errorf("failed to download model snapshot for %s (huggingface_hub unavailable)", modelID)
 }
 
 func inferVLLMInstalled(hasNativeImport bool, hasServiceUnit bool, hasConfig bool, hasEnv bool) bool {

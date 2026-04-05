@@ -42,16 +42,16 @@ func enforceDesiredConfig(runtimeManager *runtime.Manager, desired types.Desired
 			continue
 		}
 		flags := target.FeatureFlags
-		if err := runtimeManager.EnsureModelWithRuntime(target.ModelID, string(target.Runtime), &flags); err != nil {
-			log.Printf("failed to ensure model target %s: %v", target.ModelID, err)
+		if err := runtimeManager.PrepareModelWithRuntime(target.ModelID, string(target.Runtime), &flags); err != nil {
+			log.Printf("failed to prepare model target %s: %v", target.ModelID, err)
 		}
 	}
 	for _, modelID := range desired.Models {
 		if modelsHandled[modelID] {
 			continue
 		}
-		if err := runtimeManager.EnsureModelWithFlags(modelID, nil); err != nil {
-			log.Printf("failed to ensure model %s: %v", modelID, err)
+		if err := runtimeManager.PrepareModelWithFlags(modelID, nil); err != nil {
+			log.Printf("failed to prepare model %s: %v", modelID, err)
 		}
 	}
 }

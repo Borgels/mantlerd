@@ -130,18 +130,56 @@ func (d *tensorrtDriver) Version() string {
 	return ""
 }
 
-func (d *tensorrtDriver) EnsureModelWithFlags(modelID string, _ *types.ModelFeatureFlags) error {
-	if strings.TrimSpace(modelID) == "" {
+func (d *tensorrtDriver) PrepareModelWithFlags(modelID string, _ *types.ModelFeatureFlags) error {
+	trimmed := strings.TrimSpace(modelID)
+	if trimmed == "" {
 		return fmt.Errorf("model ID is required")
 	}
-	if err := d.writeConfig(tensorrtConfig{Model: modelID, Port: tensorrtDefaultPort}); err != nil {
+	if err := d.downloadModelSnapshot(trimmed); err != nil {
 		return err
 	}
-	return d.startOrRestartService(modelID, tensorrtDefaultPort, false)
+	return d.markPreparedModel(trimmed)
+}
+
+func (d *tensorrtDriver) StartModelWithFlags(modelID string, _ *types.ModelFeatureFlags) error {
+	trimmed := strings.TrimSpace(modelID)
+	if trimmed == "" {
+		return fmt.Errorf("model ID is required")
+	}
+	if err := d.PrepareModelWithFlags(trimmed, nil); err != nil {
+		return err
+	}
+	if err := d.writeConfig(tensorrtConfig{Model: trimmed, Port: tensorrtDefaultPort}); err != nil {
+		return err
+	}
+	return d.startOrRestartService(trimmed, tensorrtDefaultPort, false)
+}
+
+func (d *tensorrtDriver) StopModel(modelID string) error {
+	trimmed := strings.TrimSpace(modelID)
+	if trimmed == "" {
+		return fmt.Errorf("model ID is required")
+	}
+	cfg, err := d.readConfig()
+	if err == nil && strings.EqualFold(strings.TrimSpace(cfg.Model), trimmed) {
+		_ = d.writeConfig(tensorrtConfig{Port: tensorrtDefaultPort})
+	}
+	_ = runCommand("systemctl", "stop", "tensorrt-llm")
+	_ = runCommand("systemctl", "reset-failed", "tensorrt-llm")
+	return nil
+}
+
+func (d *tensorrtDriver) EnsureModelWithFlags(modelID string, flags *types.ModelFeatureFlags) error {
+	return d.StartModelWithFlags(modelID, flags)
 }
 
 func (d *tensorrtDriver) ListModels() []string {
 	set := map[string]struct{}{}
+	for _, model := range d.preparedModels() {
+		if strings.TrimSpace(model) != "" {
+			set[model] = struct{}{}
+		}
+	}
 	remoteModels, _ := d.fetchRemoteModels()
 	for _, model := range remoteModels {
 		if strings.TrimSpace(model) != "" {
@@ -158,30 +196,36 @@ func (d *tensorrtDriver) ListModels() []string {
 
 func (d *tensorrtDriver) InstalledModels() []types.InstalledModel {
 	models := make([]types.InstalledModel, 0)
+	seen := map[string]struct{}{}
+	addModel := func(modelID string, status types.ModelInstallStatus, failReason string) {
+		trimmed := strings.TrimSpace(modelID)
+		if trimmed == "" {
+			return
+		}
+		if _, exists := seen[trimmed]; exists {
+			return
+		}
+		seen[trimmed] = struct{}{}
+		models = append(models, types.InstalledModel{
+			ModelID:    trimmed,
+			Runtime:    types.RuntimeTensorRT,
+			Status:     status,
+			FailReason: failReason,
+		})
+	}
+	for _, prepared := range d.preparedModels() {
+		addModel(prepared, types.ModelDownloaded, "")
+	}
 	cfg, _ := d.readConfig()
 	configuredModel := strings.TrimSpace(cfg.Model)
 	remoteModels, err := d.fetchRemoteModels()
-	seen := map[string]struct{}{}
 	if err == nil {
 		for _, modelID := range remoteModels {
-			trimmed := strings.TrimSpace(modelID)
-			if trimmed == "" {
-				continue
-			}
-			seen[trimmed] = struct{}{}
-			models = append(models, types.InstalledModel{
-				ModelID: trimmed,
-				Runtime: types.RuntimeTensorRT,
-				Status:  types.ModelReady,
-			})
+			addModel(modelID, types.ModelReady, "")
 		}
 		if configuredModel != "" {
 			if _, ok := seen[configuredModel]; !ok {
-				models = append(models, types.InstalledModel{
-					ModelID: configuredModel,
-					Runtime: types.RuntimeTensorRT,
-					Status:  types.ModelInstalling,
-				})
+				addModel(configuredModel, types.ModelStarting, "")
 			}
 		}
 		return models
@@ -191,12 +235,17 @@ func (d *tensorrtDriver) InstalledModels() []types.InstalledModel {
 		if serviceLikelyOutOfMemory("tensorrt-llm", err) {
 			failReason = modelFailReasonInsufficientMemory
 		}
-		models = append(models, types.InstalledModel{
-			ModelID:    configuredModel,
-			Runtime:    types.RuntimeTensorRT,
-			Status:     types.ModelFailed,
-			FailReason: failReason,
-		})
+		if _, ok := seen[configuredModel]; ok {
+			for i := range models {
+				if models[i].ModelID == configuredModel {
+					models[i].Status = types.ModelFailed
+					models[i].FailReason = failReason
+					break
+				}
+			}
+		} else {
+			addModel(configuredModel, types.ModelFailed, failReason)
+		}
 	}
 	return models
 }
@@ -215,13 +264,9 @@ func (d *tensorrtDriver) RemoveModel(modelID string) error {
 	if modelID == "" {
 		return fmt.Errorf("model ID is required")
 	}
-	cfg, err := d.readConfig()
-	if err == nil && strings.EqualFold(strings.TrimSpace(cfg.Model), modelID) {
-		if err := d.writeConfig(tensorrtConfig{Port: tensorrtDefaultPort}); err != nil {
-			return err
-		}
-	}
-	return runCommand("systemctl", "stop", "tensorrt-llm")
+	_ = d.StopModel(modelID)
+	_ = d.unmarkPreparedModel(modelID)
+	return nil
 }
 
 func (d *tensorrtDriver) BenchmarkModel(
@@ -671,6 +716,86 @@ func (d *tensorrtDriver) writeConfig(cfg tensorrtConfig) error {
 		return err
 	}
 	return os.WriteFile(tensorrtConfigPath, append(payload, '\n'), 0o600)
+}
+
+func tensorrtPreparedModelsDir() string {
+	return "/var/lib/clawcontrol/models/tensorrt"
+}
+
+func (d *tensorrtDriver) preparedModels() []string {
+	dir := tensorrtPreparedModelsDir()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	models := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		raw, readErr := os.ReadFile(filepath.Join(dir, entry.Name()))
+		if readErr != nil {
+			continue
+		}
+		modelID := strings.TrimSpace(string(raw))
+		if modelID != "" {
+			models = append(models, modelID)
+		}
+	}
+	sort.Strings(models)
+	return models
+}
+
+func (d *tensorrtDriver) markPreparedModel(modelID string) error {
+	trimmed := strings.TrimSpace(modelID)
+	if trimmed == "" {
+		return nil
+	}
+	dir := tensorrtPreparedModelsDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	path := filepath.Join(dir, safeModelPathSegment(trimmed)+".model")
+	return os.WriteFile(path, []byte(trimmed+"\n"), 0o600)
+}
+
+func (d *tensorrtDriver) unmarkPreparedModel(modelID string) error {
+	trimmed := strings.TrimSpace(modelID)
+	if trimmed == "" {
+		return nil
+	}
+	path := filepath.Join(tensorrtPreparedModelsDir(), safeModelPathSegment(trimmed)+".model")
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+func (d *tensorrtDriver) downloadModelSnapshot(modelID string) error {
+	modelID = strings.TrimSpace(modelID)
+	if modelID == "" {
+		return fmt.Errorf("model ID is required")
+	}
+	script := "from huggingface_hub import snapshot_download; snapshot_download(repo_id='" + strings.ReplaceAll(modelID, "'", "\\'") + "', cache_dir='/root/.cache/huggingface', resume_download=True)"
+	for _, python := range []string{"python3"} {
+		if err := runCommand(python, "-c", script); err == nil {
+			return nil
+		}
+	}
+	if err := d.ensureDockerAvailable(); err != nil {
+		return err
+	}
+	image := d.containerImage()
+	if !d.containerImageExists(image) {
+		if err := d.pullContainerImage(image); err != nil {
+			return err
+		}
+	}
+	cmd := exec.Command("docker", "run", "--rm", "--network", "host", "-v", "/root/.cache/huggingface:/root/.cache/huggingface", image, "python3", "-c", script)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("download model snapshot in tensorrt container: %w (%s)", err, strings.TrimSpace(string(output)))
+	}
+	return nil
 }
 
 func (d *tensorrtDriver) readEnvConfigMap() map[string]string {

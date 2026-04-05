@@ -186,7 +186,7 @@ func (d *lmstudioDriver) daemonRunning(path string) (bool, bool) {
 	}
 }
 
-func (d *lmstudioDriver) EnsureModelWithFlags(modelID string, _ *types.ModelFeatureFlags) error {
+func (d *lmstudioDriver) PrepareModelWithFlags(modelID string, _ *types.ModelFeatureFlags) error {
 	modelID = strings.TrimSpace(modelID)
 	if modelID == "" {
 		return fmt.Errorf("model ID is required")
@@ -279,6 +279,18 @@ func (d *lmstudioDriver) HasModel(modelID string) bool {
 		}
 	}
 	return false
+}
+
+func (d *lmstudioDriver) StartModelWithFlags(modelID string, flags *types.ModelFeatureFlags) error {
+	return d.PrepareModelWithFlags(modelID, flags)
+}
+
+func (d *lmstudioDriver) StopModel(modelID string) error {
+	return runCommand("systemctl", "stop", "lmstudio")
+}
+
+func (d *lmstudioDriver) EnsureModelWithFlags(modelID string, flags *types.ModelFeatureFlags) error {
+	return d.StartModelWithFlags(modelID, flags)
 }
 
 func (d *lmstudioDriver) RemoveModel(modelID string) error {
