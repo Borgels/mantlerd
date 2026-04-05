@@ -9,6 +9,7 @@ import (
 	"github.com/Borgels/clawcontrol-agent/internal/commands"
 	"github.com/Borgels/clawcontrol-agent/internal/config"
 	"github.com/Borgels/clawcontrol-agent/internal/runtime"
+	"github.com/Borgels/clawcontrol-agent/internal/types"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -43,8 +44,8 @@ func runCheckin(cmd *cobra.Command, args []string) {
 
 	// Create runtime manager and executor
 	runtimeManager := runtime.NewManager()
-	executor := commands.NewExecutor(runtimeManager, cfg, func(commandID string, details string) {
-		sendInProgressAck(cl, commandID, details)
+	executor := commands.NewExecutor(runtimeManager, cfg, func(payload types.AckRequest) {
+		sendInProgressAck(cl, payload)
 	})
 
 	// Run check-in

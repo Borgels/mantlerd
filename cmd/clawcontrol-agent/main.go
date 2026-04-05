@@ -8,7 +8,11 @@ import (
 )
 
 // Agent version - set at build time via -ldflags
+<<<<<<< HEAD
 var agentVersion = "0.2.7"
+=======
+var agentVersion = "0.2.8"
+>>>>>>> 1e0794c (feat: add harness sync lifecycle and bump to v0.2.8)
 
 func main() {
 	// Execute cobra CLI

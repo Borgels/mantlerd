@@ -2,9 +2,11 @@ package commands
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,10 +22,15 @@ import (
 type Executor struct {
 	runtimeManager *runtime.Manager
 	cfg            config.Config
-	progress       func(commandID string, details string)
+	progress       func(payload types.AckRequest)
 }
 
-func NewExecutor(runtimeManager *runtime.Manager, cfg config.Config, progress func(commandID string, details string)) *Executor {
+type ExecutionResult struct {
+	Details       string
+	ResultPayload interface{}
+}
+
+func NewExecutor(runtimeManager *runtime.Manager, cfg config.Config, progress func(payload types.AckRequest)) *Executor {
 	return &Executor{
 		runtimeManager: runtimeManager,
 		cfg:            cfg,
@@ -31,46 +38,46 @@ func NewExecutor(runtimeManager *runtime.Manager, cfg config.Config, progress fu
 	}
 }
 
-func (e *Executor) Execute(command types.AgentCommand) (string, error) {
+func (e *Executor) Execute(command types.AgentCommand) (ExecutionResult, error) {
 	switch command.Type {
 	case "install_runtime":
 		rawRuntime, ok := command.Params["runtime"]
 		if !ok {
-			return "", fmt.Errorf("missing runtime param")
+			return ExecutionResult{}, fmt.Errorf("missing runtime param")
 		}
 		runtimeName, ok := rawRuntime.(string)
 		if !ok || runtimeName == "" {
-			return "", fmt.Errorf("invalid runtime param")
+			return ExecutionResult{}, fmt.Errorf("invalid runtime param")
 		}
 		if strings.EqualFold(strings.TrimSpace(runtimeName), "vllm") {
-			return "", withVLLMRuntimeEnv(command.Params, func() error {
+			return ExecutionResult{}, withVLLMRuntimeEnv(command.Params, func() error {
 				return e.runtimeManager.InstallRuntime(runtimeName)
 			})
 		}
-		return "", e.runtimeManager.InstallRuntime(runtimeName)
+		return ExecutionResult{}, e.runtimeManager.InstallRuntime(runtimeName)
 	case "pull_model":
 		modelID, err := stringParam(command.Params, "modelId")
 		if err != nil {
-			return "", err
+			return ExecutionResult{}, err
 		}
 		flags := modelFeatureFlagsParam(command.Params)
 		runtimeName := optionalStringParam(command.Params, "runtime")
-		return "", e.runtimeManager.EnsureModelWithRuntime(modelID, runtimeName, flags)
+		return ExecutionResult{}, e.runtimeManager.EnsureModelWithRuntime(modelID, runtimeName, flags)
 	case "remove_model":
 		modelID, err := stringParam(command.Params, "modelId")
 		if err != nil {
-			return "", err
+			return ExecutionResult{}, err
 		}
 		runtimeName := optionalStringParam(command.Params, "runtime")
-		return "", e.runtimeManager.RemoveModelWithRuntime(modelID, runtimeName)
+		return ExecutionResult{}, e.runtimeManager.RemoveModelWithRuntime(modelID, runtimeName)
 	case "health_check":
 		scope, _ := command.Params["scope"].(string)
 		if scope != "model_benchmark" {
-			return "", nil
+			return ExecutionResult{}, nil
 		}
 		modelID, err := stringParam(command.Params, "modelId")
 		if err != nil {
-			return "", err
+			return ExecutionResult{}, err
 		}
 		samplePromptTokens := intParam(command.Params, "samplePromptTokens", 640)
 		sampleOutputTokens := intParam(command.Params, "sampleOutputTokens", 256)
@@ -115,11 +122,15 @@ func (e *Executor) Execute(command types.AgentCommand) (string, error) {
 				if err != nil {
 					return
 				}
-				e.progress(command.ID, string(raw))
+				e.progress(types.AckRequest{
+					CommandID: command.ID,
+					Status:    "in_progress",
+					Details:   string(raw),
+				})
 			},
 		)
 		if err != nil {
-			return "", err
+			return ExecutionResult{}, err
 		}
 		details, err := json.Marshal(map[string]any{
 			"benchmark": types.ModelBenchmarkMetrics{
@@ -131,30 +142,30 @@ func (e *Executor) Execute(command types.AgentCommand) (string, error) {
 			},
 		})
 		if err != nil {
-			return "", fmt.Errorf("encode benchmark metrics: %w", err)
+			return ExecutionResult{}, fmt.Errorf("encode benchmark metrics: %w", err)
 		}
-		return string(details), nil
+		return ExecutionResult{Details: string(details)}, nil
 	case "uninstall_runtime":
 		rawRuntime, ok := command.Params["runtime"]
 		if !ok {
-			return "", fmt.Errorf("missing runtime param")
+			return ExecutionResult{}, fmt.Errorf("missing runtime param")
 		}
 		runtimeName, ok := rawRuntime.(string)
 		if !ok || runtimeName == "" {
-			return "", fmt.Errorf("invalid runtime param")
+			return ExecutionResult{}, fmt.Errorf("invalid runtime param")
 		}
-		return "", e.runtimeManager.UninstallRuntime(runtimeName)
+		return ExecutionResult{}, e.runtimeManager.UninstallRuntime(runtimeName)
 	case "restart_runtime":
 		runtimeName := optionalStringParam(command.Params, "runtime")
 		if runtimeName == "" {
-			return "", e.runtimeManager.RestartRuntime()
+			return ExecutionResult{}, e.runtimeManager.RestartRuntime()
 		}
 		if strings.EqualFold(strings.TrimSpace(runtimeName), "vllm") {
-			return "", withVLLMRuntimeEnv(command.Params, func() error {
+			return ExecutionResult{}, withVLLMRuntimeEnv(command.Params, func() error {
 				return e.runtimeManager.RestartRuntimeNamed(runtimeName)
 			})
 		}
-		return "", e.runtimeManager.RestartRuntimeNamed(runtimeName)
+		return ExecutionResult{}, e.runtimeManager.RestartRuntimeNamed(runtimeName)
 	case "update_agent":
 		version := "latest"
 		if rawVersion, ok := command.Params["version"]; ok {
@@ -164,11 +175,50 @@ func (e *Executor) Execute(command types.AgentCommand) (string, error) {
 		}
 		details, err := e.startAgentUpdate(version)
 		if err != nil {
-			return details, err
+			return ExecutionResult{Details: details}, err
 		}
-		return details, nil
+		return ExecutionResult{Details: details}, nil
+	case "run_harness_exec":
+		return e.runHarnessExec(command)
+	case "sync_harnesses":
+		desiredHarnesses, err := desiredHarnessesParam(command.Params)
+		if err != nil {
+			return ExecutionResult{}, err
+		}
+		if e.progress != nil {
+			e.progress(types.AckRequest{
+				CommandID: command.ID,
+				Status:    "in_progress",
+				Details:   fmt.Sprintf("Checking %d harness(es)...", len(desiredHarnesses)),
+			})
+		}
+		installedHarnesses := probeInstalledHarnesses(desiredHarnesses)
+		readyCount := 0
+		offlineCount := 0
+		failedCount := 0
+		for _, harness := range installedHarnesses {
+			switch harness.Status {
+			case "ready":
+				readyCount++
+			case "offline":
+				offlineCount++
+			case "failed":
+				failedCount++
+			}
+		}
+		return ExecutionResult{
+			Details: fmt.Sprintf(
+				"Harness check complete (%d ready, %d offline, %d failed).",
+				readyCount,
+				offlineCount,
+				failedCount,
+			),
+			ResultPayload: map[string]any{
+				"installedHarnesses": installedHarnesses,
+			},
+		}, nil
 	default:
-		return "", fmt.Errorf("unsupported command type: %s", command.Type)
+		return ExecutionResult{}, fmt.Errorf("unsupported command type: %s", command.Type)
 	}
 }
 
@@ -398,4 +448,233 @@ func isSignalTermination(err error) bool {
 
 func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
+}
+
+func desiredHarnessesParam(params map[string]interface{}) ([]types.DesiredHarness, error) {
+	raw, ok := params["harnesses"]
+	if !ok {
+		return nil, fmt.Errorf("missing harnesses param")
+	}
+	payload, err := json.Marshal(raw)
+	if err != nil {
+		return nil, fmt.Errorf("marshal harnesses param: %w", err)
+	}
+	var harnesses []types.DesiredHarness
+	if err := json.Unmarshal(payload, &harnesses); err != nil {
+		return nil, fmt.Errorf("decode harnesses param: %w", err)
+	}
+	return harnesses, nil
+}
+
+func probeInstalledHarnesses(desired []types.DesiredHarness) []types.InstalledHarness {
+	result := make([]types.InstalledHarness, 0, len(desired))
+	for _, harness := range desired {
+		if strings.TrimSpace(harness.Type) == "" {
+			continue
+		}
+		item := types.InstalledHarness{
+			ID:             harness.ID,
+			Name:           harness.Name,
+			Type:           harness.Type,
+			Status:         "configuring",
+			ModelSelection: harness.ModelSelection,
+			ManagedModelID: harness.ManagedModelID,
+			Capabilities:   harness.Capabilities,
+		}
+
+		switch harness.Type {
+		case "codex_cli":
+			commandName := strings.TrimSpace(harness.Transport.Command)
+			if commandName == "" {
+				commandName = "codex"
+			}
+			args := append([]string{}, harness.Transport.Args...)
+			if len(args) == 0 {
+				args = []string{"exec", "--json", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox"}
+			}
+			item.Transport = &types.HarnessTransportConfig{Kind: "cli", Command: commandName, Args: args}
+
+			path, err := exec.LookPath(commandName)
+			if err != nil {
+				item.Status = "offline"
+				item.Detail = fmt.Sprintf("%s was not found in PATH", commandName)
+				result = append(result, item)
+				continue
+			}
+
+			item.Status = "ready"
+			item.ExecutablePath = path
+			item.Version = probeHarnessVersion(commandName)
+			if item.Version != "" {
+				item.Detail = "Detected " + item.Version
+			} else {
+				item.Detail = "Detected executable at " + path
+			}
+			result = append(result, item)
+		case "goose":
+			baseURL := strings.TrimSpace(harness.Transport.BaseURL)
+			if baseURL == "" {
+				baseURL = "https://127.0.0.1:3000"
+			}
+			commandName := strings.TrimSpace(harness.Transport.Command)
+			if commandName == "" {
+				commandName = "goosed"
+			}
+			args := append([]string{}, harness.Transport.Args...)
+			if len(args) == 0 {
+				args = []string{"agent"}
+			}
+			item.Transport = &types.HarnessTransportConfig{
+				Kind:    "daemon",
+				BaseURL: baseURL,
+				Command: commandName,
+				Args:    args,
+			}
+
+			if gooseDaemonReachable(baseURL) {
+				item.Status = "ready"
+				item.Detail = "Goose daemon is reachable at " + baseURL
+				result = append(result, item)
+				continue
+			}
+
+			path, err := exec.LookPath(commandName)
+			if err != nil {
+				item.Status = "offline"
+				item.Detail = fmt.Sprintf("Goose daemon not reachable at %s and %s was not found in PATH", baseURL, commandName)
+				result = append(result, item)
+				continue
+			}
+
+			item.Status = "ready"
+			item.ExecutablePath = path
+			item.Version = probeHarnessVersion(commandName)
+			if item.Version != "" {
+				item.Detail = fmt.Sprintf("Detected %s. Daemon is not currently reachable, but %s can be started on demand.", item.Version, commandName)
+			} else {
+				item.Detail = fmt.Sprintf("Detected executable at %s. Daemon will be started on demand if needed.", path)
+			}
+			result = append(result, item)
+		case "custom_openai":
+			baseURL := strings.TrimSpace(harness.Transport.BaseURL)
+			endpointPath := strings.TrimSpace(harness.Transport.EndpointPath)
+			if endpointPath == "" {
+				endpointPath = "/v1/chat/completions"
+			}
+			item.Transport = &types.HarnessTransportConfig{
+				Kind:         "openai_http",
+				BaseURL:      baseURL,
+				EndpointPath: endpointPath,
+			}
+			if baseURL == "" {
+				item.Status = "failed"
+				item.Detail = "Missing base URL for OpenAI-compatible endpoint."
+			} else {
+				item.Status = "ready"
+				item.Detail = fmt.Sprintf("Configured endpoint %s%s", strings.TrimRight(baseURL, "/"), endpointPath)
+			}
+			result = append(result, item)
+		default:
+			commandName := strings.TrimSpace(harness.Transport.Command)
+			if commandName == "" {
+				commandName = defaultCLIHarnessCommand(harness.Type)
+			}
+			item.Transport = &types.HarnessTransportConfig{
+				Kind:    "cli",
+				Command: commandName,
+				Args:    append([]string{}, harness.Transport.Args...),
+			}
+			if commandName == "" {
+				item.Status = "failed"
+				item.Detail = fmt.Sprintf("No default command is defined for harness type %s.", harness.Type)
+				result = append(result, item)
+				continue
+			}
+			path, err := exec.LookPath(commandName)
+			if err != nil {
+				item.Status = "offline"
+				item.Detail = fmt.Sprintf("%s was not found in PATH", commandName)
+				result = append(result, item)
+				continue
+			}
+
+			item.ExecutablePath = path
+			item.Version = probeHarnessVersion(commandName)
+			if supportsAgentHarnessExecution(harness.Type) {
+				item.Status = "ready"
+				if item.Version != "" {
+					item.Detail = "Detected " + item.Version
+				} else {
+					item.Detail = "Detected executable at " + path
+				}
+			} else {
+				item.Status = "failed"
+				if item.Version != "" {
+					item.Detail = fmt.Sprintf(
+						"Detected %s, but this agent build cannot execute %s harness jobs yet.",
+						item.Version,
+						harness.Type,
+					)
+				} else {
+					item.Detail = fmt.Sprintf(
+						"Detected executable at %s, but this agent build cannot execute %s harness jobs yet.",
+						path,
+						harness.Type,
+					)
+				}
+			}
+			result = append(result, item)
+		}
+	}
+	return result
+}
+
+func defaultCLIHarnessCommand(harnessType string) string {
+	switch harnessType {
+	case "opencode":
+		return "opencode"
+	case "claude_code":
+		return "claude"
+	case "openharness":
+		return "openharness"
+	case "aider":
+		return "aider"
+	case "open_interpreter":
+		return "interpreter"
+	default:
+		return ""
+	}
+}
+
+func supportsAgentHarnessExecution(harnessType string) bool {
+	return harnessType == "codex_cli" || harnessType == "goose"
+}
+
+func gooseDaemonReachable(baseURL string) bool {
+	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if baseURL == "" {
+		return false
+	}
+	client := &http.Client{
+		Timeout: 3 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+	}
+	resp, err := client.Get(baseURL + "/status")
+	if err != nil {
+		return false
+	}
+	_ = resp.Body.Close()
+	return resp.StatusCode >= 200 && resp.StatusCode < 300
+}
+
+func probeHarnessVersion(commandName string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, commandName, "--version").CombinedOutput()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(output))
 }
