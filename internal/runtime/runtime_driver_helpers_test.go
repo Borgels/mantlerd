@@ -299,3 +299,63 @@ func TestLMStudioModelAlreadyRemoved(t *testing.T) {
 		})
 	}
 }
+
+func TestCollapseLMStudioModelIDs(t *testing.T) {
+	t.Parallel()
+
+	input := []string{
+		"google/gemma-4-26b-a4b",
+		"google/gemma-4-26b-a4b:2",
+		"google/gemma-4-26b-a4b:3",
+		"meta-llama/Llama-3.1-8B-Instruct",
+		"meta-llama/Llama-3.1-8B-Instruct:2",
+	}
+	got := collapseLMStudioModelIDs(input)
+	want := []string{
+		"google/gemma-4-26b-a4b",
+		"meta-llama/Llama-3.1-8B-Instruct",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("collapseLMStudioModelIDs() len=%d, want %d (got=%v)", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("collapseLMStudioModelIDs()[%d]=%q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestLMStudioModelIDsEquivalent(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name  string
+		left  string
+		right string
+		want  bool
+	}{
+		{
+			name:  "equivalent for suffixed id",
+			left:  "google/gemma-4-26b-a4b",
+			right: "google/gemma-4-26b-a4b:4",
+			want:  true,
+		},
+		{
+			name:  "not equivalent for different models",
+			left:  "google/gemma-4-26b-a4b",
+			right: "meta-llama/Llama-3.1-8B-Instruct",
+			want:  false,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := lmstudioModelIDsEquivalent(tc.left, tc.right)
+			if got != tc.want {
+				t.Fatalf("lmstudioModelIDsEquivalent() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
