@@ -58,9 +58,9 @@ func (e *Executor) runOrchestratorExec(command types.AgentCommand) (ExecutionRes
 		}
 	}
 
-	commandPath, err := exec.LookPath(cmdName)
+	commandPath, err := resolveOrchestratorExecutable(params.OrchestratorType, cmdName)
 	if err != nil {
-		return ExecutionResult{}, fmt.Errorf("orchestrator command %q not found in PATH: %w", cmdName, err)
+		return ExecutionResult{}, err
 	}
 
 	cmd := exec.CommandContext(ctx, commandPath, cmdArgs...)
@@ -183,6 +183,71 @@ func (e *Executor) runOrchestratorExec(command types.AgentCommand) (ExecutionRes
 			"workingDir":       filepath.Clean(params.WorkingDir),
 		},
 	}, nil
+}
+
+func resolveOrchestratorExecutable(orchestratorType string, commandName string) (string, error) {
+	if path, err := resolveExecutableWithUserPath(commandName); err == nil {
+		return path, nil
+	}
+	if err := autoInstallOrchestratorBinary(orchestratorType); err != nil {
+		return "", fmt.Errorf("orchestrator command %q not found and auto-install failed: %w", commandName, err)
+	}
+	if path, err := resolveExecutableWithUserPath(commandName); err == nil {
+		return path, nil
+	}
+	return "", fmt.Errorf("orchestrator command %q still not found after auto-install", commandName)
+}
+
+func resolveExecutableWithUserPath(commandName string) (string, error) {
+	if path, err := exec.LookPath(commandName); err == nil {
+		return path, nil
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		candidate := filepath.Join(home, ".local", "bin", commandName)
+		if stat, statErr := os.Stat(candidate); statErr == nil && !stat.IsDir() {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("%s not found in PATH", commandName)
+}
+
+func autoInstallOrchestratorBinary(orchestratorType string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	defer cancel()
+
+	type installStep struct {
+		binary string
+		args   []string
+	}
+	var steps []installStep
+	switch strings.ToLower(strings.TrimSpace(orchestratorType)) {
+	case "crewai":
+		steps = []installStep{{binary: "python3", args: []string{"-m", "pip", "install", "--user", "--upgrade", "crewai"}}}
+	case "langgraph":
+		steps = []installStep{{binary: "python3", args: []string{"-m", "pip", "install", "--user", "--upgrade", "langgraph-cli"}}}
+	case "autogen":
+		steps = []installStep{{binary: "python3", args: []string{"-m", "pip", "install", "--user", "--upgrade", "pyautogen"}}}
+	default:
+		return fmt.Errorf("unsupported orchestrator type: %s", orchestratorType)
+	}
+
+	var lastErr error
+	for _, step := range steps {
+		if _, err := exec.LookPath(step.binary); err != nil {
+			lastErr = err
+			continue
+		}
+		cmd := exec.CommandContext(ctx, step.binary, step.args...)
+		if output, err := cmd.CombinedOutput(); err != nil {
+			lastErr = fmt.Errorf("%s %s failed: %w (%s)", step.binary, strings.Join(step.args, " "), err, strings.TrimSpace(string(output)))
+			continue
+		}
+		return nil
+	}
+	if lastErr != nil {
+		return lastErr
+	}
+	return fmt.Errorf("no installer available")
 }
 
 func writeOrchestratorPayloadFile(prefix string, payload any) (string, error) {

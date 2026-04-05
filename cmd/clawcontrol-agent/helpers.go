@@ -455,44 +455,23 @@ func toInstalledOrchestrators(desired types.DesiredConfig) []types.InstalledOrch
 			}
 			item.Status = "ready"
 			item.Detail = "Built-in orchestrator is managed by ClawControl."
-		case "crewai":
+		case "crewai", "langgraph", "autogen":
 			if item.Capabilities == nil {
 				item.Capabilities = defaultOrchestratorCapabilities(orchestrator.Type)
 			}
-			path, err := exec.LookPath(firstNonEmpty(orchestrator.Command, "crewai"))
+			commandName := firstNonEmpty(orchestrator.Command, defaultOrchestratorCommand(orchestrator.Type))
+			path, detail, err := ensureOrchestratorExecutable(orchestrator.Type, commandName)
 			if err != nil {
 				item.Status = "offline"
-				item.Detail = "CrewAI executable was not found in PATH"
+				item.Detail = detail
 			} else {
 				item.Status = "ready"
 				item.Version = probeHarnessVersion(path)
-				item.Detail = executableDetail(path, item.Version)
-			}
-		case "langgraph":
-			if item.Capabilities == nil {
-				item.Capabilities = defaultOrchestratorCapabilities(orchestrator.Type)
-			}
-			path, err := exec.LookPath(firstNonEmpty(orchestrator.Command, "langgraph"))
-			if err != nil {
-				item.Status = "offline"
-				item.Detail = "LangGraph executable was not found in PATH"
-			} else {
-				item.Status = "ready"
-				item.Version = probeHarnessVersion(path)
-				item.Detail = executableDetail(path, item.Version)
-			}
-		case "autogen":
-			if item.Capabilities == nil {
-				item.Capabilities = defaultOrchestratorCapabilities(orchestrator.Type)
-			}
-			path, err := exec.LookPath(firstNonEmpty(orchestrator.Command, "autogen"))
-			if err != nil {
-				item.Status = "offline"
-				item.Detail = "AutoGen executable was not found in PATH"
-			} else {
-				item.Status = "ready"
-				item.Version = probeHarnessVersion(path)
-				item.Detail = executableDetail(path, item.Version)
+				if item.Version != "" {
+					item.Detail = executableDetail(path, item.Version)
+				} else {
+					item.Detail = detail
+				}
 			}
 		default:
 			item.Status = "failed"
@@ -537,6 +516,90 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func defaultOrchestratorCommand(orchestratorType string) string {
+	switch strings.ToLower(strings.TrimSpace(orchestratorType)) {
+	case "crewai":
+		return "crewai"
+	case "langgraph":
+		return "langgraph"
+	case "autogen":
+		return "autogen"
+	default:
+		return ""
+	}
+}
+
+func resolveExecutableWithUserPath(command string) (string, error) {
+	if path, err := exec.LookPath(command); err == nil {
+		return path, nil
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		candidate := filepath.Join(home, ".local", "bin", command)
+		if stat, statErr := os.Stat(candidate); statErr == nil && !stat.IsDir() {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("%s executable was not found in PATH", command)
+}
+
+func ensureOrchestratorExecutable(orchestratorType string, commandName string) (string, string, error) {
+	commandName = strings.TrimSpace(commandName)
+	if commandName == "" {
+		return "", "No orchestrator command configured.", fmt.Errorf("missing command")
+	}
+	if path, err := resolveExecutableWithUserPath(commandName); err == nil {
+		return path, fmt.Sprintf("Detected executable at %s", path), nil
+	}
+
+	if err := autoInstallOrchestrator(orchestratorType); err != nil {
+		return "", fmt.Sprintf("%s not found and auto-install failed: %v", commandName, err), err
+	}
+	if path, err := resolveExecutableWithUserPath(commandName); err == nil {
+		return path, fmt.Sprintf("Installed and detected executable at %s", path), nil
+	}
+	return "", fmt.Sprintf("%s still not found after auto-install", commandName), fmt.Errorf("executable missing after install")
+}
+
+func autoInstallOrchestrator(orchestratorType string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	defer cancel()
+
+	type installStep struct {
+		binary string
+		args   []string
+	}
+	var steps []installStep
+	switch strings.ToLower(strings.TrimSpace(orchestratorType)) {
+	case "crewai":
+		steps = []installStep{{binary: "python3", args: []string{"-m", "pip", "install", "--user", "--upgrade", "crewai"}}}
+	case "langgraph":
+		steps = []installStep{{binary: "python3", args: []string{"-m", "pip", "install", "--user", "--upgrade", "langgraph-cli"}}}
+	case "autogen":
+		steps = []installStep{{binary: "python3", args: []string{"-m", "pip", "install", "--user", "--upgrade", "pyautogen"}}}
+	default:
+		return fmt.Errorf("unsupported orchestrator type: %s", orchestratorType)
+	}
+
+	var lastErr error
+	for _, step := range steps {
+		if _, err := exec.LookPath(step.binary); err != nil {
+			lastErr = err
+			continue
+		}
+		cmd := exec.CommandContext(ctx, step.binary, step.args...)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			lastErr = fmt.Errorf("%s %s: %w (%s)", step.binary, strings.Join(step.args, " "), err, strings.TrimSpace(string(output)))
+			continue
+		}
+		return nil
+	}
+	if lastErr != nil {
+		return lastErr
+	}
+	return fmt.Errorf("no installer available")
 }
 
 func executableDetail(path string, version string) string {
