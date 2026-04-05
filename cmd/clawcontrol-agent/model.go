@@ -1,12 +1,10 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/Borgels/clawcontrol-agent/internal/runtime"
 	"github.com/Borgels/clawcontrol-agent/internal/types"
@@ -318,32 +316,20 @@ func runModelBenchmark(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 
-	// Get driver
-	driver, err := manager.DriverFor(targetRuntime)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Check if driver supports benchmarking
-	benchmarker, ok := driver.(interface {
-		BenchmarkModel(ctx context.Context, modelID string, profile string) (map[string]interface{}, error)
-	})
-	if !ok {
-		fmt.Fprintf(os.Stderr, "Error: Runtime %s does not support benchmarking\n", targetRuntime)
-		os.Exit(1)
-	}
-
 	fmt.Printf("Benchmarking model: %s\n", modelID)
 	fmt.Printf("Runtime: %s\n", targetRuntime)
 	fmt.Printf("Profile: %s\n", profile)
 	fmt.Println()
 
-	// Run benchmark
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-	defer cancel()
-
-	results, err := benchmarker.BenchmarkModel(ctx, modelID, profile)
+	samplePromptTokens, sampleOutputTokens, concurrency, runs := benchmarkProfile(profile)
+	results, err := manager.BenchmarkModel(
+		modelID,
+		samplePromptTokens,
+		sampleOutputTokens,
+		concurrency,
+		runs,
+		nil,
+	)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error running benchmark: %v\n", err)
 		os.Exit(1)
@@ -352,22 +338,11 @@ func runModelBenchmark(cmd *cobra.Command, args []string) {
 	// Display results
 	fmt.Println("Benchmark Results:")
 	fmt.Println()
-
-	if ttft, ok := results["ttftMs"]; ok {
-		fmt.Printf("  Time to First Token:  %.2f ms\n", ttft)
-	}
-	if outputTps, ok := results["outputTokensPerSec"]; ok {
-		fmt.Printf("  Output Tokens/sec:    %.2f\n", outputTps)
-	}
-	if totalLatency, ok := results["totalLatencyMs"]; ok {
-		fmt.Printf("  Total Latency:        %.2f ms\n", totalLatency)
-	}
-	if promptTps, ok := results["promptTokensPerSec"]; ok {
-		fmt.Printf("  Prompt Tokens/sec:    %.2f\n", promptTps)
-	}
-	if p95Ttft, ok := results["p95TtftMsAtSmallConcurrency"]; ok {
-		fmt.Printf("  P95 TTFT (small):     %.2f ms\n", p95Ttft)
-	}
+	fmt.Printf("  Time to First Token:  %.2f ms\n", results.TTFTMs)
+	fmt.Printf("  Output Tokens/sec:    %.2f\n", results.OutputTokensPerSec)
+	fmt.Printf("  Total Latency:        %.2f ms\n", results.TotalLatencyMs)
+	fmt.Printf("  Prompt Tokens/sec:    %.2f\n", results.PromptTokensPerSec)
+	fmt.Printf("  P95 TTFT (small):     %.2f ms\n", results.P95TTFTMsAtSmallConcurrency)
 
 	fmt.Println()
 
@@ -376,5 +351,16 @@ func runModelBenchmark(cmd *cobra.Command, args []string) {
 		jsonOutput, _ := json.MarshalIndent(results, "", "  ")
 		fmt.Println("JSON Output:")
 		fmt.Println(string(jsonOutput))
+	}
+}
+
+func benchmarkProfile(profile string) (samplePromptTokens int, sampleOutputTokens int, concurrency int, runs int) {
+	switch strings.ToLower(strings.TrimSpace(profile)) {
+	case "quick":
+		return 320, 128, 1, 3
+	case "deep":
+		return 1024, 512, 3, 12
+	default:
+		return 640, 256, 2, 8
 	}
 }

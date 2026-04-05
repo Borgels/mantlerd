@@ -1,0 +1,142 @@
+package commands
+
+import (
+	"strings"
+	"testing"
+
+	"github.com/Borgels/clawcontrol-agent/internal/types"
+)
+
+func TestBuildCodexArgsAddsRequiredFlags(t *testing.T) {
+	args := buildCodexArgs([]string{"exec"}, "codex", "/tmp/work", "hello")
+
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "--json") {
+		t.Fatalf("expected --json in args, got %v", args)
+	}
+	if !strings.Contains(joined, "--skip-git-repo-check") {
+		t.Fatalf("expected --skip-git-repo-check in args, got %v", args)
+	}
+	if !strings.Contains(joined, "--dangerously-bypass-approvals-and-sandbox") {
+		t.Fatalf("expected unattended automation flag in args, got %v", args)
+	}
+	if !strings.Contains(joined, "--cd /tmp/work") {
+		t.Fatalf("expected working dir args, got %v", args)
+	}
+	if strings.Contains(joined, "--model codex") {
+		t.Fatalf("did not expect generic codex model override, got %v", args)
+	}
+	if args[len(args)-1] != "hello" {
+		t.Fatalf("expected prompt to be final arg, got %v", args)
+	}
+}
+
+func TestConsumeCodexStdoutNormalizesEvents(t *testing.T) {
+	lines := strings.Join([]string{
+		`{"type":"thread.started","thread_id":"thread-1"}`,
+		`{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"/bin/bash -lc 'ls -1'","status":"in_progress"}}`,
+		`{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"hello from codex"}}`,
+		`{"type":"turn.completed","usage":{"input_tokens":12,"output_tokens":8}}`,
+	}, "\n")
+
+	state := &codexExecutionState{}
+	events := make([]types.CommandStreamEvent, 0, 4)
+	consumeCodexStdout(strings.NewReader(lines), state, func(event types.CommandStreamEvent) {
+		events = append(events, event)
+	})
+
+	if state.threadID != "thread-1" {
+		t.Fatalf("expected thread id to be captured, got %q", state.threadID)
+	}
+	if len(events) != 3 {
+		t.Fatalf("expected 3 emitted events, got %d", len(events))
+	}
+	if events[0].Type != "tool_actions" || len(events[0].Actions) != 1 {
+		t.Fatalf("expected first event to be tool_actions, got %+v", events[0])
+	}
+	if events[1].Type != "content" || events[1].Content != "hello from codex" {
+		t.Fatalf("expected content event, got %+v", events[1])
+	}
+	if events[2].Type != "usage" || events[2].Usage == nil || events[2].Usage.TotalTokens != 20 {
+		t.Fatalf("expected usage event with total tokens, got %+v", events[2])
+	}
+}
+
+func TestRepositoryLookupCandidatesFallsBackToBasename(t *testing.T) {
+	candidates := repositoryLookupCandidates("/home/agent/repos/clawcontrol")
+	if len(candidates) < 2 {
+		t.Fatalf("expected multiple candidates, got %v", candidates)
+	}
+	if candidates[0] != "/home/agent/repos/clawcontrol" {
+		t.Fatalf("expected full path candidate first, got %v", candidates)
+	}
+	if candidates[1] != "clawcontrol" {
+		t.Fatalf("expected basename candidate second, got %v", candidates)
+	}
+}
+
+func TestBuildGooseReplyRequestSplitsHistoryAndCurrentUserTurn(t *testing.T) {
+	request := buildGooseReplyRequest("sess-1", []harnessExecMessage{
+		{Role: "system", Content: "System prompt"},
+		{Role: "user", Content: "First user turn"},
+		{Role: "assistant", Content: "Prior assistant reply"},
+		{Role: "user", Content: "Latest user turn"},
+	})
+
+	if got, _ := request["session_id"].(string); got != "sess-1" {
+		t.Fatalf("expected session_id to be preserved, got %#v", request["session_id"])
+	}
+	userMessage, ok := request["user_message"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected user_message map, got %#v", request["user_message"])
+	}
+	if userMessage["role"] != "user" {
+		t.Fatalf("expected current user_message role=user, got %#v", userMessage["role"])
+	}
+	override, ok := request["override_conversation"].([]map[string]interface{})
+	if ok {
+		if len(override) != 3 {
+			t.Fatalf("expected 3 history messages, got %d", len(override))
+		}
+		return
+	}
+	overrideAny, ok := request["override_conversation"].([]interface{})
+	if !ok || len(overrideAny) != 3 {
+		t.Fatalf("expected 3 history messages, got %#v", request["override_conversation"])
+	}
+}
+
+func TestConsumeGooseReplyStreamNormalizesEvents(t *testing.T) {
+	stream := strings.Join([]string{
+		`data: {"type":"Message","message":{"role":"assistant","content":[{"type":"text","text":"hello"}]},"token_state":{"accumulatedInputTokens":8,"accumulatedOutputTokens":3,"accumulatedTotalTokens":11}}`,
+		``,
+		`data: {"type":"Message","message":{"role":"assistant","content":[{"type":"text","text":"hello world"},{"type":"toolRequest","id":"tool-1","toolCall":{"name":"shell"}}]},"token_state":{"accumulatedInputTokens":8,"accumulatedOutputTokens":7,"accumulatedTotalTokens":15}}`,
+		``,
+		`data: {"type":"Finish","reason":"done","token_state":{"accumulatedInputTokens":8,"accumulatedOutputTokens":7,"accumulatedTotalTokens":15}}`,
+		``,
+	}, "\n")
+
+	state := &gooseExecutionState{}
+	events := make([]types.CommandStreamEvent, 0, 4)
+	err := consumeGooseReplyStream(strings.NewReader(stream), state, func(event types.CommandStreamEvent) {
+		events = append(events, event)
+	})
+	if err != nil {
+		t.Fatalf("expected Goose stream to parse, got error: %v", err)
+	}
+	if len(events) != 4 {
+		t.Fatalf("expected 4 normalized events, got %d", len(events))
+	}
+	if events[0].Type != "content" || events[0].Content != "hello" {
+		t.Fatalf("expected first content event, got %+v", events[0])
+	}
+	if events[1].Type != "content" || events[1].Content != " world" {
+		t.Fatalf("expected delta content event, got %+v", events[1])
+	}
+	if events[2].Type != "tool_actions" || len(events[2].Actions) != 1 || events[2].Actions[0] != "tool: shell" {
+		t.Fatalf("expected tool action event, got %+v", events[2])
+	}
+	if events[3].Type != "usage" || events[3].Usage == nil || events[3].Usage.TotalTokens != 15 {
+		t.Fatalf("expected usage event with total tokens, got %+v", events[3])
+	}
+}

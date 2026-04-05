@@ -2,9 +2,13 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
+	"fmt"
 	"log"
+	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -117,6 +121,287 @@ func toInstalledModels(runtimeManager *runtime.Manager) []types.InstalledModel {
 		}
 	}
 	return result
+}
+
+func toInstalledHarnesses(desired types.DesiredConfig) []types.InstalledHarness {
+	result := make([]types.InstalledHarness, 0, len(desired.Harnesses))
+	for _, harness := range desired.Harnesses {
+		if strings.TrimSpace(harness.Type) == "" {
+			continue
+		}
+		item := types.InstalledHarness{
+			ID:             harness.ID,
+			Name:           harness.Name,
+			Type:           harness.Type,
+			Status:         "configuring",
+			ModelSelection: harness.ModelSelection,
+			ManagedModelID: harness.ManagedModelID,
+			Capabilities:   harness.Capabilities,
+		}
+
+		switch harness.Type {
+		case "codex_cli":
+			commandName := strings.TrimSpace(harness.Transport.Command)
+			if commandName == "" {
+				commandName = "codex"
+			}
+			args := append([]string{}, harness.Transport.Args...)
+			if len(args) == 0 {
+				args = []string{"exec", "--json", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox"}
+			}
+			item.Transport = &types.HarnessTransportConfig{Kind: "cli", Command: commandName, Args: args}
+
+			path, err := exec.LookPath(commandName)
+			if err != nil {
+				item.Status = "offline"
+				item.Detail = fmt.Sprintf("%s was not found in PATH", commandName)
+				result = append(result, item)
+				continue
+			}
+
+			item.Status = "ready"
+			item.ExecutablePath = path
+			item.Version = probeHarnessVersion(path)
+			if item.Version != "" {
+				item.Detail = "Detected " + item.Version
+			} else {
+				item.Detail = "Detected executable at " + path
+			}
+			result = append(result, item)
+		case "goose":
+			baseURL := strings.TrimSpace(harness.Transport.BaseURL)
+			if baseURL == "" {
+				baseURL = "https://127.0.0.1:3000"
+			}
+			commandName := strings.TrimSpace(harness.Transport.Command)
+			if commandName == "" {
+				commandName = "goosed"
+			}
+			args := append([]string{}, harness.Transport.Args...)
+			if len(args) == 0 {
+				args = []string{"agent"}
+			}
+			item.Transport = &types.HarnessTransportConfig{
+				Kind:    "daemon",
+				BaseURL: baseURL,
+				Command: commandName,
+				Args:    args,
+			}
+
+			if ok := gooseDaemonReachable(baseURL); ok {
+				item.Status = "ready"
+				item.Detail = "Goose daemon is reachable at " + baseURL
+				result = append(result, item)
+				continue
+			}
+
+			path, err := exec.LookPath(commandName)
+			if err != nil {
+				item.Status = "offline"
+				item.Detail = fmt.Sprintf("Goose daemon not reachable at %s and %s was not found in PATH", baseURL, commandName)
+				result = append(result, item)
+				continue
+			}
+
+			item.Status = "ready"
+			item.ExecutablePath = path
+			item.Version = probeHarnessVersion(path)
+			if item.Version != "" {
+				item.Detail = fmt.Sprintf("Detected %s. Daemon is not currently reachable, but %s can be started on demand.", item.Version, commandName)
+			} else {
+				item.Detail = fmt.Sprintf("Detected executable at %s. Daemon will be started on demand if needed.", path)
+			}
+			result = append(result, item)
+		case "custom_openai":
+			baseURL := strings.TrimSpace(harness.Transport.BaseURL)
+			endpointPath := strings.TrimSpace(harness.Transport.EndpointPath)
+			if endpointPath == "" {
+				endpointPath = "/v1/chat/completions"
+			}
+			item.Transport = &types.HarnessTransportConfig{
+				Kind:         "openai_http",
+				BaseURL:      baseURL,
+				EndpointPath: endpointPath,
+			}
+			if baseURL == "" {
+				item.Status = "failed"
+				item.Detail = "Missing base URL for OpenAI-compatible endpoint."
+			} else {
+				item.Status = "ready"
+				item.Detail = fmt.Sprintf("Configured endpoint %s%s", strings.TrimRight(baseURL, "/"), endpointPath)
+			}
+			result = append(result, item)
+		default:
+			commandName := strings.TrimSpace(harness.Transport.Command)
+			if commandName == "" {
+				commandName = defaultCLIHarnessCommand(harness.Type)
+			}
+			args := append([]string{}, harness.Transport.Args...)
+			item.Transport = &types.HarnessTransportConfig{
+				Kind:    "cli",
+				Command: commandName,
+				Args:    args,
+			}
+			if commandName == "" {
+				item.Status = "failed"
+				item.Detail = fmt.Sprintf("No default command is defined for harness type %s.", harness.Type)
+				result = append(result, item)
+				continue
+			}
+
+			path, err := exec.LookPath(commandName)
+			if err != nil {
+				item.Status = "offline"
+				item.Detail = fmt.Sprintf("%s was not found in PATH", commandName)
+				result = append(result, item)
+				continue
+			}
+
+			item.ExecutablePath = path
+			item.Version = probeHarnessVersion(path)
+			if supportsAgentHarnessExecution(harness.Type) {
+				item.Status = "ready"
+				if item.Version != "" {
+					item.Detail = "Detected " + item.Version
+				} else {
+					item.Detail = "Detected executable at " + path
+				}
+			} else {
+				item.Status = "failed"
+				if item.Version != "" {
+					item.Detail = fmt.Sprintf(
+						"Detected %s, but this agent build cannot execute %s harness jobs yet.",
+						item.Version,
+						harness.Type,
+					)
+				} else {
+					item.Detail = fmt.Sprintf(
+						"Detected executable at %s, but this agent build cannot execute %s harness jobs yet.",
+						path,
+						harness.Type,
+					)
+				}
+			}
+			result = append(result, item)
+		}
+	}
+	return result
+}
+
+func defaultCLIHarnessCommand(harnessType string) string {
+	switch harnessType {
+	case "opencode":
+		return "opencode"
+	case "claude_code":
+		return "claude"
+	case "openharness":
+		return "openharness"
+	case "aider":
+		return "aider"
+	case "open_interpreter":
+		return "interpreter"
+	default:
+		return ""
+	}
+}
+
+func supportsAgentHarnessExecution(harnessType string) bool {
+	return harnessType == "codex_cli" || harnessType == "goose"
+}
+
+func gooseDaemonReachable(baseURL string) bool {
+	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if baseURL == "" {
+		return false
+	}
+	client := &http.Client{
+		Timeout: 3 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+	}
+	resp, err := client.Get(baseURL + "/status")
+	if err != nil {
+		return false
+	}
+	_ = resp.Body.Close()
+	return resp.StatusCode >= 200 && resp.StatusCode < 300
+}
+
+func probeHarnessVersion(commandPath string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	output, err := exec.CommandContext(ctx, commandPath, "--version").CombinedOutput()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(output))
+}
+
+func harnessReportsDiffer(a []types.InstalledHarness, b []types.InstalledHarness) bool {
+	if len(a) != len(b) {
+		return true
+	}
+	if len(a) == 0 {
+		return false
+	}
+
+	type comparableHarness struct {
+		ID             string
+		Name           string
+		Type           string
+		Status         string
+		Version        string
+		ExecutablePath string
+		Detail         string
+		Command        string
+		Args           string
+	}
+
+	toMap := func(items []types.InstalledHarness) map[string]comparableHarness {
+		result := make(map[string]comparableHarness, len(items))
+		for _, item := range items {
+			key := strings.TrimSpace(item.ID)
+			if key == "" {
+				key = strings.TrimSpace(item.Type + "::" + item.Name)
+			}
+			result[key] = comparableHarness{
+				ID:             item.ID,
+				Name:           item.Name,
+				Type:           item.Type,
+				Status:         item.Status,
+				Version:        item.Version,
+				ExecutablePath: item.ExecutablePath,
+				Detail:         item.Detail,
+				Command: func() string {
+					if item.Transport != nil {
+						return item.Transport.Command
+					}
+					return ""
+				}(),
+				Args: func() string {
+					if item.Transport != nil {
+						return strings.Join(item.Transport.Args, "\x00")
+					}
+					return ""
+				}(),
+			}
+		}
+		return result
+	}
+
+	left := toMap(a)
+	right := toMap(b)
+	if len(left) != len(right) {
+		return true
+	}
+	for key, value := range left {
+		if right[key] != value {
+			return true
+		}
+	}
+	return false
 }
 
 func ackCommandWithRetry(cl *client.Client, payload types.AckRequest) error {

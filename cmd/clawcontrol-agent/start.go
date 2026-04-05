@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -41,8 +42,8 @@ func runStart(cmd *cobra.Command, args []string) {
 
 	// Create runtime manager and executor
 	runtimeManager := runtime.NewManager()
-	executor := commands.NewExecutor(runtimeManager, cfg, func(commandID string, details string) {
-		sendInProgressAck(cl, commandID, details)
+	executor := commands.NewExecutor(runtimeManager, cfg, func(payload types.AckRequest) {
+		sendInProgressAck(cl, payload)
 	})
 
 	// Set up signal handling
@@ -161,6 +162,7 @@ func runCheckIn(cfg config.Config, cl *client.Client, runtimeManager *runtime.Ma
 		RuntimeVersions:       runtimeManager.RuntimeVersions(),
 		InstalledRuntimeTypes: installedRuntimeTypes,
 		InstalledModels:       toInstalledModels(runtimeManager),
+		InstalledHarnesses:    toInstalledHarnesses(cachedDesired),
 	}
 
 	resp, err := client.Retry(context.Background(), 3, func() (types.CheckinResponse, error) {
@@ -175,23 +177,36 @@ func runCheckIn(cfg config.Config, cl *client.Client, runtimeManager *runtime.Ma
 	if err := saveCachedDesiredConfig(resp.DesiredConfig); err != nil {
 		log.Printf("failed to persist desired config cache: %v", err)
 	}
+	desiredHarnesses := toInstalledHarnesses(resp.DesiredConfig)
+	if harnessReportsDiffer(payload.InstalledHarnesses, desiredHarnesses) {
+		refreshPayload := payload
+		refreshPayload.InstalledHarnesses = desiredHarnesses
+		refreshCtx, refreshCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer refreshCancel()
+		if _, err := cl.Checkin(refreshCtx, refreshPayload); err != nil {
+			log.Printf("follow-up harness refresh checkin failed: %v", err)
+		}
+	}
 	enforceDesiredConfig(runtimeManager, resp.DesiredConfig)
 
 	// Execute commands
 	for _, command := range resp.Commands {
-		details, err := executor.Execute(command)
+		result, err := executor.Execute(command)
 		status := "success"
 		if err != nil {
 			status = "failed"
-			details = err.Error()
+			if strings.TrimSpace(result.Details) == "" {
+				result.Details = err.Error()
+			}
 			log.Printf("command %s (%s) failed: %v", command.ID, command.Type, err)
 		} else {
 			log.Printf("command %s (%s) completed", command.ID, command.Type)
 		}
 		ackErr := ackCommandWithRetry(cl, types.AckRequest{
-			CommandID: command.ID,
-			Status:    status,
-			Details:   details,
+			CommandID:     command.ID,
+			Status:        status,
+			Details:       result.Details,
+			ResultPayload: result.ResultPayload,
 		})
 		if ackErr != nil {
 			log.Printf("ack failed for %s: %v", command.ID, ackErr)
@@ -199,6 +214,7 @@ func runCheckIn(cfg config.Config, cl *client.Client, runtimeManager *runtime.Ma
 	}
 }
 
+<<<<<<< HEAD
 func buildRuntimeStatuses(installedRuntimeNames []string, readyRuntimeNames []string) map[types.RuntimeType]types.RuntimeStatus {
 	statuses := make(map[types.RuntimeType]types.RuntimeStatus, len(installedRuntimeNames))
 	for _, runtimeName := range installedRuntimeNames {
@@ -215,14 +231,15 @@ func buildRuntimeStatuses(installedRuntimeNames []string, readyRuntimeNames []st
 
 func sendInProgressAck(cl *client.Client, commandID string, details string) {
 	if commandID == "" || details == "" {
+=======
+func sendInProgressAck(cl *client.Client, payload types.AckRequest) {
+	if payload.CommandID == "" || (payload.Details == "" && len(payload.StreamEvents) == 0) {
+>>>>>>> 1e0794c (feat: add harness sync lifecycle and bump to v0.2.8)
 		return
 	}
-	err := cl.Ack(context.Background(), types.AckRequest{
-		CommandID: commandID,
-		Status:    "in_progress",
-		Details:   details,
-	})
+	payload.Status = "in_progress"
+	err := cl.Ack(context.Background(), payload)
 	if err != nil {
-		log.Printf("progress ack failed for %s: %v", commandID, err)
+		log.Printf("progress ack failed for %s: %v", payload.CommandID, err)
 	}
 }
