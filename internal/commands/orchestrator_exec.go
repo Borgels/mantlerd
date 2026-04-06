@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Borgels/clawcontrol-agent/internal/manifest"
 	"github.com/Borgels/clawcontrol-agent/internal/types"
 )
 
@@ -25,6 +26,7 @@ type orchestratorExecParams struct {
 	WorkingDir       string
 	Task             map[string]interface{}
 	Skills           []map[string]interface{}
+	ResourceManifest *types.ResourceManifest
 }
 
 type orchestratorExecState struct {
@@ -51,8 +53,8 @@ func (e *Executor) runOrchestratorExec(command types.AgentCommand) (ExecutionRes
 		case "langgraph":
 			cmdName = "langgraph"
 			cmdArgs = append(cmdArgs, "dev")
-		case "autogen":
-			cmdName = "autogen"
+		case "autogen", "ag2":
+			cmdName = "ag2"
 		default:
 			return ExecutionResult{}, fmt.Errorf("missing orchestrator command for type %s", params.OrchestratorType)
 		}
@@ -92,12 +94,67 @@ func (e *Executor) runOrchestratorExec(command types.AgentCommand) (ExecutionRes
 	}
 	defer os.Remove(skillsFile)
 
+	manifestFile := ""
+	var watchdog *manifest.Watchdog
+	if params.ResourceManifest != nil {
+		e.registerManifest(command.ID, params.ResourceManifest)
+		defer e.unregisterManifest(command.ID)
+		preflight, preflightErr := manifest.RunPreflight(
+			ctx,
+			*params.ResourceManifest,
+			e.cfg.MachineID,
+			e.runtimeManager,
+			func(msg string) {
+				e.emitHarnessProgress(command.ID, msg, &types.CommandStreamEvent{
+					Type:      "content",
+					Content:   msg,
+					Timestamp: time.Now().UTC().Format(time.RFC3339),
+				})
+			},
+		)
+		if preflightErr != nil {
+			return ExecutionResult{}, fmt.Errorf("manifest preflight failed: %w", preflightErr)
+		}
+		if preflight != nil && !preflight.Ready {
+			detail := "Orchestrator preflight failed."
+			if len(preflight.Issues) > 0 {
+				detail = strings.Join(preflight.Issues, " ")
+			}
+			return ExecutionResult{Details: detail}, fmt.Errorf(detail)
+		}
+		manifestFile, err = writeOrchestratorPayloadFile("manifest", params.ResourceManifest)
+		if err != nil {
+			return ExecutionResult{}, err
+		}
+		defer os.Remove(manifestFile)
+		watchdog = manifest.NewWatchdog(
+			*params.ResourceManifest,
+			e.cfg.MachineID,
+			e.runtimeManager,
+			func(msg string, eventType string) {
+				event := &types.CommandStreamEvent{
+					Type:      eventType,
+					Timestamp: time.Now().UTC().Format(time.RFC3339),
+				}
+				if eventType == "error" {
+					event.Detail = msg
+				} else {
+					event.Content = msg
+				}
+				e.emitHarnessProgress(command.ID, msg, event)
+			},
+		)
+	}
+
 	cmd.Env = append(os.Environ(),
 		"CLAWCONTROL_ORCHESTRATOR_ID="+params.OrchestratorID,
 		"CLAWCONTROL_ORCHESTRATOR_TYPE="+params.OrchestratorType,
 		"CLAWCONTROL_TASK_FILE="+taskFile,
 		"CLAWCONTROL_SKILLS_FILE="+skillsFile,
 	)
+	if manifestFile != "" {
+		cmd.Env = append(cmd.Env, "CLAWCONTROL_MANIFEST_FILE="+manifestFile)
+	}
 	if description, ok := params.Task["description"].(string); ok && strings.TrimSpace(description) != "" {
 		cmd.Stdin = strings.NewReader(description)
 	}
@@ -143,6 +200,10 @@ func (e *Executor) runOrchestratorExec(command types.AgentCommand) (ExecutionRes
 	if err := cmd.Start(); err != nil {
 		return ExecutionResult{}, fmt.Errorf("start orchestrator: %w", err)
 	}
+	if watchdog != nil {
+		watchdog.Start(ctx)
+		defer watchdog.Stop()
+	}
 
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -186,14 +247,19 @@ func (e *Executor) runOrchestratorExec(command types.AgentCommand) (ExecutionRes
 }
 
 func resolveOrchestratorExecutable(orchestratorType string, commandName string) (string, error) {
-	if path, err := resolveExecutableWithUserPath(commandName); err == nil {
-		return path, nil
+	candidates := orchestratorCommandCandidates(orchestratorType, commandName)
+	for _, candidate := range candidates {
+		if path, err := resolveExecutableWithUserPath(candidate); err == nil {
+			return path, nil
+		}
 	}
 	if err := autoInstallOrchestratorBinary(orchestratorType); err != nil {
 		return "", fmt.Errorf("orchestrator command %q not found and auto-install failed: %w", commandName, err)
 	}
-	if path, err := resolveExecutableWithUserPath(commandName); err == nil {
-		return path, nil
+	for _, candidate := range candidates {
+		if path, err := resolveExecutableWithUserPath(candidate); err == nil {
+			return path, nil
+		}
 	}
 	return "", fmt.Errorf("orchestrator command %q still not found after auto-install", commandName)
 }
@@ -211,6 +277,57 @@ func resolveExecutableWithUserPath(commandName string) (string, error) {
 	return "", fmt.Errorf("%s not found in PATH", commandName)
 }
 
+func defaultOrchestratorCommand(orchestratorType string) string {
+	switch strings.ToLower(strings.TrimSpace(orchestratorType)) {
+	case "crewai":
+		return "crewai"
+	case "langgraph":
+		return "langgraph"
+	case "autogen", "ag2":
+		return "ag2"
+	default:
+		return ""
+	}
+}
+
+func orchestratorCommandCandidates(orchestratorType string, commandName string) []string {
+	preferred := strings.TrimSpace(commandName)
+	seen := map[string]struct{}{}
+	result := make([]string, 0, 3)
+	add := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		if _, ok := seen[value]; ok {
+			return
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+
+	add(preferred)
+	switch strings.ToLower(strings.TrimSpace(orchestratorType)) {
+	case "autogen", "ag2":
+		add("ag2")
+		add("autogen")
+	}
+	return result
+}
+
+func orchestratorPackageCandidates(orchestratorType string) []string {
+	switch strings.ToLower(strings.TrimSpace(orchestratorType)) {
+	case "crewai":
+		return []string{"crewai"}
+	case "langgraph":
+		return []string{"langgraph-cli"}
+	case "autogen", "ag2":
+		return []string{"ag2", "pyautogen"}
+	default:
+		return nil
+	}
+}
+
 func autoInstallOrchestratorBinary(orchestratorType string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
 	defer cancel()
@@ -219,48 +336,47 @@ func autoInstallOrchestratorBinary(orchestratorType string) error {
 		binary string
 		args   []string
 	}
-	pkg := ""
-	commandName := ""
-	switch strings.ToLower(strings.TrimSpace(orchestratorType)) {
-	case "crewai":
-		pkg = "crewai"
-		commandName = "crewai"
-	case "langgraph":
-		pkg = "langgraph-cli"
-		commandName = "langgraph"
-	case "autogen":
-		pkg = "pyautogen"
-		commandName = "autogen"
-	default:
+	packages := orchestratorPackageCandidates(orchestratorType)
+	if len(packages) == 0 {
 		return fmt.Errorf("unsupported orchestrator type: %s", orchestratorType)
 	}
-
-	steps := []installStep{
-		{binary: "pipx", args: []string{"install", "--force", pkg}},
-		{binary: "uv", args: []string{"tool", "install", "--force", pkg}},
-		{binary: "python3", args: []string{"-m", "pip", "install", "--user", "--upgrade", "--break-system-packages", pkg}},
+	commandCandidates := orchestratorCommandCandidates(orchestratorType, defaultOrchestratorCommand(orchestratorType))
+	if len(commandCandidates) == 0 {
+		return fmt.Errorf("unsupported orchestrator command for type: %s", orchestratorType)
 	}
 
 	var lastErr error
-	for _, step := range steps {
-		if _, err := exec.LookPath(step.binary); err != nil {
-			lastErr = err
-			continue
+	for _, pkg := range packages {
+		steps := []installStep{
+			{binary: "pipx", args: []string{"install", "--force", pkg}},
+			{binary: "uv", args: []string{"tool", "install", "--force", pkg}},
+			{binary: "python3", args: []string{"-m", "pip", "install", "--user", "--upgrade", "--break-system-packages", pkg}},
 		}
-		cmd := exec.CommandContext(ctx, step.binary, step.args...)
-		if output, err := cmd.CombinedOutput(); err != nil {
-			lastErr = fmt.Errorf("%s %s failed: %w (%s)", step.binary, strings.Join(step.args, " "), err, strings.TrimSpace(string(output)))
-			continue
-		}
-		if _, err := resolveExecutableWithUserPath(commandName); err == nil {
-			return nil
-		}
-	}
 
-	if err := installOrchestratorViaVenv(ctx, orchestratorType, pkg, commandName); err == nil {
-		return nil
-	} else {
-		lastErr = err
+		for _, step := range steps {
+			if _, err := exec.LookPath(step.binary); err != nil {
+				lastErr = err
+				continue
+			}
+			cmd := exec.CommandContext(ctx, step.binary, step.args...)
+			if output, err := cmd.CombinedOutput(); err != nil {
+				lastErr = fmt.Errorf("%s %s failed: %w (%s)", step.binary, strings.Join(step.args, " "), err, strings.TrimSpace(string(output)))
+				continue
+			}
+			for _, candidate := range commandCandidates {
+				if _, err := resolveExecutableWithUserPath(candidate); err == nil {
+					return nil
+				}
+			}
+		}
+
+		for _, candidate := range commandCandidates {
+			if err := installOrchestratorViaVenv(ctx, orchestratorType, pkg, candidate); err == nil {
+				return nil
+			} else {
+				lastErr = err
+			}
+		}
 	}
 
 	if lastErr != nil {
@@ -293,7 +409,15 @@ func installOrchestratorViaVenv(ctx context.Context, orchestratorType, pkg, comm
 	}
 	target := filepath.Join(venvDir, "bin", commandName)
 	if _, err := os.Stat(target); err != nil {
-		return fmt.Errorf("venv installed package but command %s not found", target)
+		if strings.EqualFold(strings.TrimSpace(orchestratorType), "autogen") || strings.EqualFold(strings.TrimSpace(orchestratorType), "ag2") {
+			pythonBin := filepath.Join(venvDir, "bin", "python")
+			shimScript := "#!/usr/bin/env bash\nexec \"" + pythonBin + "\" -m autogen \"$@\"\n"
+			if writeErr := os.WriteFile(target, []byte(shimScript), 0o755); writeErr != nil {
+				return fmt.Errorf("venv installed package but command %s not found", target)
+			}
+		} else {
+			return fmt.Errorf("venv installed package but command %s not found", target)
+		}
 	}
 	shim := filepath.Join(localBinDir, commandName)
 	_ = os.Remove(shim)
@@ -343,6 +467,15 @@ func parseOrchestratorExecParams(params map[string]interface{}) (orchestratorExe
 		for _, item := range rawSkills {
 			if skill, ok := item.(map[string]interface{}); ok {
 				result.Skills = append(result.Skills, skill)
+			}
+		}
+	}
+	if rawManifest, ok := params["resourceManifest"].(map[string]interface{}); ok {
+		payload, marshalErr := json.Marshal(rawManifest)
+		if marshalErr == nil {
+			var manifestPayload types.ResourceManifest
+			if unmarshalErr := json.Unmarshal(payload, &manifestPayload); unmarshalErr == nil {
+				result.ResourceManifest = &manifestPayload
 			}
 		}
 	}

@@ -137,6 +137,15 @@ clawcontrol runtime install vllm
 clawcontrol runtime restart vllm
 ```
 
+Orchestrator management:
+
+```bash
+clawcontrol orchestrator list
+clawcontrol orchestrator status
+clawcontrol orchestrator install crewai
+clawcontrol orchestrator remove crewai
+```
+
 Model management:
 
 ```bash

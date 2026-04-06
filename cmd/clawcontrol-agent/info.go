@@ -106,6 +106,27 @@ func runInfo(cmd *cobra.Command, args []string) {
 	}
 	fmt.Println()
 
+	// Orchestrator information
+	orchestratorStatuses := []localOrchestratorStatus{
+		inspectOrchestratorStatus("builtin"),
+		inspectOrchestratorStatus("crewai"),
+		inspectOrchestratorStatus("langgraph"),
+		inspectOrchestratorStatus("autogen"),
+	}
+	readyOrchestrators := 0
+	fmt.Println("Orchestrators:")
+	for _, orchestrator := range orchestratorStatuses {
+		if orchestrator.Status == "ready" {
+			readyOrchestrators++
+		}
+		version := orchestrator.Version
+		if version == "" {
+			version = "-"
+		}
+		fmt.Printf("  %-12s %-13s %s\n", orchestrator.Type, orchestrator.Status, version)
+	}
+	fmt.Println()
+
 	// Quick status summary
 	fmt.Println("Quick Status:")
 	if len(readyRuntimes) > 0 {
@@ -119,6 +140,7 @@ func runInfo(cmd *cobra.Command, args []string) {
 	if modelCount > 0 {
 		fmt.Printf("  ✓ %d models available\n", modelCount)
 	}
+	fmt.Printf("  ✓ %d/%d orchestrators ready\n", readyOrchestrators, len(orchestratorStatuses))
 
 	// Config file location
 	configPath := cfgFile

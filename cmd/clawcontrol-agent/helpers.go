@@ -56,10 +56,18 @@ func enforceDesiredConfig(runtimeManager *runtime.Manager, desired types.Desired
 	}
 }
 
-func reconcileStaleModels(runtimeManager *runtime.Manager, desired types.DesiredConfig) {
+func reconcileStaleModels(runtimeManager *runtime.Manager, desired types.DesiredConfig, protectedModelIDs []string) {
 	ejectLMStudio := shouldAutoEjectLMStudio(desired)
 	desiredGlobal := map[string]struct{}{}
 	desiredByRuntime := map[string]map[string]struct{}{}
+	protected := map[string]struct{}{}
+	for _, modelID := range protectedModelIDs {
+		trimmed := strings.TrimSpace(modelID)
+		if trimmed == "" {
+			continue
+		}
+		protected[trimmed] = struct{}{}
+	}
 
 	addRuntimeDesired := func(runtimeName string, modelID string) {
 		runtimeName = strings.ToLower(strings.TrimSpace(runtimeName))
@@ -102,6 +110,9 @@ func reconcileStaleModels(runtimeManager *runtime.Manager, desired types.Desired
 		for _, modelID := range models {
 			modelID = strings.TrimSpace(modelID)
 			if modelID == "" {
+				continue
+			}
+			if _, isProtected := protected[modelID]; isProtected {
 				continue
 			}
 			if !(ejectLMStudio && runtimeName == string(types.RuntimeLMStudio)) {
@@ -455,7 +466,7 @@ func toInstalledOrchestrators(desired types.DesiredConfig) []types.InstalledOrch
 			}
 			item.Status = "ready"
 			item.Detail = "Built-in orchestrator is managed by ClawControl."
-		case "crewai", "langgraph", "autogen":
+		case "crewai", "langgraph", "autogen", "ag2":
 			if item.Capabilities == nil {
 				item.Capabilities = defaultOrchestratorCapabilities(orchestrator.Type)
 			}
@@ -492,7 +503,7 @@ func defaultOrchestratorCapabilities(orchestratorType string) *types.Orchestrato
 			SupportsSubTasks:         boolPtr(true),
 			SupportsConcurrentAgents: boolPtr(false),
 		}
-	case "crewai", "langgraph", "autogen":
+	case "crewai", "langgraph", "autogen", "ag2":
 		return &types.OrchestratorCapabilities{
 			SupportsQualityGates:     boolPtr(true),
 			SupportsSkillInjection:   boolPtr(true),
@@ -524,10 +535,49 @@ func defaultOrchestratorCommand(orchestratorType string) string {
 		return "crewai"
 	case "langgraph":
 		return "langgraph"
-	case "autogen":
-		return "autogen"
+	case "autogen", "ag2":
+		return "ag2"
 	default:
 		return ""
+	}
+}
+
+func orchestratorCommandCandidates(orchestratorType string, commandName string) []string {
+	preferred := strings.TrimSpace(commandName)
+	seen := map[string]struct{}{}
+	result := make([]string, 0, 3)
+	add := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		if _, ok := seen[value]; ok {
+			return
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+
+	add(preferred)
+	switch strings.ToLower(strings.TrimSpace(orchestratorType)) {
+	case "autogen", "ag2":
+		add("ag2")
+		add("autogen")
+	}
+	return result
+}
+
+func orchestratorPackageCandidates(orchestratorType string) []string {
+	switch strings.ToLower(strings.TrimSpace(orchestratorType)) {
+	case "crewai":
+		return []string{"crewai"}
+	case "langgraph":
+		return []string{"langgraph-cli"}
+	case "autogen", "ag2":
+		// AG2 is the modern package name. Keep pyautogen fallback for compatibility.
+		return []string{"ag2", "pyautogen"}
+	default:
+		return nil
 	}
 }
 
@@ -549,15 +599,20 @@ func ensureOrchestratorExecutable(orchestratorType string, commandName string) (
 	if commandName == "" {
 		return "", "No orchestrator command configured.", fmt.Errorf("missing command")
 	}
-	if path, err := resolveExecutableWithUserPath(commandName); err == nil {
-		return path, fmt.Sprintf("Detected executable at %s", path), nil
+	candidates := orchestratorCommandCandidates(orchestratorType, commandName)
+	for _, candidate := range candidates {
+		if path, err := resolveExecutableWithUserPath(candidate); err == nil {
+			return path, fmt.Sprintf("Detected executable at %s", path), nil
+		}
 	}
 
 	if err := autoInstallOrchestrator(orchestratorType); err != nil {
 		return "", fmt.Sprintf("%s not found and auto-install failed: %v", commandName, err), err
 	}
-	if path, err := resolveExecutableWithUserPath(commandName); err == nil {
-		return path, fmt.Sprintf("Installed and detected executable at %s", path), nil
+	for _, candidate := range candidates {
+		if path, err := resolveExecutableWithUserPath(candidate); err == nil {
+			return path, fmt.Sprintf("Installed and detected executable at %s", path), nil
+		}
 	}
 	return "", fmt.Sprintf("%s still not found after auto-install", commandName), fmt.Errorf("executable missing after install")
 }
@@ -570,46 +625,48 @@ func autoInstallOrchestrator(orchestratorType string) error {
 		binary string
 		args   []string
 	}
-	pkg := ""
-	command := defaultOrchestratorCommand(orchestratorType)
-	switch strings.ToLower(strings.TrimSpace(orchestratorType)) {
-	case "crewai":
-		pkg = "crewai"
-	case "langgraph":
-		pkg = "langgraph-cli"
-	case "autogen":
-		pkg = "pyautogen"
-	default:
+	packages := orchestratorPackageCandidates(orchestratorType)
+	if len(packages) == 0 {
 		return fmt.Errorf("unsupported orchestrator type: %s", orchestratorType)
 	}
-
-	steps := []installStep{
-		{binary: "pipx", args: []string{"install", "--force", pkg}},
-		{binary: "uv", args: []string{"tool", "install", "--force", pkg}},
-		{binary: "python3", args: []string{"-m", "pip", "install", "--user", "--upgrade", "--break-system-packages", pkg}},
+	commandCandidates := orchestratorCommandCandidates(orchestratorType, defaultOrchestratorCommand(orchestratorType))
+	if len(commandCandidates) == 0 {
+		return fmt.Errorf("unsupported orchestrator command for type: %s", orchestratorType)
 	}
 
 	var lastErr error
-	for _, step := range steps {
-		if _, err := exec.LookPath(step.binary); err != nil {
-			lastErr = err
-			continue
+	for _, pkg := range packages {
+		steps := []installStep{
+			{binary: "pipx", args: []string{"install", "--force", pkg}},
+			{binary: "uv", args: []string{"tool", "install", "--force", pkg}},
+			{binary: "python3", args: []string{"-m", "pip", "install", "--user", "--upgrade", "--break-system-packages", pkg}},
 		}
-		cmd := exec.CommandContext(ctx, step.binary, step.args...)
-		if output, err := cmd.CombinedOutput(); err != nil {
-			lastErr = fmt.Errorf("%s %s: %w (%s)", step.binary, strings.Join(step.args, " "), err, strings.TrimSpace(string(output)))
-			continue
-		}
-		if _, err := resolveExecutableWithUserPath(command); err == nil {
-			return nil
-		}
-	}
 
-	// Last resort: per-user venv + shim in ~/.local/bin
-	if err := installOrchestratorViaVenv(ctx, orchestratorType, pkg, command); err == nil {
-		return nil
-	} else {
-		lastErr = err
+		for _, step := range steps {
+			if _, err := exec.LookPath(step.binary); err != nil {
+				lastErr = err
+				continue
+			}
+			cmd := exec.CommandContext(ctx, step.binary, step.args...)
+			if output, err := cmd.CombinedOutput(); err != nil {
+				lastErr = fmt.Errorf("%s %s: %w (%s)", step.binary, strings.Join(step.args, " "), err, strings.TrimSpace(string(output)))
+				continue
+			}
+			for _, candidate := range commandCandidates {
+				if _, err := resolveExecutableWithUserPath(candidate); err == nil {
+					return nil
+				}
+			}
+		}
+
+		// Last resort: per-user venv + shim in ~/.local/bin
+		for _, candidate := range commandCandidates {
+			if err := installOrchestratorViaVenv(ctx, orchestratorType, pkg, candidate); err == nil {
+				return nil
+			} else {
+				lastErr = err
+			}
+		}
 	}
 
 	if lastErr != nil {
@@ -642,7 +699,15 @@ func installOrchestratorViaVenv(ctx context.Context, orchestratorType, pkg, comm
 	}
 	target := filepath.Join(venvDir, "bin", command)
 	if _, err := os.Stat(target); err != nil {
-		return fmt.Errorf("venv installed package but command %s not found", target)
+		if strings.EqualFold(strings.TrimSpace(orchestratorType), "autogen") || strings.EqualFold(strings.TrimSpace(orchestratorType), "ag2") {
+			pythonBin := filepath.Join(venvDir, "bin", "python")
+			shimScript := "#!/usr/bin/env bash\nexec \"" + pythonBin + "\" -m autogen \"$@\"\n"
+			if writeErr := os.WriteFile(target, []byte(shimScript), 0o755); writeErr != nil {
+				return fmt.Errorf("venv installed package but command %s not found", target)
+			}
+		} else {
+			return fmt.Errorf("venv installed package but command %s not found", target)
+		}
 	}
 	shim := filepath.Join(localBinDir, command)
 	_ = os.Remove(shim)
