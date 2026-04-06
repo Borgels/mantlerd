@@ -22,6 +22,8 @@ type HardwareReport struct {
 type GPUInfo struct {
 	Name              string
 	MemoryTotalMB     int
+	MemoryUsedMB      int
+	MemoryFreeMB      int
 	Architecture      string
 	ComputeCapability string
 	UnifiedMemory     *bool
@@ -175,7 +177,11 @@ func architectureFromComputeCapability(name string, computeCapability string) st
 }
 
 func readGPUInfo() (string, []GPUInfo) {
-	cmd := exec.Command("nvidia-smi", "--query-gpu=name,memory.total,compute_cap", "--format=csv,noheader")
+	cmd := exec.Command(
+		"nvidia-smi",
+		"--query-gpu=name,memory.total,memory.used,compute_cap",
+		"--format=csv,noheader",
+	)
 	out, err := cmd.Output()
 	if err == nil {
 		summary := strings.TrimSpace(string(out))
@@ -202,15 +208,30 @@ func readGPUInfo() (string, []GPUInfo) {
 						}
 					}
 				}
-				computeCapability := ""
+				memoryUsedMB := 0
 				if len(parts) > 2 {
-					computeCapability = strings.TrimSpace(parts[2])
+					fields := strings.Fields(strings.TrimSpace(parts[2]))
+					if len(fields) > 0 {
+						if value, parseErr := strconv.Atoi(fields[0]); parseErr == nil {
+							memoryUsedMB = value
+						}
+					}
+				}
+				computeCapability := ""
+				if len(parts) > 3 {
+					computeCapability = strings.TrimSpace(parts[3])
+				}
+				memoryFreeMB := 0
+				if memoryTotalMB > 0 && memoryUsedMB >= 0 && memoryTotalMB >= memoryUsedMB {
+					memoryFreeMB = memoryTotalMB - memoryUsedMB
 				}
 				architecture := architectureFromComputeCapability(name, computeCapability)
 				unifiedMemory := DetectUnifiedMemory()
 				gpus = append(gpus, GPUInfo{
 					Name:              name,
 					MemoryTotalMB:     memoryTotalMB,
+					MemoryUsedMB:      memoryUsedMB,
+					MemoryFreeMB:      memoryFreeMB,
 					Architecture:      architecture,
 					ComputeCapability: computeCapability,
 					UnifiedMemory:     unifiedMemory,

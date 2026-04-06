@@ -43,6 +43,8 @@ type InstalledModel struct {
 type GPUInfo struct {
 	Name              string `json:"name"`
 	MemoryTotalMB     int    `json:"memoryTotalMb,omitempty"`
+	MemoryUsedMB      int    `json:"memoryUsedMb,omitempty"`
+	MemoryFreeMB      int    `json:"memoryFreeMb,omitempty"`
 	Architecture      string `json:"architecture,omitempty"`
 	ComputeCapability string `json:"computeCapability,omitempty"`
 	UnifiedMemory     *bool  `json:"unifiedMemory,omitempty"`

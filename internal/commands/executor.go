@@ -33,6 +33,10 @@ type Executor struct {
 	// Active command cancellation support
 	activeCancelMu sync.Mutex
 	activeCancel   map[string]context.CancelFunc
+
+	// Active orchestrator manifests by command ID.
+	activeManifestMu sync.Mutex
+	activeManifests  map[string]*types.ResourceManifest
 }
 
 type ExecutionResult struct {
@@ -44,11 +48,60 @@ const gooseInstallScriptURL = "https://github.com/block/goose/raw/main/download_
 
 func NewExecutor(runtimeManager *runtime.Manager, cfg config.Config, progress func(payload types.AckRequest)) *Executor {
 	return &Executor{
-		runtimeManager: runtimeManager,
-		cfg:            cfg,
-		progress:       progress,
-		activeCancel:   make(map[string]context.CancelFunc),
+		runtimeManager:  runtimeManager,
+		cfg:             cfg,
+		progress:        progress,
+		activeCancel:    make(map[string]context.CancelFunc),
+		activeManifests: make(map[string]*types.ResourceManifest),
 	}
+}
+
+func (e *Executor) registerManifest(commandID string, manifest *types.ResourceManifest) {
+	if manifest == nil || strings.TrimSpace(commandID) == "" {
+		return
+	}
+	e.activeManifestMu.Lock()
+	e.activeManifests[commandID] = manifest
+	e.activeManifestMu.Unlock()
+}
+
+func (e *Executor) unregisterManifest(commandID string) {
+	if strings.TrimSpace(commandID) == "" {
+		return
+	}
+	e.activeManifestMu.Lock()
+	delete(e.activeManifests, commandID)
+	e.activeManifestMu.Unlock()
+}
+
+func (e *Executor) ActiveManifestModelIDs(localMachineID string) []string {
+	result := make([]string, 0)
+	seen := make(map[string]struct{})
+	e.activeManifestMu.Lock()
+	defer e.activeManifestMu.Unlock()
+	for _, manifest := range e.activeManifests {
+		if manifest == nil {
+			continue
+		}
+		for _, model := range manifest.Models {
+			if model.Source != "machine" {
+				continue
+			}
+			if strings.TrimSpace(model.MachineID) != strings.TrimSpace(localMachineID) {
+				continue
+			}
+			modelID := strings.TrimSpace(model.ModelID)
+			if modelID == "" {
+				continue
+			}
+			if _, ok := seen[modelID]; ok {
+				continue
+			}
+			seen[modelID] = struct{}{}
+			result = append(result, modelID)
+		}
+	}
+	return result
 }
 
 // CancelCommand attempts to cancel an in-flight command by its ID.

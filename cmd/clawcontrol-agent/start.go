@@ -193,7 +193,7 @@ func runCheckIn(cfg config.Config, cl *client.Client, runtimeManager *runtime.Ma
 		}
 	}
 	enforceDesiredConfig(runtimeManager, resp.DesiredConfig)
-	reconcileStaleModels(runtimeManager, resp.DesiredConfig)
+	reconcileStaleModels(runtimeManager, resp.DesiredConfig, executor.ActiveManifestModelIDs(cfg.MachineID))
 
 	// Execute commands
 	for _, command := range resp.Commands {
@@ -233,6 +233,8 @@ func toProtocolGPUInfo(values []discovery.GPUInfo) []types.GPUInfo {
 		result = append(result, types.GPUInfo{
 			Name:              name,
 			MemoryTotalMB:     value.MemoryTotalMB,
+			MemoryUsedMB:      value.MemoryUsedMB,
+			MemoryFreeMB:      value.MemoryFreeMB,
 			Architecture:      strings.TrimSpace(value.Architecture),
 			ComputeCapability: strings.TrimSpace(value.ComputeCapability),
 			UnifiedMemory:     value.UnifiedMemory,
