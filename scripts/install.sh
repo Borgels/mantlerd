@@ -2,12 +2,12 @@
 set -eu
 
 REPO_OWNER="Borgels"
-REPO_NAME="clawcontrol-agent"
-BINARY_NAME="clawcontrol-agent"
-CLI_NAME="clawcontrol"
-SERVICE_NAME="clawcontrol-agent"
+REPO_NAME="mantlerd"
+BINARY_NAME="mantlerd"
+CLI_NAME="mantler"
+SERVICE_NAME="mantlerd"
 INSTALL_DIR="/usr/local/bin"
-CONFIG_DIR="/etc/clawcontrol"
+CONFIG_DIR="/etc/mantler"
 CONFIG_PATH="${CONFIG_DIR}/agent.json"
 SYSTEMD_UNIT_PATH="/etc/systemd/system/${SERVICE_NAME}.service"
 OLLAMA_OVERRIDE_DIR="/etc/systemd/system/ollama.service.d"
@@ -15,28 +15,28 @@ OLLAMA_OVERRIDE_PATH="${OLLAMA_OVERRIDE_DIR}/override.conf"
 VLLM_UNIT_PATH="/etc/systemd/system/vllm.service"
 VLLM_CONFIG_PATH="${CONFIG_DIR}/vllm.json"
 VLLM_ENV_PATH="${CONFIG_DIR}/vllm.env"
-VLLM_VENV_PATH="/opt/clawcontrol/vllm-venv"
+VLLM_VENV_PATH="/opt/mantler/vllm-venv"
 VLLM_PYTHON="${VLLM_VENV_PATH}/bin/python3"
-INTERVAL_MS="${CLAWCONTROL_AGENT_INTERVAL_MS:-30000}"
-LOG_LEVEL="${CLAWCONTROL_AGENT_LOG_LEVEL:-info}"
-INSECURE="${CLAWCONTROL_AGENT_INSECURE:-false}"
-VERSION="${CLAWCONTROL_AGENT_VERSION:-latest}"
-OLLAMA_CONFIGURE_REMOTE="${CLAWCONTROL_OLLAMA_CONFIGURE_REMOTE:-true}"
-OLLAMA_HOST="${CLAWCONTROL_OLLAMA_HOST:-0.0.0.0:11434}"
-VLLM_CONFIGURE="${CLAWCONTROL_VLLM_CONFIGURE:-true}"
-VLLM_PREINSTALL="${CLAWCONTROL_VLLM_PREINSTALL:-true}"
-VLLM_RUNTIME_MODE="${CLAWCONTROL_VLLM_RUNTIME_MODE:-auto}"
-VLLM_PORT="${CLAWCONTROL_VLLM_PORT:-8000}"
-VLLM_GPU_MEMORY_UTILIZATION="${CLAWCONTROL_VLLM_GPU_MEMORY_UTILIZATION:-0.9}"
-VLLM_TRUST_REMOTE_CODE="${CLAWCONTROL_VLLM_TRUST_REMOTE_CODE:-false}"
-VLLM_EXTRA_ARGS="${CLAWCONTROL_VLLM_EXTRA_ARGS:-}"
-VLLM_HF_TOKEN="${CLAWCONTROL_HF_TOKEN:-${HF_TOKEN:-}}"
-VLLM_HF_HUB_TOKEN="${CLAWCONTROL_HUGGING_FACE_HUB_TOKEN:-${HUGGING_FACE_HUB_TOKEN:-}}"
-SELF_UPDATE_MODE="${CLAWCONTROL_AGENT_SELF_UPDATE:-false}"
+INTERVAL_MS="${MANTLERD_INTERVAL_MS:-${CLAWCONTROL_AGENT_INTERVAL_MS:-30000}}"
+LOG_LEVEL="${MANTLERD_LOG_LEVEL:-${CLAWCONTROL_AGENT_LOG_LEVEL:-info}}"
+INSECURE="${MANTLERD_INSECURE:-${CLAWCONTROL_AGENT_INSECURE:-false}}"
+VERSION="${MANTLERD_VERSION:-${CLAWCONTROL_AGENT_VERSION:-latest}}"
+OLLAMA_CONFIGURE_REMOTE="${MANTLER_OLLAMA_CONFIGURE_REMOTE:-${CLAWCONTROL_OLLAMA_CONFIGURE_REMOTE:-true}}"
+OLLAMA_HOST="${MANTLER_OLLAMA_HOST:-${CLAWCONTROL_OLLAMA_HOST:-0.0.0.0:11434}}"
+VLLM_CONFIGURE="${MANTLER_VLLM_CONFIGURE:-${CLAWCONTROL_VLLM_CONFIGURE:-true}}"
+VLLM_PREINSTALL="${MANTLER_VLLM_PREINSTALL:-${CLAWCONTROL_VLLM_PREINSTALL:-true}}"
+VLLM_RUNTIME_MODE="${MANTLER_VLLM_RUNTIME_MODE:-${CLAWCONTROL_VLLM_RUNTIME_MODE:-auto}}"
+VLLM_PORT="${MANTLER_VLLM_PORT:-${CLAWCONTROL_VLLM_PORT:-8000}}"
+VLLM_GPU_MEMORY_UTILIZATION="${MANTLER_VLLM_GPU_MEMORY_UTILIZATION:-${CLAWCONTROL_VLLM_GPU_MEMORY_UTILIZATION:-0.9}}"
+VLLM_TRUST_REMOTE_CODE="${MANTLER_VLLM_TRUST_REMOTE_CODE:-${CLAWCONTROL_VLLM_TRUST_REMOTE_CODE:-false}}"
+VLLM_EXTRA_ARGS="${MANTLER_VLLM_EXTRA_ARGS:-${CLAWCONTROL_VLLM_EXTRA_ARGS:-}}"
+VLLM_HF_TOKEN="${MANTLER_HF_TOKEN:-${CLAWCONTROL_HF_TOKEN:-${HF_TOKEN:-}}}"
+VLLM_HF_HUB_TOKEN="${MANTLER_HUGGING_FACE_HUB_TOKEN:-${CLAWCONTROL_HUGGING_FACE_HUB_TOKEN:-${HUGGING_FACE_HUB_TOKEN:-}}}"
+SELF_UPDATE_MODE="${MANTLERD_SELF_UPDATE:-${CLAWCONTROL_AGENT_SELF_UPDATE:-false}}"
 
 TOKEN=""
 MACHINE_ID=""
-SERVER_URL="${CLAWCONTROL_SERVER_URL:-}"
+SERVER_URL="${MANTLER_SERVER_URL:-${CLAWCONTROL_SERVER_URL:-}}"
 SUDO=""
 TMP_DIR=""
 BIN_TMP=""
@@ -48,30 +48,31 @@ usage() {
 Usage: install.sh --token <token> --machine <machine-id> --server <server-url> [--version <tag|latest>] [--insecure]
 
 Environment overrides:
-  CLAWCONTROL_AGENT_VERSION      Release tag (default: latest)
-  CLAWCONTROL_AGENT_INTERVAL_MS  Poll interval in milliseconds (default: 30000)
-  CLAWCONTROL_AGENT_LOG_LEVEL    Log level (default: info)
-  CLAWCONTROL_AGENT_INSECURE     true|false (default: false)
-  CLAWCONTROL_OLLAMA_CONFIGURE_REMOTE  true|false (default: true)
-  CLAWCONTROL_OLLAMA_HOST        Ollama bind host:port (default: 0.0.0.0:11434)
-  CLAWCONTROL_VLLM_CONFIGURE     true|false (default: true)
-  CLAWCONTROL_VLLM_PREINSTALL    true|false (default: true)
-  CLAWCONTROL_VLLM_RUNTIME_MODE  auto|container|native (default: auto)
-  CLAWCONTROL_VLLM_PORT          vLLM OpenAI API port (default: 8000)
-  CLAWCONTROL_VLLM_GPU_MEMORY_UTILIZATION GPU memory utilization fraction (default: 0.9)
-  CLAWCONTROL_VLLM_TRUST_REMOTE_CODE true|false (default: false)
-  CLAWCONTROL_VLLM_EXTRA_ARGS    extra CLI args appended to vLLM serve
-  CLAWCONTROL_HF_TOKEN           optional Hugging Face token persisted for vLLM model pulls
-  CLAWCONTROL_HUGGING_FACE_HUB_TOKEN optional Hugging Face Hub token persisted for vLLM model pulls
+  MANTLERD_VERSION      Release tag (default: latest)
+  MANTLERD_INTERVAL_MS  Poll interval in milliseconds (default: 30000)
+  MANTLERD_LOG_LEVEL    Log level (default: info)
+  MANTLERD_INSECURE     true|false (default: false)
+  MANTLER_OLLAMA_CONFIGURE_REMOTE  true|false (default: true)
+  MANTLER_OLLAMA_HOST        Ollama bind host:port (default: 0.0.0.0:11434)
+  MANTLER_VLLM_CONFIGURE     true|false (default: true)
+  MANTLER_VLLM_PREINSTALL    true|false (default: true)
+  MANTLER_VLLM_RUNTIME_MODE  auto|container|native (default: auto)
+  MANTLER_VLLM_PORT          vLLM OpenAI API port (default: 8000)
+  MANTLER_VLLM_GPU_MEMORY_UTILIZATION GPU memory utilization fraction (default: 0.9)
+  MANTLER_VLLM_TRUST_REMOTE_CODE true|false (default: false)
+  MANTLER_VLLM_EXTRA_ARGS    extra CLI args appended to vLLM serve
+  MANTLER_HF_TOKEN           optional Hugging Face token persisted for vLLM model pulls
+  MANTLER_HUGGING_FACE_HUB_TOKEN optional Hugging Face Hub token persisted for vLLM model pulls
+  Legacy CLAWCONTROL_* env vars are still accepted for compatibility.
 EOF
 }
 
 log() {
-  printf '[clawcontrol-agent installer] %s\n' "$*"
+  printf '[mantlerd installer] %s\n' "$*"
 }
 
 fatal() {
-  printf '[clawcontrol-agent installer] ERROR: %s\n' "$*" >&2
+  printf '[mantlerd installer] ERROR: %s\n' "$*" >&2
   exit 1
 }
 
@@ -154,7 +155,7 @@ case "$INSECURE" in
   true|false)
     ;;
   *)
-    fatal "CLAWCONTROL_AGENT_INSECURE must be true or false"
+    fatal "MANTLERD_INSECURE (or CLAWCONTROL_AGENT_INSECURE) must be true or false"
     ;;
 esac
 
@@ -162,7 +163,7 @@ case "$VLLM_CONFIGURE" in
   true|false)
     ;;
   *)
-    fatal "CLAWCONTROL_VLLM_CONFIGURE must be true or false"
+    fatal "MANTLER_VLLM_CONFIGURE (or CLAWCONTROL_VLLM_CONFIGURE) must be true or false"
     ;;
 esac
 
@@ -170,7 +171,7 @@ case "$VLLM_PREINSTALL" in
   true|false)
     ;;
   *)
-    fatal "CLAWCONTROL_VLLM_PREINSTALL must be true or false"
+    fatal "MANTLER_VLLM_PREINSTALL (or CLAWCONTROL_VLLM_PREINSTALL) must be true or false"
     ;;
 esac
 
@@ -178,7 +179,7 @@ case "$VLLM_RUNTIME_MODE" in
   auto|native|container)
     ;;
   *)
-    fatal "CLAWCONTROL_VLLM_RUNTIME_MODE must be auto, native, or container"
+    fatal "MANTLER_VLLM_RUNTIME_MODE (or CLAWCONTROL_VLLM_RUNTIME_MODE) must be auto, native, or container"
     ;;
 esac
 
@@ -186,7 +187,7 @@ case "$VLLM_TRUST_REMOTE_CODE" in
   true|false)
     ;;
   *)
-    fatal "CLAWCONTROL_VLLM_TRUST_REMOTE_CODE must be true or false"
+    fatal "MANTLER_VLLM_TRUST_REMOTE_CODE (or CLAWCONTROL_VLLM_TRUST_REMOTE_CODE) must be true or false"
     ;;
 esac
 
@@ -194,7 +195,7 @@ case "$SELF_UPDATE_MODE" in
   true|false)
     ;;
   *)
-    fatal "CLAWCONTROL_AGENT_SELF_UPDATE must be true or false"
+    fatal "MANTLERD_SELF_UPDATE (or CLAWCONTROL_AGENT_SELF_UPDATE) must be true or false"
     ;;
 esac
 
@@ -297,13 +298,13 @@ $SUDO sh -c "cat > \"$CONFIG_PATH\" <<EOF
 EOF"
 $SUDO chmod 600 "$CONFIG_PATH"
 $SUDO install -d -m 0755 "${CONFIG_DIR}/.config"
-$SUDO install -d -m 0755 "${CONFIG_DIR}/.config/clawcontrol-agent"
+$SUDO install -d -m 0755 "${CONFIG_DIR}/.config/mantlerd"
 
 if command -v systemctl >/dev/null 2>&1; then
   log "Installing systemd unit ${SYSTEMD_UNIT_PATH}"
   $SUDO sh -c "cat > \"$SYSTEMD_UNIT_PATH\" <<EOF
 [Unit]
-Description=ClawControl Agent
+Description=Mantler daemon
 After=network-online.target
 Wants=network-online.target
 
@@ -352,7 +353,7 @@ EOF"
       log "ollama service not detected yet. Override was written and will apply once installed."
     fi
   else
-    log "Skipping ollama remote bind override (CLAWCONTROL_OLLAMA_CONFIGURE_REMOTE=${OLLAMA_CONFIGURE_REMOTE})."
+    log "Skipping ollama remote bind override (MANTLER_OLLAMA_CONFIGURE_REMOTE=${OLLAMA_CONFIGURE_REMOTE})."
   fi
 
   if [ "$VLLM_CONFIGURE" = "true" ]; then
@@ -461,12 +462,12 @@ EOF"
         fi
       fi
     else
-      log "Skipping vLLM package preinstall (CLAWCONTROL_VLLM_PREINSTALL=${VLLM_PREINSTALL}, mode=${VLLM_EFFECTIVE_MODE})."
+      log "Skipping vLLM package preinstall (MANTLER_VLLM_PREINSTALL=${VLLM_PREINSTALL}, mode=${VLLM_EFFECTIVE_MODE})."
     fi
 
     log "vLLM service template installed. It will be started when a model is configured."
   else
-    log "Skipping vLLM template install (CLAWCONTROL_VLLM_CONFIGURE=${VLLM_CONFIGURE})."
+    log "Skipping vLLM template install (MANTLER_VLLM_CONFIGURE=${VLLM_CONFIGURE})."
   fi
 
   if wait_for_service "$SERVICE_NAME" 15; then

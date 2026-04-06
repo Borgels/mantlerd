@@ -19,15 +19,15 @@ import (
 )
 
 const (
-	tensorrtConfigPath      = "/etc/clawcontrol/tensorrt.json"
-	tensorrtEnvPath         = "/etc/clawcontrol/tensorrt.env"
+	tensorrtConfigPath      = "/etc/mantler/tensorrt.json"
+	tensorrtEnvPath         = "/etc/mantler/tensorrt.env"
 	tensorrtUnitPath        = "/etc/systemd/system/tensorrt-llm.service"
-	tensorrtContainerName   = "clawcontrol-tensorrt"
+	tensorrtContainerName   = "mantler-tensorrt"
 	tensorrtDefaultImage    = "nvcr.io/nvidia/tritonserver:25.03-trtllm-python-py3"
 	tensorrtDefaultPort     = 8000
 	tensorrtReadyTimeout    = 180 * time.Second
 	tensorrtRestartCooldown = 90 * time.Second
-	tensorrtEnginesDir      = "/var/lib/clawcontrol/trt-engines"
+	tensorrtEnginesDir      = "/var/lib/mantler/trt-engines"
 )
 
 type tensorrtConfig struct {
@@ -106,7 +106,7 @@ func (d *tensorrtDriver) IsReady() bool {
 		return true
 	}
 	if _, known := d.configuredModelState(); !known && d.serviceIsInactive() {
-		// Non-root CLI may not be able to read /etc/clawcontrol files; treat
+		// Non-root CLI may not be able to read /etc/mantler files; treat
 		// inactive service as idle-ready in that restricted visibility mode.
 		return true
 	}
@@ -576,8 +576,8 @@ Wants=network-online.target
 Type=simple
 EnvironmentFile=-` + tensorrtEnvPath + `
 ExecStartPre=-/bin/sh -c 'DOCKER_BIN="$(command -v docker)"; if [ -n "$DOCKER_BIN" ]; then "$DOCKER_BIN" rm -f ` + tensorrtContainerName + ` >/dev/null 2>&1 || true; fi'
-ExecStartPre=-/bin/sh -c 'mkdir -p /opt/clawcontrol/tensorrt-app'
-ExecStart=/bin/sh -c 'DOCKER_BIN="$(command -v docker)"; [ -n "$DOCKER_BIN" ] || exit 1; exec "$DOCKER_BIN" run --rm --name ` + tensorrtContainerName + ` --gpus all --ipc=host --network host -e HF_TOKEN="${HF_TOKEN:-}" -e HUGGING_FACE_HUB_TOKEN="${HUGGING_FACE_HUB_TOKEN:-}" -e NVIDIA_VISIBLE_DEVICES=all -e NVIDIA_DRIVER_CAPABILITIES=compute,utility -v /root/.cache/huggingface:/root/.cache/huggingface -v /opt/clawcontrol/tensorrt-app:/app "${TENSORRT_CONTAINER_IMAGE:-` + tensorrtDefaultImage + `}" trtllm-serve "${TENSORRT_MODEL}" --host 0.0.0.0 --port "${TENSORRT_PORT:-8000}" ${TENSORRT_EXTRA_ARGS:-}'
+ExecStartPre=-/bin/sh -c 'mkdir -p /opt/mantler/tensorrt-app'
+ExecStart=/bin/sh -c 'DOCKER_BIN="$(command -v docker)"; [ -n "$DOCKER_BIN" ] || exit 1; exec "$DOCKER_BIN" run --rm --name ` + tensorrtContainerName + ` --gpus all --ipc=host --network host -e HF_TOKEN="${HF_TOKEN:-}" -e HUGGING_FACE_HUB_TOKEN="${HUGGING_FACE_HUB_TOKEN:-}" -e NVIDIA_VISIBLE_DEVICES=all -e NVIDIA_DRIVER_CAPABILITIES=compute,utility -v /root/.cache/huggingface:/root/.cache/huggingface -v /opt/mantler/tensorrt-app:/app "${TENSORRT_CONTAINER_IMAGE:-` + tensorrtDefaultImage + `}" trtllm-serve "${TENSORRT_MODEL}" --host 0.0.0.0 --port "${TENSORRT_PORT:-8000}" ${TENSORRT_EXTRA_ARGS:-}'
 ExecStop=-/bin/sh -c 'DOCKER_BIN="$(command -v docker)"; if [ -n "$DOCKER_BIN" ]; then "$DOCKER_BIN" stop ` + tensorrtContainerName + ` >/dev/null 2>&1 || true; fi'
 Restart=always
 RestartSec=5
@@ -733,7 +733,7 @@ func (d *tensorrtDriver) writeConfig(cfg tensorrtConfig) error {
 }
 
 func tensorrtPreparedModelsDir() string {
-	return "/var/lib/clawcontrol/models/tensorrt"
+	return "/var/lib/mantler/models/tensorrt"
 }
 
 func (d *tensorrtDriver) preparedModels() []string {

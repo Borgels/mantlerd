@@ -20,7 +20,7 @@ import (
 var doctorCmd = &cobra.Command{
 	Use:   "doctor",
 	Short: "Run diagnostic checks",
-	Long: `Run diagnostic checks to verify the clawcontrol agent setup.
+	Long: `Run diagnostic checks to verify the mantler daemon setup.
 
 This command checks:
 - Configuration file and settings
@@ -54,9 +54,9 @@ func runDoctor(cmd *cobra.Command, args []string) {
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
 		fmt.Println("✗")
 		fmt.Printf("  Config file not found: %s\n", configPath)
-		fmt.Println("  Run: clawcontrol config set server <url>")
-		fmt.Println("       clawcontrol config set token <token>")
-		fmt.Println("       clawcontrol config set machine <id>")
+		fmt.Println("  Run: mantler config set server <url>")
+		fmt.Println("       mantler config set token <token>")
+		fmt.Println("       mantler config set machine <id>")
 		allPassed = false
 	} else {
 		cfg, err := config.Load(configPath)
@@ -197,7 +197,7 @@ func runDoctor(cmd *cobra.Command, args []string) {
 	if len(installedRuntimes) == 0 {
 		fmt.Println("✗")
 		fmt.Println("  No runtimes installed")
-		fmt.Println("  Install a runtime: clawcontrol runtime install <runtime>")
+		fmt.Println("  Install a runtime: mantler runtime install <runtime>")
 		fmt.Println("  Supported: ollama, lmstudio, vllm, tensorrt")
 		allPassed = false
 	} else {
@@ -213,10 +213,10 @@ func runDoctor(cmd *cobra.Command, args []string) {
 
 	// Check 6: System permissions
 	fmt.Print("✓ Checking permissions... ")
-	configDir := "/etc/clawcontrol"
+	configDir := "/etc/mantler"
 	if os.Geteuid() != 0 {
 		home, _ := os.UserHomeDir()
-		configDir = home + "/.clawcontrol"
+		configDir = home + "/.mantler"
 	}
 
 	// Check if config directory is writable
@@ -258,11 +258,11 @@ func runDoctor(cmd *cobra.Command, args []string) {
 		fmt.Println("✓ All checks passed!")
 		fmt.Println()
 		fmt.Println("The agent is ready to run.")
-		fmt.Println("Start with: clawcontrol start")
+		fmt.Println("Start with: mantler start")
 	} else {
 		fmt.Println("✗ Some checks failed")
 		fmt.Println()
-		fmt.Println("Fix the issues above and run 'clawcontrol doctor' again.")
+		fmt.Println("Fix the issues above and run 'mantler doctor' again.")
 	}
 }
 

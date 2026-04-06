@@ -21,12 +21,12 @@ import (
 )
 
 const (
-	vllmConfigPath            = "/etc/clawcontrol/vllm.json"
-	vllmEnvPath               = "/etc/clawcontrol/vllm.env"
+	vllmConfigPath            = "/etc/mantler/vllm.json"
+	vllmEnvPath               = "/etc/mantler/vllm.env"
 	vllmUnitPath              = "/etc/systemd/system/vllm.service"
-	vllmVenvPath              = "/opt/clawcontrol/vllm-venv"
-	vllmPythonPath            = "/opt/clawcontrol/vllm-venv/bin/python3"
-	vllmContainerName         = "clawcontrol-vllm"
+	vllmVenvPath              = "/opt/mantler/vllm-venv"
+	vllmPythonPath            = "/opt/mantler/vllm-venv/bin/python3"
+	vllmContainerName         = "mantler-vllm"
 	vllmDefaultContainerImage = "nvcr.io/nvidia/vllm:26.02-py3"
 	vllmReadyTimeout          = 15 * time.Minute
 	vllmRapidFailureWindow    = 45 * time.Second
@@ -178,7 +178,7 @@ func (d *vllmDriver) IsReady() bool {
 		}
 	}
 	if _, known := d.configuredModelState(); !known && d.serviceIsInactive() {
-		// Non-root CLI may not be able to read /etc/clawcontrol files; treat
+		// Non-root CLI may not be able to read /etc/mantler files; treat
 		// inactive service as idle-ready in that restricted visibility mode.
 		return true
 	}
@@ -537,7 +537,7 @@ func (d *vllmDriver) RestartRuntime() error {
 	if err := runCommand("systemctl", "restart", "vllm"); err == nil {
 		return nil
 	}
-	return runCommand("systemctl", "restart", "clawcontrol-runtime")
+	return runCommand("systemctl", "restart", "mantler-runtime")
 }
 
 func (d *vllmDriver) baseURL() string {
@@ -597,8 +597,8 @@ Wants=network-online.target
 Type=simple
 EnvironmentFile=-` + vllmEnvPath + `
 ExecStartPre=-/bin/sh -c 'DOCKER_BIN="$(command -v docker)"; if [ -n "$DOCKER_BIN" ]; then "$DOCKER_BIN" rm -f ` + vllmContainerName + ` >/dev/null 2>&1 || true; fi'
-ExecStartPre=-/bin/sh -c 'mkdir -p /opt/clawcontrol/vllm-app'
-ExecStart=/bin/sh -c 'DOCKER_BIN="$(command -v docker)"; [ -n "$DOCKER_BIN" ] || exit 1; exec "$DOCKER_BIN" run --rm --name ` + vllmContainerName + ` --gpus all --ipc=host --network host -e HF_TOKEN="${HF_TOKEN:-}" -e HUGGING_FACE_HUB_TOKEN="${HUGGING_FACE_HUB_TOKEN:-}" -e NVIDIA_VISIBLE_DEVICES=all -e NVIDIA_DRIVER_CAPABILITIES=compute,utility -v /root/.cache/huggingface:/root/.cache/huggingface -v /opt/clawcontrol/vllm-app:/app "${VLLM_CONTAINER_IMAGE:-` + vllmDefaultContainerImage + `}" vllm serve "${VLLM_MODEL}" --host 0.0.0.0 --port "${VLLM_PORT:-8000}" --gpu-memory-utilization "${VLLM_GPU_MEMORY_UTILIZATION:-0.9}" ${VLLM_EXTRA_ARGS:-}'
+ExecStartPre=-/bin/sh -c 'mkdir -p /opt/mantler/vllm-app'
+ExecStart=/bin/sh -c 'DOCKER_BIN="$(command -v docker)"; [ -n "$DOCKER_BIN" ] || exit 1; exec "$DOCKER_BIN" run --rm --name ` + vllmContainerName + ` --gpus all --ipc=host --network host -e HF_TOKEN="${HF_TOKEN:-}" -e HUGGING_FACE_HUB_TOKEN="${HUGGING_FACE_HUB_TOKEN:-}" -e NVIDIA_VISIBLE_DEVICES=all -e NVIDIA_DRIVER_CAPABILITIES=compute,utility -v /root/.cache/huggingface:/root/.cache/huggingface -v /opt/mantler/vllm-app:/app "${VLLM_CONTAINER_IMAGE:-` + vllmDefaultContainerImage + `}" vllm serve "${VLLM_MODEL}" --host 0.0.0.0 --port "${VLLM_PORT:-8000}" --gpu-memory-utilization "${VLLM_GPU_MEMORY_UTILIZATION:-0.9}" ${VLLM_EXTRA_ARGS:-}'
 ExecStop=-/bin/sh -c 'DOCKER_BIN="$(command -v docker)"; if [ -n "$DOCKER_BIN" ]; then "$DOCKER_BIN" stop ` + vllmContainerName + ` >/dev/null 2>&1 || true; fi'
 Restart=always
 RestartSec=5
@@ -1280,7 +1280,7 @@ func (d *vllmDriver) shouldUseContainer() bool {
 }
 
 func vllmPreparedModelsDir() string {
-	return "/var/lib/clawcontrol/models/vllm"
+	return "/var/lib/mantler/models/vllm"
 }
 
 func safeModelPathSegment(modelID string) string {
@@ -1437,7 +1437,7 @@ func (d *vllmDriver) classifyKnownStartupFailure(diagnostics string) string {
 		strings.Contains(text, "gated") ||
 		strings.Contains(text, "authentication") ||
 		strings.Contains(text, "authorization")):
-		return "hint: model download needs Hugging Face auth; set HF_TOKEN (or HUGGING_FACE_HUB_TOKEN) in /etc/clawcontrol/vllm.env so vLLM can access gated repos"
+		return "hint: model download needs Hugging Face auth; set HF_TOKEN (or HUGGING_FACE_HUB_TOKEN) in /etc/mantler/vllm.env so vLLM can access gated repos"
 	case strings.Contains(text, "libcudart.so.12"):
 		return "hint: CUDA runtime libraries are missing from loader path; install nvidia-cuda-runtime-cu12 and set VLLM_LD_LIBRARY_PATH"
 	case strings.Contains(text, "libtorch_cuda.so"):
@@ -1449,7 +1449,7 @@ func (d *vllmDriver) classifyKnownStartupFailure(diagnostics string) string {
 	case strings.Contains(text, "modelopt currently only supports"):
 		return "hint: this model's ModelOpt quantization format is incompatible with nvcr.io/nvidia/vllm:26.02-py3 (vLLM 0.15.1); use a container build that includes mixed-precision ModelOpt support or select a compatible model"
 	case strings.Contains(text, "trust_remote_code") || strings.Contains(text, "trust-remote-code"):
-		return "hint: this model requires remote code; set VLLM_TRUST_REMOTE_CODE=true (or CLAWCONTROL_VLLM_TRUST_REMOTE_CODE=true at install time)"
+		return "hint: this model requires remote code; set VLLM_TRUST_REMOTE_CODE=true (or MANTLER_VLLM_TRUST_REMOTE_CODE=true at install time)"
 	default:
 		return ""
 	}

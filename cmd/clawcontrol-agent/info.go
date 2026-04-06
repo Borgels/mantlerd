@@ -102,7 +102,7 @@ func runInfo(cmd *cobra.Command, args []string) {
 		fmt.Println("  No models installed")
 	} else {
 		fmt.Printf("  %d models installed across all runtimes\n", modelCount)
-		fmt.Println("  Use 'clawcontrol model list' for details")
+		fmt.Println("  Use 'mantler model list' for details")
 	}
 	fmt.Println()
 

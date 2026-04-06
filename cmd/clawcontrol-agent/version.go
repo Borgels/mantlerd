@@ -9,9 +9,9 @@ import (
 var versionCmd = &cobra.Command{
 	Use:   "version",
 	Short: "Print the version number",
-	Long:  `Print the version number of clawcontrol-agent.`,
+	Long:  `Print the version number of mantlerd.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Printf("clawcontrol-agent %s\n", agentVersion)
+		fmt.Printf("mantlerd %s\n", agentVersion)
 	},
 }
 

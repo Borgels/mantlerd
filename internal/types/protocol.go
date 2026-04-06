@@ -32,12 +32,30 @@ const (
 	ModelFailed      ModelInstallStatus = "failed"
 )
 
+type AppliedRuntimeProfileFile struct {
+	Source      string `json:"source,omitempty"`
+	Destination string `json:"destination,omitempty"`
+	HostPath    string `json:"hostPath,omitempty"`
+	Exists      bool   `json:"exists,omitempty"`
+	SizeBytes   int64  `json:"sizeBytes,omitempty"`
+}
+
+type AppliedRuntimeProfile struct {
+	ProfileID        string                      `json:"profileId,omitempty"`
+	Label            string                      `json:"label,omitempty"`
+	ContainerImage   string                      `json:"containerImage,omitempty"`
+	VerifiedAt       string                      `json:"verifiedAt,omitempty"`
+	VerificationNote string                      `json:"verificationNote,omitempty"`
+	RequiredFiles    []AppliedRuntimeProfileFile `json:"requiredFiles,omitempty"`
+}
+
 type InstalledModel struct {
-	ModelID      string             `json:"modelId"`
-	Runtime      RuntimeType        `json:"runtime,omitempty"`
-	Status       ModelInstallStatus `json:"status"`
-	FailReason   string             `json:"failReason,omitempty"`
-	Capabilities *ModelCapabilities `json:"capabilities,omitempty"`
+	ModelID        string                 `json:"modelId"`
+	Runtime        RuntimeType            `json:"runtime,omitempty"`
+	Status         ModelInstallStatus     `json:"status"`
+	FailReason     string                 `json:"failReason,omitempty"`
+	Capabilities   *ModelCapabilities     `json:"capabilities,omitempty"`
+	AppliedProfile *AppliedRuntimeProfile `json:"appliedProfile,omitempty"`
 }
 
 type GPUInfo struct {

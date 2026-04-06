@@ -1,12 +1,13 @@
-APP_NAME=clawcontrol-agent
+APP_NAME=mantlerd
+CMD_DIR=clawcontrol-agent
 
 .PHONY: build
 build:
-	go build -o bin/$(APP_NAME) ./cmd/$(APP_NAME)
+	go build -o bin/$(APP_NAME) ./cmd/$(CMD_DIR)
 
 .PHONY: run
 run:
-	go run ./cmd/$(APP_NAME) --help
+	go run ./cmd/$(CMD_DIR) --help
 
 .PHONY: tidy
 tidy:

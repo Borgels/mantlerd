@@ -10,12 +10,12 @@ if [ -z "$VERSION" ]; then
 fi
 
 mkdir -p "$DIST_DIR"
-rm -f "${DIST_DIR}/clawcontrol-agent-"*
+rm -f "${DIST_DIR}/mantlerd-"*
 
 build_target() {
   os="$1"
   arch="$2"
-  out="${DIST_DIR}/clawcontrol-agent-${os}-${arch}"
+  out="${DIST_DIR}/mantlerd-${os}-${arch}"
   echo "Building ${out}"
   GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 \
     go build -buildvcs=false -trimpath -ldflags "-s -w -X main.agentVersion=${VERSION}" \

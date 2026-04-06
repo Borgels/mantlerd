@@ -37,8 +37,8 @@ Without arguments, shows status for all installed runtimes.
 With a runtime name argument, shows detailed status for that runtime.
 
 Examples:
-  clawcontrol runtime status
-  clawcontrol runtime status ollama`,
+  mantler runtime status
+  mantler runtime status ollama`,
 	Args: cobra.MaximumNArgs(1),
 	Run:  runRuntimeStatus,
 }
@@ -49,7 +49,7 @@ var runtimeInstallCmd = &cobra.Command{
 	Long: `Install a ML runtime.
 
 This command downloads and installs the specified runtime if it's not
-already installed. The runtime will be configured for use with ClawControl.
+already installed. The runtime will be configured for use with Mantler.
 
 Supported runtimes:
   ollama    - Ollama inference engine
@@ -58,8 +58,8 @@ Supported runtimes:
   tensorrt  - NVIDIA TensorRT
 
 Examples:
-  clawcontrol runtime install ollama
-  clawcontrol runtime install vllm`,
+  mantler runtime install ollama
+  mantler runtime install vllm`,
 	Args: cobra.ExactArgs(1),
 	Run:  runRuntimeInstall,
 }
@@ -73,7 +73,7 @@ This command restarts the specified runtime service. Useful for
 applying configuration changes or recovering from errors.
 
 Examples:
-  clawcontrol runtime restart ollama`,
+  mantler runtime restart ollama`,
 	Args: cobra.ExactArgs(1),
 	Run:  runRuntimeRestart,
 }
@@ -93,7 +93,7 @@ func runRuntimeList(cmd *cobra.Command, args []string) {
 
 	if len(installed) == 0 {
 		fmt.Println("No runtimes installed.")
-		fmt.Println("\nTo install a runtime, use: clawcontrol runtime install <runtime>")
+		fmt.Println("\nTo install a runtime, use: mantler runtime install <runtime>")
 		return
 	}
 

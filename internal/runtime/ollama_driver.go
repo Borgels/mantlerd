@@ -359,13 +359,13 @@ func (d *ollamaDriver) RestartRuntime() error {
 	if err := runCommand("systemctl", "restart", "ollama"); err == nil {
 		return nil
 	}
-	return runCommand("systemctl", "restart", "clawcontrol-runtime")
+	return runCommand("systemctl", "restart", "mantler-runtime")
 }
 
 func (d *ollamaDriver) modelFlagsPath() string {
 	// Service-safe path: avoid relying on $HOME when systemd hardening
 	// restricts /root access (e.g. ProtectHome=true).
-	return filepath.Join("/etc", "clawcontrol", "model-flags.json")
+	return filepath.Join("/etc", "mantler", "model-flags.json")
 }
 
 func (d *ollamaDriver) upsertModelFlags(modelID string, flags types.ModelFeatureFlags) error {

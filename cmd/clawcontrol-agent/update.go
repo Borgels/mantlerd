@@ -20,7 +20,7 @@ import (
 
 const (
 	updateRepoOwner = "Borgels"
-	updateRepoName  = "clawcontrol-agent"
+	updateRepoName  = "mantlerd"
 )
 
 var (
@@ -31,10 +31,10 @@ var (
 var updateCmd = &cobra.Command{
 	Use:   "update",
 	Short: "Check for and apply CLI updates",
-	Long: `Manage clawcontrol CLI updates.
+	Long: `Manage mantler CLI updates.
 
-Use "clawcontrol update check" to check for newer releases.
-Use "clawcontrol update apply" to download and install an update.`,
+Use "mantler update check" to check for newer releases.
+Use "mantler update apply" to download and install an update.`,
 }
 
 var updateCheckCmd = &cobra.Command{
@@ -46,7 +46,7 @@ var updateCheckCmd = &cobra.Command{
 var updateApplyCmd = &cobra.Command{
 	Use:   "apply",
 	Short: "Download and install an update",
-	Long: `Download and install a clawcontrol-agent release binary.
+	Long: `Download and install a mantlerd release binary.
 
 By default this installs the latest release. Use --version to install
 a specific version tag such as v0.2.12.`,
@@ -132,7 +132,7 @@ func runUpdateApply(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	assetName := fmt.Sprintf("clawcontrol-agent-%s-%s", osName, archName)
+	assetName := fmt.Sprintf("mantlerd-%s-%s", osName, archName)
 	assetURL := fmt.Sprintf("https://github.com/%s/%s/releases/download/%s/%s", updateRepoOwner, updateRepoName, targetVersion, assetName)
 	checksumURL := assetURL + ".sha256"
 
@@ -156,7 +156,7 @@ func runUpdateApply(cmd *cobra.Command, args []string) error {
 	}
 
 	targetDir := filepath.Dir(targetPath)
-	tempFile, err := os.CreateTemp(targetDir, ".clawcontrol-agent-update-*")
+	tempFile, err := os.CreateTemp(targetDir, ".mantlerd-update-*")
 	if err != nil {
 		return fmt.Errorf("create temp file: %w", err)
 	}
@@ -192,7 +192,7 @@ func runUpdateApply(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("Updated successfully to %s.\n", targetVersion)
 	fmt.Printf("Binary path: %s\n", targetPath)
-	fmt.Println("If running as a systemd service, restart it: sudo systemctl restart clawcontrol-agent")
+	fmt.Println("If running as a systemd service, restart it: sudo systemctl restart mantlerd")
 	return nil
 }
 
@@ -203,7 +203,7 @@ func fetchLatestRelease() (githubRelease, error) {
 		return githubRelease{}, fmt.Errorf("create latest release request: %w", err)
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("User-Agent", "clawcontrol-agent-updater")
+	req.Header.Set("User-Agent", "mantlerd-updater")
 	client := &http.Client{Timeout: 15 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -293,7 +293,7 @@ func resolveExecutablePath() (string, error) {
 
 func ensureWritableTarget(targetPath string) error {
 	dir := filepath.Dir(targetPath)
-	f, err := os.CreateTemp(dir, ".clawcontrol-write-check-*")
+	f, err := os.CreateTemp(dir, ".mantler-write-check-*")
 	if err != nil {
 		return fmt.Errorf("cannot write to %s (try running with sudo): %w", dir, err)
 	}

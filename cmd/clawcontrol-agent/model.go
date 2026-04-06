@@ -38,9 +38,9 @@ This command downloads the specified model to the specified runtime.
 If no runtime is specified, it uses the default runtime (usually ollama).
 
 Examples:
-  clawcontrol model pull llama2:7b
-  clawcontrol model pull llama2:7b --runtime ollama
-  clawcontrol model pull mistral:7b --runtime lmstudio`,
+  mantler model pull llama2:7b
+  mantler model pull llama2:7b --runtime ollama
+  mantler model pull mistral:7b --runtime lmstudio`,
 	Args: cobra.ExactArgs(1),
 	Run:  runModelPull,
 }
@@ -54,8 +54,8 @@ This command removes the specified model from the specified runtime.
 If no runtime is specified, it attempts to remove from all runtimes.
 
 Examples:
-  clawcontrol model remove llama2:7b
-  clawcontrol model remove llama2:7b --runtime ollama`,
+  mantler model remove llama2:7b
+  mantler model remove llama2:7b --runtime ollama`,
 	Args: cobra.ExactArgs(1),
 	Run:  runModelRemove,
 }
@@ -77,9 +77,9 @@ Benchmark profiles:
   deep     - Deep benchmark (many tokens, multiple runs)
 
 Examples:
-  clawcontrol model benchmark llama2:7b
-  clawcontrol model benchmark llama2:7b --profile deep
-  clawcontrol model benchmark llama2:7b --runtime ollama --profile quick`,
+  mantler model benchmark llama2:7b
+  mantler model benchmark llama2:7b --profile deep
+  mantler model benchmark llama2:7b --runtime ollama --profile quick`,
 	Args: cobra.ExactArgs(1),
 	Run:  runModelBenchmark,
 }
@@ -113,7 +113,7 @@ func runModelList(cmd *cobra.Command, args []string) {
 
 	if len(installedRuntimes) == 0 {
 		fmt.Println("No runtimes installed.")
-		fmt.Println("\nTo install a runtime, use: clawcontrol runtime install <runtime>")
+		fmt.Println("\nTo install a runtime, use: mantler runtime install <runtime>")
 		return
 	}
 
@@ -164,7 +164,7 @@ func runModelList(cmd *cobra.Command, args []string) {
 
 	if totalModels == 0 {
 		fmt.Println("No models installed.")
-		fmt.Println("\nTo pull a model, use: clawcontrol model pull <model>")
+		fmt.Println("\nTo pull a model, use: mantler model pull <model>")
 	} else {
 		fmt.Printf("Total: %d models\n", totalModels)
 	}
@@ -185,7 +185,7 @@ func runModelPull(cmd *cobra.Command, args []string) {
 			installedRuntimes := manager.InstalledRuntimes()
 			if len(installedRuntimes) == 0 {
 				fmt.Fprintln(os.Stderr, "Error: No runtimes installed")
-				fmt.Fprintln(os.Stderr, "Install a runtime first: clawcontrol runtime install <runtime>")
+				fmt.Fprintln(os.Stderr, "Install a runtime first: mantler runtime install <runtime>")
 				os.Exit(1)
 			}
 			targetRuntime = installedRuntimes[0]

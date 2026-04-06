@@ -17,11 +17,11 @@ import (
 var checkinCmd = &cobra.Command{
 	Use:   "checkin",
 	Short: "Perform a single check-in and exit",
-	Long: `Perform a single check-in to the ClawControl server.
+	Long: `Perform a single check-in to the Mantler server.
 
 This command will:
 - Report machine metadata (hostname, addresses, hardware summary)
-- Pull pending commands from ClawControl
+- Pull pending commands from Mantler
 - Execute any pending commands
 - Acknowledge command results
 - Exit after completion (does not start daemon)`,
