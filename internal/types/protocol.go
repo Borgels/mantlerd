@@ -32,30 +32,12 @@ const (
 	ModelFailed      ModelInstallStatus = "failed"
 )
 
-type AppliedRuntimeProfileFile struct {
-	Source      string `json:"source,omitempty"`
-	Destination string `json:"destination,omitempty"`
-	HostPath    string `json:"hostPath,omitempty"`
-	Exists      bool   `json:"exists,omitempty"`
-	SizeBytes   int64  `json:"sizeBytes,omitempty"`
-}
-
-type AppliedRuntimeProfile struct {
-	ProfileID        string                      `json:"profileId,omitempty"`
-	Label            string                      `json:"label,omitempty"`
-	ContainerImage   string                      `json:"containerImage,omitempty"`
-	VerifiedAt       string                      `json:"verifiedAt,omitempty"`
-	VerificationNote string                      `json:"verificationNote,omitempty"`
-	RequiredFiles    []AppliedRuntimeProfileFile `json:"requiredFiles,omitempty"`
-}
-
 type InstalledModel struct {
-	ModelID        string                 `json:"modelId"`
-	Runtime        RuntimeType            `json:"runtime,omitempty"`
-	Status         ModelInstallStatus     `json:"status"`
-	FailReason     string                 `json:"failReason,omitempty"`
-	Capabilities   *ModelCapabilities     `json:"capabilities,omitempty"`
-	AppliedProfile *AppliedRuntimeProfile `json:"appliedProfile,omitempty"`
+	ModelID      string             `json:"modelId"`
+	Runtime      RuntimeType        `json:"runtime,omitempty"`
+	Status       ModelInstallStatus `json:"status"`
+	FailReason   string             `json:"failReason,omitempty"`
+	Capabilities *ModelCapabilities `json:"capabilities,omitempty"`
 }
 
 type GPUInfo struct {
@@ -101,8 +83,31 @@ type CheckinRequest struct {
 	InstalledModels        []InstalledModel              `json:"installedModels,omitempty"`
 	InstalledHarnesses     []InstalledHarness            `json:"installedHarnesses,omitempty"`
 	InstalledOrchestrators []InstalledOrchestrator       `json:"installedOrchestrators,omitempty"`
+	OutcomeEvents          []OutcomeEvent                `json:"outcomeEvents,omitempty"`
 	Uptime                 int64                         `json:"uptime,omitempty"`
 	LoadAvg                []float64                     `json:"loadAvg,omitempty"`
+}
+
+type OutcomeEvent struct {
+	PlanID            string `json:"planId,omitempty"`
+	TaskID            string `json:"taskId,omitempty"`
+	MantleFingerprint string `json:"mantleFingerprint,omitempty"`
+	BaseFingerprint   string `json:"baseFingerprint,omitempty"`
+	EventType         string `json:"eventType"`
+	RuntimeImage      string `json:"runtimeImage,omitempty"`
+	DurationMs        int64  `json:"durationMs,omitempty"`
+	TokenUsage        *OutcomeTokenUsage `json:"tokenUsage,omitempty"`
+	QualityScore      *float64           `json:"qualityScore,omitempty"`
+	ExitCode          int    `json:"exitCode,omitempty"`
+	CrashSignature    string `json:"crashSignature,omitempty"`
+	Detail            string `json:"detail,omitempty"`
+	Timestamp         string `json:"timestamp"`
+}
+
+type OutcomeTokenUsage struct {
+	PromptTokens     int `json:"promptTokens"`
+	CompletionTokens int `json:"completionTokens"`
+	TotalTokens      int `json:"totalTokens"`
 }
 
 type HarnessCapabilities struct {

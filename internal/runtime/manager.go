@@ -5,12 +5,19 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/Borgels/clawcontrol-agent/internal/types"
 )
 
 type Manager struct {
 	drivers map[string]Driver
+	outcome func(event types.OutcomeEvent)
+
+	outcomeContextMu        sync.Mutex
+	activePlanID            string
+	activeMantleFingerprint string
 }
 
 func NewManager() *Manager {
@@ -21,6 +28,44 @@ func NewManager() *Manager {
 		"tensorrt": newTensorRTDriver(),
 	}
 	return &Manager{drivers: drivers}
+}
+
+func (m *Manager) SetOutcomeReporter(reporter func(event types.OutcomeEvent)) {
+	m.outcome = reporter
+}
+
+func (m *Manager) SetActiveContext(planID string, mantleFingerprint string) {
+	m.outcomeContextMu.Lock()
+	m.activePlanID = strings.TrimSpace(planID)
+	m.activeMantleFingerprint = strings.TrimSpace(mantleFingerprint)
+	m.outcomeContextMu.Unlock()
+}
+
+func (m *Manager) ClearActiveContext() {
+	m.outcomeContextMu.Lock()
+	m.activePlanID = ""
+	m.activeMantleFingerprint = ""
+	m.outcomeContextMu.Unlock()
+}
+
+func (m *Manager) emitOutcome(event types.OutcomeEvent) {
+	if m.outcome == nil || strings.TrimSpace(event.EventType) == "" {
+		return
+	}
+	m.outcomeContextMu.Lock()
+	planID := m.activePlanID
+	mantleFingerprint := m.activeMantleFingerprint
+	m.outcomeContextMu.Unlock()
+	if strings.TrimSpace(event.PlanID) == "" {
+		event.PlanID = planID
+	}
+	if strings.TrimSpace(event.MantleFingerprint) == "" {
+		event.MantleFingerprint = mantleFingerprint
+	}
+	if strings.TrimSpace(event.Timestamp) == "" {
+		event.Timestamp = time.Now().UTC().Format(time.RFC3339)
+	}
+	m.outcome(event)
 }
 
 func (m *Manager) DriverFor(runtimeName string) (Driver, error) {
@@ -264,33 +309,87 @@ func (m *Manager) PrepareModelWithFlagsCtx(ctx context.Context, modelID string, 
 }
 
 func (m *Manager) StartModelWithFlags(modelID string, flags *types.ModelFeatureFlags) error {
+	startedAt := time.Now()
 	if err := m.PrepareModelWithFlags(modelID, flags); err != nil {
+		m.emitOutcome(types.OutcomeEvent{
+			EventType:      "startup_failure",
+			DurationMs:     time.Since(startedAt).Milliseconds(),
+			CrashSignature: "prepare_failed",
+			Detail:         err.Error(),
+		})
 		return err
 	}
 	trimmedModel := strings.TrimSpace(modelID)
 	driver, err := m.preferredDriverForModel(trimmedModel)
 	if err != nil {
+		m.emitOutcome(types.OutcomeEvent{
+			EventType:      "startup_failure",
+			DurationMs:     time.Since(startedAt).Milliseconds(),
+			CrashSignature: "driver_not_found",
+			Detail:         err.Error(),
+		})
 		return err
 	}
-	return driver.StartModelWithFlags(trimmedModel, flags)
+	startErr := driver.StartModelWithFlags(trimmedModel, flags)
+	m.emitOutcome(types.OutcomeEvent{
+		EventType:  map[bool]string{true: "startup_success", false: "startup_failure"}[startErr == nil],
+		DurationMs: time.Since(startedAt).Milliseconds(),
+		Detail: func() string {
+			if startErr != nil {
+				return startErr.Error()
+			}
+			return "model startup succeeded"
+		}(),
+	})
+	return startErr
 }
 
 func (m *Manager) StartModelWithRuntime(modelID string, runtimeName string, flags *types.ModelFeatureFlags) error {
+	startedAt := time.Now()
 	if strings.TrimSpace(runtimeName) == "" {
 		return m.StartModelWithFlags(modelID, flags)
 	}
 	normalizedRuntime := strings.ToLower(strings.TrimSpace(runtimeName))
 	if err := m.EnsureRuntime(normalizedRuntime); err != nil {
+		m.emitOutcome(types.OutcomeEvent{
+			EventType:      "startup_failure",
+			DurationMs:     time.Since(startedAt).Milliseconds(),
+			CrashSignature: "runtime_not_ready",
+			Detail:         err.Error(),
+		})
 		return fmt.Errorf("ensure runtime %s: %w", normalizedRuntime, err)
 	}
 	driver, err := m.driverFor(normalizedRuntime)
 	if err != nil {
+		m.emitOutcome(types.OutcomeEvent{
+			EventType:      "startup_failure",
+			DurationMs:     time.Since(startedAt).Milliseconds(),
+			CrashSignature: "driver_not_found",
+			Detail:         err.Error(),
+		})
 		return err
 	}
 	if err := driver.PrepareModelWithFlags(modelID, flags); err != nil {
+		m.emitOutcome(types.OutcomeEvent{
+			EventType:      "startup_failure",
+			DurationMs:     time.Since(startedAt).Milliseconds(),
+			CrashSignature: "prepare_failed",
+			Detail:         err.Error(),
+		})
 		return err
 	}
-	return driver.StartModelWithFlags(modelID, flags)
+	startErr := driver.StartModelWithFlags(modelID, flags)
+	m.emitOutcome(types.OutcomeEvent{
+		EventType:  map[bool]string{true: "startup_success", false: "startup_failure"}[startErr == nil],
+		DurationMs: time.Since(startedAt).Milliseconds(),
+		Detail: func() string {
+			if startErr != nil {
+				return startErr.Error()
+			}
+			return "model startup succeeded"
+		}(),
+	})
+	return startErr
 }
 
 func (m *Manager) ListModels() []string {

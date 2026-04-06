@@ -64,6 +64,10 @@ type harnessExecParams struct {
 	HarnessID         string
 	HarnessType       string
 	DirectTargetID    string
+	TaskID            string
+	CompatibilityPlanID string
+	MantleFingerprint string
+	BaseFingerprint   string
 	Model             string
 	Messages          []harnessExecMessage
 	PreferredRepo     string
@@ -141,6 +145,10 @@ func parseHarnessExecParams(params map[string]interface{}) (harnessExecParams, e
 		HarnessID:         optionalStringParam(params, "harnessId"),
 		HarnessType:       optionalStringParam(params, "harnessType"),
 		DirectTargetID:    optionalStringParam(params, "directTargetId"),
+		TaskID:            optionalStringParam(params, "taskId"),
+		CompatibilityPlanID: optionalStringParam(params, "compatibilityPlanId"),
+		MantleFingerprint: optionalStringParam(params, "mantleFingerprint"),
+		BaseFingerprint:   optionalStringParam(params, "baseFingerprint"),
 		Model:             optionalStringParam(params, "model"),
 		PreferredRepo:     optionalStringParam(params, "preferredRepository"),
 		HarnessSessionID:  optionalStringParam(params, "harnessSessionId"),
@@ -237,6 +245,17 @@ func parseHarnessExecParams(params map[string]interface{}) (harnessExecParams, e
 	return result, nil
 }
 
+func usageToOutcomeTokenUsage(usage *types.CommandStreamUsage) *types.OutcomeTokenUsage {
+	if usage == nil {
+		return nil
+	}
+	return &types.OutcomeTokenUsage{
+		PromptTokens:     usage.PromptTokens,
+		CompletionTokens: usage.CompletionTokens,
+		TotalTokens:      usage.TotalTokens,
+	}
+}
+
 func normalizeHarnessTransportKind(kind string) string {
 	trimmed := strings.TrimSpace(strings.ToLower(kind))
 	if trimmed == "" {
@@ -261,6 +280,7 @@ func (e *Executor) emitHarnessProgress(commandID string, detail string, event *t
 }
 
 func (e *Executor) runCodexExec(commandID string, params harnessExecParams) (ExecutionResult, error) {
+	startedAt := time.Now()
 	commandName := params.TransportCommand
 	if commandName == "" {
 		commandName = defaultCodexCommand
@@ -353,21 +373,55 @@ func (e *Executor) runCodexExec(commandID string, params harnessExecParams) (Exe
 			if result.Details == "" {
 				result.Details = "Codex execution timed out after 20 minutes."
 			}
+			e.emitOutcome(types.OutcomeEvent{
+				TaskID:            params.TaskID,
+				PlanID:            params.CompatibilityPlanID,
+				MantleFingerprint: params.MantleFingerprint,
+				BaseFingerprint:   params.BaseFingerprint,
+				EventType:         "task_failure",
+				DurationMs:        time.Since(startedAt).Milliseconds(),
+				TokenUsage:        usageToOutcomeTokenUsage(state.usage),
+				Detail:            result.Details,
+				Timestamp:         time.Now().UTC().Format(time.RFC3339),
+			})
 			return result, fmt.Errorf("codex exec timed out")
 		}
 		if result.Details == "" {
 			result.Details = fmt.Sprintf("codex exec failed: %v", waitErr)
 		}
+		e.emitOutcome(types.OutcomeEvent{
+			TaskID:            params.TaskID,
+			PlanID:            params.CompatibilityPlanID,
+			MantleFingerprint: params.MantleFingerprint,
+			BaseFingerprint:   params.BaseFingerprint,
+			EventType:         "task_failure",
+			DurationMs:        time.Since(startedAt).Milliseconds(),
+			TokenUsage:        usageToOutcomeTokenUsage(state.usage),
+			Detail:            result.Details,
+			Timestamp:         time.Now().UTC().Format(time.RFC3339),
+		})
 		return result, fmt.Errorf("codex exec failed: %w", waitErr)
 	}
 
 	if result.Details == "" {
 		result.Details = "Codex execution completed."
 	}
+	e.emitOutcome(types.OutcomeEvent{
+		TaskID:            params.TaskID,
+		PlanID:            params.CompatibilityPlanID,
+		MantleFingerprint: params.MantleFingerprint,
+		BaseFingerprint:   params.BaseFingerprint,
+		EventType:         "task_success",
+		DurationMs:        time.Since(startedAt).Milliseconds(),
+		TokenUsage:        usageToOutcomeTokenUsage(state.usage),
+		Detail:            result.Details,
+		Timestamp:         time.Now().UTC().Format(time.RFC3339),
+	})
 	return result, nil
 }
 
 func (e *Executor) runGooseExec(commandID string, params harnessExecParams) (ExecutionResult, error) {
+	startedAt := time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Minute)
 	defer cancel()
 
@@ -387,7 +441,7 @@ func (e *Executor) runGooseExec(commandID string, params harnessExecParams) (Exe
 	replyRequest := buildGooseReplyRequest(sessionID, params.Messages)
 	finalUsage, err := e.streamGooseReply(ctx, commandID, daemon, replyRequest, state, secretValues)
 	if err != nil {
-		return ExecutionResult{
+		result := ExecutionResult{
 			Details: redactSecrets(state.finalDetail("Goose execution failed."), secretValues),
 			ResultPayload: map[string]interface{}{
 				"harnessId":        params.HarnessID,
@@ -400,7 +454,19 @@ func (e *Executor) runGooseExec(commandID string, params harnessExecParams) (Exe
 				"daemonManaged":    daemon.secret != "",
 				"daemonStderrTail": daemon.stderrTail(),
 			},
-		}, err
+		}
+		e.emitOutcome(types.OutcomeEvent{
+			TaskID:            params.TaskID,
+			PlanID:            params.CompatibilityPlanID,
+			MantleFingerprint: params.MantleFingerprint,
+			BaseFingerprint:   params.BaseFingerprint,
+			EventType:         "task_failure",
+			DurationMs:        time.Since(startedAt).Milliseconds(),
+			TokenUsage:        usageToOutcomeTokenUsage(finalUsage),
+			Detail:            result.Details,
+			Timestamp:         time.Now().UTC().Format(time.RFC3339),
+		})
+		return result, err
 	}
 
 	resultPayload := map[string]interface{}{
@@ -417,10 +483,22 @@ func (e *Executor) runGooseExec(commandID string, params harnessExecParams) (Exe
 		resultPayload["usage"] = finalUsage
 	}
 
-	return ExecutionResult{
+	result := ExecutionResult{
 		Details:       redactSecrets(state.finalDetail("Goose execution completed."), secretValues),
 		ResultPayload: resultPayload,
-	}, nil
+	}
+	e.emitOutcome(types.OutcomeEvent{
+		TaskID:            params.TaskID,
+		PlanID:            params.CompatibilityPlanID,
+		MantleFingerprint: params.MantleFingerprint,
+		BaseFingerprint:   params.BaseFingerprint,
+		EventType:         "task_success",
+		DurationMs:        time.Since(startedAt).Milliseconds(),
+		TokenUsage:        usageToOutcomeTokenUsage(finalUsage),
+		Detail:            result.Details,
+		Timestamp:         time.Now().UTC().Format(time.RFC3339),
+	})
+	return result, nil
 }
 
 type gooseDaemonHandle struct {

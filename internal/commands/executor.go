@@ -29,6 +29,7 @@ type Executor struct {
 	runtimeManager *runtime.Manager
 	cfg            config.Config
 	progress       func(payload types.AckRequest)
+	outcome        func(event types.OutcomeEvent)
 
 	// Active command cancellation support
 	activeCancelMu sync.Mutex
@@ -46,14 +47,33 @@ type ExecutionResult struct {
 
 const gooseInstallScriptURL = "https://github.com/block/goose/raw/main/download_cli.sh"
 
-func NewExecutor(runtimeManager *runtime.Manager, cfg config.Config, progress func(payload types.AckRequest)) *Executor {
+func NewExecutor(
+	runtimeManager *runtime.Manager,
+	cfg config.Config,
+	progress func(payload types.AckRequest),
+	outcome func(event types.OutcomeEvent),
+) *Executor {
 	return &Executor{
 		runtimeManager: runtimeManager,
 		cfg:            cfg,
 		progress:       progress,
+		outcome:        outcome,
 		activeCancel:   make(map[string]context.CancelFunc),
 		activeManifests: make(map[string]*types.ResourceManifest),
 	}
+}
+
+func (e *Executor) emitOutcome(event types.OutcomeEvent) {
+	if e.outcome == nil {
+		return
+	}
+	if strings.TrimSpace(event.EventType) == "" {
+		return
+	}
+	if strings.TrimSpace(event.Timestamp) == "" {
+		event.Timestamp = time.Now().UTC().Format(time.RFC3339)
+	}
+	e.outcome(event)
 }
 
 func (e *Executor) registerManifest(commandID string, manifest *types.ResourceManifest) {
@@ -192,6 +212,10 @@ func (e *Executor) ExecuteWithContext(ctx context.Context, command types.AgentCo
 		if err := applyRuntimeProfileOverrides(command.Params, runtimeName); err != nil {
 			return ExecutionResult{}, err
 		}
+		compatibilityPlanID := optionalStringParam(command.Params, "compatibilityPlanId")
+		mantleFingerprint := optionalStringParam(command.Params, "mantleFingerprint")
+		e.runtimeManager.SetActiveContext(compatibilityPlanID, mantleFingerprint)
+		defer e.runtimeManager.ClearActiveContext()
 		return ExecutionResult{}, e.runtimeManager.StartModelWithRuntime(modelID, runtimeName, flags)
 	case "stop_model":
 		modelID, err := stringParam(command.Params, "modelId")
@@ -199,7 +223,27 @@ func (e *Executor) ExecuteWithContext(ctx context.Context, command types.AgentCo
 			return ExecutionResult{}, err
 		}
 		runtimeName := optionalStringParam(command.Params, "runtime")
-		return ExecutionResult{}, e.runtimeManager.StopModelWithRuntime(modelID, runtimeName)
+		compatibilityPlanID := optionalStringParam(command.Params, "compatibilityPlanId")
+		mantleFingerprint := optionalStringParam(command.Params, "mantleFingerprint")
+		baseFingerprint := optionalStringParam(command.Params, "baseFingerprint")
+		startedAt := time.Now()
+		stopErr := e.runtimeManager.StopModelWithRuntime(modelID, runtimeName)
+		eventType := "stop_success"
+		detail := "model stop succeeded"
+		if stopErr != nil {
+			eventType = "stop_failure"
+			detail = stopErr.Error()
+		}
+		e.emitOutcome(types.OutcomeEvent{
+			PlanID:            compatibilityPlanID,
+			MantleFingerprint: mantleFingerprint,
+			BaseFingerprint:   baseFingerprint,
+			EventType:  eventType,
+			DurationMs: time.Since(startedAt).Milliseconds(),
+			Detail:     detail,
+			Timestamp:  time.Now().UTC().Format(time.RFC3339),
+		})
+		return ExecutionResult{}, stopErr
 	case "remove_model":
 		modelID, err := stringParam(command.Params, "modelId")
 		if err != nil {
@@ -483,6 +527,12 @@ var runtimeMountPaths = map[string]map[string]string{
 	},
 }
 
+var (
+	vllmRuntimeEnvPath   = "/etc/mantler/vllm.env"
+	tensorrtRuntimeEnvPath = "/etc/mantler/tensorrt.env"
+	runtimeProfileStateRoot = "/var/lib/mantler/runtime-profiles"
+)
+
 // resolveHostPath converts a container destination path to a host path.
 // If the destination starts with a known mount prefix, it's rewritten.
 // Otherwise, the destination is used as-is (assumed to be a host path).
@@ -503,6 +553,8 @@ func resolveHostPath(runtimeName string, containerPath string) string {
 }
 
 type runtimeProfileParams struct {
+	ID                   string                `json:"id"`
+	Label                string                `json:"label"`
 	Runtime              string                `json:"runtime"`
 	ContainerImage       string                `json:"containerImage"`
 	EnvironmentVariables map[string]string     `json:"environmentVariables"`
@@ -510,24 +562,100 @@ type runtimeProfileParams struct {
 	RequiredFiles        []requiredProfileFile `json:"requiredFiles"`
 }
 
-func applyRuntimeProfileOverrides(params map[string]interface{}, runtimeHint string) error {
+func decodeRuntimeProfile(params map[string]interface{}, runtimeHint string) (*runtimeProfileParams, string, error) {
 	raw, ok := params["runtimeProfile"]
 	if !ok || raw == nil {
-		return nil
+		return nil, "", nil
 	}
 	payload, err := json.Marshal(raw)
 	if err != nil {
-		return fmt.Errorf("encode runtime profile: %w", err)
+		return nil, "", fmt.Errorf("encode runtime profile: %w", err)
 	}
 	var profile runtimeProfileParams
 	if err := json.Unmarshal(payload, &profile); err != nil {
-		return fmt.Errorf("decode runtime profile: %w", err)
+		return nil, "", fmt.Errorf("decode runtime profile: %w", err)
 	}
 	runtimeName := strings.ToLower(strings.TrimSpace(runtimeHint))
 	if runtimeName == "" {
 		runtimeName = strings.ToLower(strings.TrimSpace(profile.Runtime))
 	}
 	if runtimeName == "" {
+		return nil, "", nil
+	}
+	return &profile, runtimeName, nil
+}
+
+func runtimeProfileStatePath(runtimeName string) string {
+	normalized := strings.ToLower(strings.TrimSpace(runtimeName))
+	if normalized == "" {
+		normalized = "unknown"
+	}
+	return filepath.Join(runtimeProfileStateRoot, normalized+".json")
+}
+
+func verifyRuntimeProfileApplied(runtimeName string, profile runtimeProfileParams) error {
+	var envPath string
+	switch strings.ToLower(strings.TrimSpace(runtimeName)) {
+	case "vllm":
+		envPath = vllmRuntimeEnvPath
+	case "tensorrt":
+		envPath = tensorrtRuntimeEnvPath
+	default:
+		return nil
+	}
+
+	values := readEnvFile(envPath)
+	if image := strings.TrimSpace(profile.ContainerImage); image != "" {
+		expected := strings.TrimSpace(values[strings.ToUpper(strings.TrimSpace(runtimeName))+"_CONTAINER_IMAGE"])
+		if expected != image {
+			return fmt.Errorf("runtime profile image mismatch: want %s, got %s", image, expected)
+		}
+	}
+	for key, value := range profile.EnvironmentVariables {
+		if strings.TrimSpace(key) == "" {
+			continue
+		}
+		if strings.TrimSpace(values[strings.TrimSpace(key)]) != strings.TrimSpace(value) {
+			return fmt.Errorf("runtime profile env mismatch for %s", key)
+		}
+	}
+	for _, file := range profile.RequiredFiles {
+		dst := strings.TrimSpace(file.Destination)
+		if dst == "" {
+			continue
+		}
+		hostPath := resolveHostPath(runtimeName, dst)
+		if _, err := os.Stat(hostPath); err != nil {
+			return fmt.Errorf("required profile file missing at %s: %w", hostPath, err)
+		}
+	}
+
+	statePath := runtimeProfileStatePath(runtimeName)
+	if err := os.MkdirAll(filepath.Dir(statePath), 0o755); err != nil {
+		return fmt.Errorf("create runtime profile state directory: %w", err)
+	}
+	statePayload := map[string]any{
+		"id":        strings.TrimSpace(profile.ID),
+		"label":     strings.TrimSpace(profile.Label),
+		"runtime":   strings.ToLower(strings.TrimSpace(runtimeName)),
+		"verifiedAt": time.Now().UTC().Format(time.RFC3339),
+	}
+	raw, err := json.Marshal(statePayload)
+	if err != nil {
+		return fmt.Errorf("marshal runtime profile state: %w", err)
+	}
+	if err := os.WriteFile(statePath, raw, 0o600); err != nil {
+		return fmt.Errorf("write runtime profile state: %w", err)
+	}
+	return nil
+}
+
+func applyRuntimeProfileOverrides(params map[string]interface{}, runtimeHint string) error {
+	profile, runtimeName, err := decodeRuntimeProfile(params, runtimeHint)
+	if err != nil {
+		return err
+	}
+	if profile == nil || runtimeName == "" {
 		return nil
 	}
 	for _, file := range profile.RequiredFiles {
@@ -545,7 +673,7 @@ func applyRuntimeProfileOverrides(params map[string]interface{}, runtimeHint str
 
 	switch runtimeName {
 	case "vllm":
-		values := readEnvFile("/etc/mantler/vllm.env")
+		values := readEnvFile(vllmRuntimeEnvPath)
 		if strings.TrimSpace(profile.ContainerImage) != "" {
 			values["VLLM_CONTAINER_IMAGE"] = strings.TrimSpace(profile.ContainerImage)
 		}
@@ -558,9 +686,12 @@ func applyRuntimeProfileOverrides(params map[string]interface{}, runtimeHint str
 			}
 			values[strings.TrimSpace(key)] = strings.TrimSpace(value)
 		}
-		return writeEnvFile("/etc/mantler/vllm.env", values)
+		if err := writeEnvFile(vllmRuntimeEnvPath, values); err != nil {
+			return err
+		}
+		return verifyRuntimeProfileApplied(runtimeName, *profile)
 	case "tensorrt":
-		values := readEnvFile("/etc/mantler/tensorrt.env")
+		values := readEnvFile(tensorrtRuntimeEnvPath)
 		if strings.TrimSpace(profile.ContainerImage) != "" {
 			values["TENSORRT_CONTAINER_IMAGE"] = strings.TrimSpace(profile.ContainerImage)
 		}
@@ -573,7 +704,10 @@ func applyRuntimeProfileOverrides(params map[string]interface{}, runtimeHint str
 			}
 			values[strings.TrimSpace(key)] = strings.TrimSpace(value)
 		}
-		return writeEnvFile("/etc/mantler/tensorrt.env", values)
+		if err := writeEnvFile(tensorrtRuntimeEnvPath, values); err != nil {
+			return err
+		}
+		return verifyRuntimeProfileApplied(runtimeName, *profile)
 	default:
 		return nil
 	}
