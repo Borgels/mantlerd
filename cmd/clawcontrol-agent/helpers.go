@@ -18,8 +18,8 @@ import (
 	"github.com/Borgels/clawcontrol-agent/internal/types"
 )
 
-const desiredConfigCachePath = "/etc/clawcontrol/desired-config.json"
-const lmstudioKeepWarmEnv = "CLAWCONTROL_LMSTUDIO_KEEP_WARM"
+const desiredConfigCachePath = "/etc/mantler/desired-config.json"
+const lmstudioKeepWarmEnv = "MANTLER_LMSTUDIO_KEEP_WARM"
 
 func enforceDesiredConfig(runtimeManager *runtime.Manager, desired types.DesiredConfig) {
 	ejectLMStudio := shouldAutoEjectLMStudio(desired)
@@ -465,7 +465,7 @@ func toInstalledOrchestrators(desired types.DesiredConfig) []types.InstalledOrch
 				item.Capabilities = defaultOrchestratorCapabilities(orchestrator.Type)
 			}
 			item.Status = "ready"
-			item.Detail = "Built-in orchestrator is managed by ClawControl."
+			item.Detail = "Built-in orchestrator is managed by Mantler."
 		case "crewai", "langgraph", "autogen", "ag2":
 			if item.Capabilities == nil {
 				item.Capabilities = defaultOrchestratorCapabilities(orchestrator.Type)
@@ -680,7 +680,7 @@ func installOrchestratorViaVenv(ctx context.Context, orchestratorType, pkg, comm
 	if err != nil {
 		return err
 	}
-	venvDir := filepath.Join(home, ".local", "share", "clawcontrol", "orchestrators", strings.ToLower(orchestratorType))
+	venvDir := filepath.Join(home, ".local", "share", "mantler", "orchestrators", strings.ToLower(orchestratorType))
 	if err := os.MkdirAll(filepath.Dir(venvDir), 0o755); err != nil {
 		return err
 	}

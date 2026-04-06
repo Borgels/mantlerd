@@ -67,13 +67,13 @@ jobs:
           tag_name: ${{ steps.release_tag.outputs.value }}
           name: ${{ steps.version.outputs.value }}
           files: |
-            dist/clawcontrol-agent-linux-amd64
-            dist/clawcontrol-agent-linux-amd64.sha256
-            dist/clawcontrol-agent-linux-arm64
-            dist/clawcontrol-agent-linux-arm64.sha256
-            dist/clawcontrol-agent-darwin-amd64
-            dist/clawcontrol-agent-darwin-amd64.sha256
-            dist/clawcontrol-agent-darwin-arm64
-            dist/clawcontrol-agent-darwin-arm64.sha256
+            dist/mantlerd-linux-amd64
+            dist/mantlerd-linux-amd64.sha256
+            dist/mantlerd-linux-arm64
+            dist/mantlerd-linux-arm64.sha256
+            dist/mantlerd-darwin-amd64
+            dist/mantlerd-darwin-amd64.sha256
+            dist/mantlerd-darwin-arm64
+            dist/mantlerd-darwin-arm64.sha256
           draft: false
           prerelease: false

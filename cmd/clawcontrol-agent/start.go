@@ -20,9 +20,9 @@ import (
 
 var startCmd = &cobra.Command{
 	Use:   "start",
-	Short: "Start the clawcontrol agent daemon",
-	Long: `Start the clawcontrol agent daemon which performs periodic check-ins
-to the ClawControl server, reports machine metadata, and executes commands.`,
+	Short: "Start the mantler daemon agent",
+	Long: `Start the mantler daemon agent which performs periodic check-ins
+to the Mantler server, reports machine metadata, and executes commands.`,
 	Run: runStart,
 }
 

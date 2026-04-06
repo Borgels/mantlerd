@@ -29,13 +29,29 @@ type FileConfig struct {
 
 func DefaultConfigPath() string {
 	if os.Geteuid() == 0 {
-		return "/etc/clawcontrol/agent.json"
+		const preferred = "/etc/mantler/agent.json"
+		if _, err := os.Stat(preferred); err == nil {
+			return preferred
+		}
+		const legacy = "/etc/clawcontrol/agent.json"
+		if _, err := os.Stat(legacy); err == nil {
+			return legacy
+		}
+		return preferred
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "./agent.json"
 	}
-	return filepath.Join(home, ".clawcontrol", "agent.json")
+	preferred := filepath.Join(home, ".mantler", "agent.json")
+	if _, err := os.Stat(preferred); err == nil {
+		return preferred
+	}
+	legacy := filepath.Join(home, ".clawcontrol", "agent.json")
+	if _, err := os.Stat(legacy); err == nil {
+		return legacy
+	}
+	return preferred
 }
 
 func Load(path string) (Config, error) {

@@ -20,7 +20,7 @@ import (
 const (
 	lmsInstallScriptURL   = "https://lmstudio.ai/install.sh"
 	lmsServiceUnitPath    = "/etc/systemd/system/lmstudio.service"
-	lmsConfigPath         = "/etc/clawcontrol/lmstudio.json"
+	lmsConfigPath         = "/etc/mantler/lmstudio.json"
 	lmsDefaultPort        = 1234
 	lmsReadyTimeout       = 90 * time.Second
 	lmsDefaultSystemdPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"

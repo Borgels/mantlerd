@@ -189,7 +189,7 @@ func inspectOrchestratorStatus(orchestratorType string) localOrchestratorStatus 
 			Type:   "builtin",
 			Name:   "Built-in",
 			Status: "ready",
-			Detail: "Built-in orchestrator is managed by ClawControl.",
+			Detail: "Built-in orchestrator is managed by Mantler.",
 		}
 	}
 
@@ -259,7 +259,7 @@ func uninstallOrchestrator(orchestratorType string) error {
 			shim := filepath.Join(home, ".local", "bin", commandName)
 			_ = os.Remove(shim)
 		}
-		venvDir := filepath.Join(home, ".local", "share", "clawcontrol", "orchestrators", orchestratorType)
+		venvDir := filepath.Join(home, ".local", "share", "mantler", "orchestrators", orchestratorType)
 		_ = os.RemoveAll(venvDir)
 	}
 

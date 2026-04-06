@@ -147,13 +147,18 @@ func (e *Executor) runOrchestratorExec(command types.AgentCommand) (ExecutionRes
 	}
 
 	cmd.Env = append(os.Environ(),
+		"MANTLER_ORCHESTRATOR_ID="+params.OrchestratorID,
+		"MANTLER_ORCHESTRATOR_TYPE="+params.OrchestratorType,
+		"MANTLER_TASK_FILE="+taskFile,
+		"MANTLER_SKILLS_FILE="+skillsFile,
+		// Compatibility for existing orchestrators during migration.
 		"CLAWCONTROL_ORCHESTRATOR_ID="+params.OrchestratorID,
 		"CLAWCONTROL_ORCHESTRATOR_TYPE="+params.OrchestratorType,
 		"CLAWCONTROL_TASK_FILE="+taskFile,
 		"CLAWCONTROL_SKILLS_FILE="+skillsFile,
 	)
 	if manifestFile != "" {
-		cmd.Env = append(cmd.Env, "CLAWCONTROL_MANIFEST_FILE="+manifestFile)
+		cmd.Env = append(cmd.Env, "MANTLER_MANIFEST_FILE="+manifestFile, "CLAWCONTROL_MANIFEST_FILE="+manifestFile)
 	}
 	if description, ok := params.Task["description"].(string); ok && strings.TrimSpace(description) != "" {
 		cmd.Stdin = strings.NewReader(description)
@@ -390,7 +395,7 @@ func installOrchestratorViaVenv(ctx context.Context, orchestratorType, pkg, comm
 	if err != nil {
 		return err
 	}
-	venvDir := filepath.Join(home, ".local", "share", "clawcontrol", "orchestrators", strings.ToLower(orchestratorType))
+	venvDir := filepath.Join(home, ".local", "share", "mantler", "orchestrators", strings.ToLower(orchestratorType))
 	if err := os.MkdirAll(filepath.Dir(venvDir), 0o755); err != nil {
 		return err
 	}
@@ -428,7 +433,7 @@ func installOrchestratorViaVenv(ctx context.Context, orchestratorType, pkg, comm
 }
 
 func writeOrchestratorPayloadFile(prefix string, payload any) (string, error) {
-	file, err := os.CreateTemp("", "clawcontrol-orchestrator-"+prefix+"-*.json")
+	file, err := os.CreateTemp("", "mantler-orchestrator-"+prefix+"-*.json")
 	if err != nil {
 		return "", fmt.Errorf("create orchestrator %s payload file: %w", prefix, err)
 	}

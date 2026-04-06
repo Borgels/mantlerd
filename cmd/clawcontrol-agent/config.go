@@ -11,8 +11,8 @@ import (
 
 var configCmd = &cobra.Command{
 	Use:   "config",
-	Short: "Manage clawcontrol agent configuration",
-	Long: `Manage clawcontrol agent configuration.
+	Short: "Manage mantler daemon configuration",
+	Long: `Manage mantler daemon configuration.
 
 This command provides subcommands for viewing and modifying the agent configuration.`,
 }
@@ -20,7 +20,7 @@ This command provides subcommands for viewing and modifying the agent configurat
 var configShowCmd = &cobra.Command{
 	Use:   "show",
 	Short: "Display current configuration",
-	Long: `Display the current clawcontrol agent configuration.
+	Long: `Display the current mantler daemon configuration.
 
 Shows configuration loaded from config file and flags.`,
 	Run: runConfigShow,
@@ -32,7 +32,7 @@ var configSetCmd = &cobra.Command{
 	Long: `Set a configuration value in the config file.
 
 Valid keys:
-  server     - ClawControl server URL
+  server     - Mantler server URL
   token      - Machine registration token
   machine    - Machine ID
   interval   - Check-in interval (e.g., 30s, 1m, 5m)
@@ -40,9 +40,9 @@ Valid keys:
   log-level  - Log level (debug, info, warn, error)
 
 Examples:
-  clawcontrol config set server https://control.example.com
-  clawcontrol config set interval 1m
-  clawcontrol config set insecure true`,
+  mantler config set server https://control.example.com
+  mantler config set interval 1m
+  mantler config set insecure true`,
 	Args: cobra.ExactArgs(2),
 	Run:  runConfigSet,
 }
@@ -53,8 +53,8 @@ var configPathCmd = &cobra.Command{
 	Long: `Show the path to the configuration file.
 
 The path depends on whether running as root or as a regular user:
-- Root: /etc/clawcontrol/agent.json
-- User: ~/.clawcontrol/agent.json`,
+- Root: /etc/mantler/agent.json
+- User: ~/.mantler/agent.json`,
 	Run: runConfigPath,
 }
 

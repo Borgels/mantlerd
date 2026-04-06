@@ -48,10 +48,10 @@ const gooseInstallScriptURL = "https://github.com/block/goose/raw/main/download_
 
 func NewExecutor(runtimeManager *runtime.Manager, cfg config.Config, progress func(payload types.AckRequest)) *Executor {
 	return &Executor{
-		runtimeManager:  runtimeManager,
-		cfg:             cfg,
-		progress:        progress,
-		activeCancel:    make(map[string]context.CancelFunc),
+		runtimeManager: runtimeManager,
+		cfg:            cfg,
+		progress:       progress,
+		activeCancel:   make(map[string]context.CancelFunc),
 		activeManifests: make(map[string]*types.ResourceManifest),
 	}
 }
@@ -476,10 +476,10 @@ type requiredProfileFile struct {
 // Container paths like /app/* are written to host equivalents.
 var runtimeMountPaths = map[string]map[string]string{
 	"vllm": {
-		"/app": "/opt/clawcontrol/vllm-app",
+		"/app": "/opt/mantler/vllm-app",
 	},
 	"tensorrt": {
-		"/app": "/opt/clawcontrol/tensorrt-app",
+		"/app": "/opt/mantler/tensorrt-app",
 	},
 }
 
@@ -545,7 +545,7 @@ func applyRuntimeProfileOverrides(params map[string]interface{}, runtimeHint str
 
 	switch runtimeName {
 	case "vllm":
-		values := readEnvFile("/etc/clawcontrol/vllm.env")
+		values := readEnvFile("/etc/mantler/vllm.env")
 		if strings.TrimSpace(profile.ContainerImage) != "" {
 			values["VLLM_CONTAINER_IMAGE"] = strings.TrimSpace(profile.ContainerImage)
 		}
@@ -558,9 +558,9 @@ func applyRuntimeProfileOverrides(params map[string]interface{}, runtimeHint str
 			}
 			values[strings.TrimSpace(key)] = strings.TrimSpace(value)
 		}
-		return writeEnvFile("/etc/clawcontrol/vllm.env", values)
+		return writeEnvFile("/etc/mantler/vllm.env", values)
 	case "tensorrt":
-		values := readEnvFile("/etc/clawcontrol/tensorrt.env")
+		values := readEnvFile("/etc/mantler/tensorrt.env")
 		if strings.TrimSpace(profile.ContainerImage) != "" {
 			values["TENSORRT_CONTAINER_IMAGE"] = strings.TrimSpace(profile.ContainerImage)
 		}
@@ -573,7 +573,7 @@ func applyRuntimeProfileOverrides(params map[string]interface{}, runtimeHint str
 			}
 			values[strings.TrimSpace(key)] = strings.TrimSpace(value)
 		}
-		return writeEnvFile("/etc/clawcontrol/tensorrt.env", values)
+		return writeEnvFile("/etc/mantler/tensorrt.env", values)
 	default:
 		return nil
 	}
@@ -695,7 +695,7 @@ func withVLLMRuntimeEnv(params map[string]interface{}, fn func() error) error {
 }
 
 func persistVLLMEnvOverrides(mode string, image string) error {
-	const vllmEnvPath = "/etc/clawcontrol/vllm.env"
+	const vllmEnvPath = "/etc/mantler/vllm.env"
 	if mode == "" && image == "" {
 		return nil
 	}
@@ -750,7 +750,7 @@ func persistVLLMEnvOverrides(mode string, image string) error {
 }
 
 func (e *Executor) startAgentUpdate(version string) (string, error) {
-	installer := "https://raw.githubusercontent.com/Borgels/clawcontrol-agent/master/scripts/install.sh"
+	installer := "https://raw.githubusercontent.com/Borgels/mantlerd/master/scripts/install.sh"
 	commandParts := []string{
 		"curl", "-fsSL", shellQuote(installer), "|", "sh", "-s", "--",
 		"--token", shellQuote(e.cfg.Token),
@@ -767,7 +767,7 @@ func (e *Executor) startAgentUpdate(version string) (string, error) {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "sh", "-c", commandLine)
-	cmd.Env = append(os.Environ(), "CLAWCONTROL_AGENT_SELF_UPDATE=true")
+	cmd.Env = append(os.Environ(), "MANTLERD_SELF_UPDATE=true", "CLAWCONTROL_AGENT_SELF_UPDATE=true")
 	output, err := cmd.CombinedOutput()
 	details := strings.TrimSpace(string(output))
 	if details == "" {

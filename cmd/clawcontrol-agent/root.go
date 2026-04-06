@@ -19,9 +19,9 @@ var (
 )
 
 var rootCmd = &cobra.Command{
-	Use:   "clawcontrol",
-	Short: "ClawControl agent for machine management",
-	Long: `ClawControl agent is a lightweight machine agent for ClawControl.
+	Use:   "mantler",
+	Short: "Mantler daemon CLI for machine management",
+	Long: `Mantler daemon is a lightweight machine agent for Mantler.
 
 It performs periodic authenticated check-ins, reports machine metadata,
 pulls pending commands, and executes allowlisted commands.`,
@@ -31,8 +31,8 @@ func init() {
 	cobra.OnInitialize(initConfig)
 
 	// Persistent flags (available to all subcommands)
-	rootCmd.PersistentFlags().StringVarP(&cfgFile, "config", "c", "", "config file (default is /etc/clawcontrol/agent.json or ~/.clawcontrol/agent.json)")
-	rootCmd.PersistentFlags().StringVarP(&serverURL, "server", "s", "", "ClawControl server URL")
+	rootCmd.PersistentFlags().StringVarP(&cfgFile, "config", "c", "", "config file (default is /etc/mantler/agent.json or ~/.mantler/agent.json)")
+	rootCmd.PersistentFlags().StringVarP(&serverURL, "server", "s", "", "Mantler server URL")
 	rootCmd.PersistentFlags().StringVarP(&token, "token", "t", "", "Machine registration token")
 	rootCmd.PersistentFlags().StringVarP(&machineID, "machine", "m", "", "Machine ID")
 	rootCmd.PersistentFlags().StringVarP(&interval, "interval", "i", "30s", "Check-in interval")
@@ -54,13 +54,14 @@ func initConfig() {
 	} else {
 		// Check if running as root
 		if os.Geteuid() == 0 {
-			viper.SetConfigFile("/etc/clawcontrol/agent.json")
+			viper.SetConfigFile("/etc/mantler/agent.json")
 		} else {
 			home, err := os.UserHomeDir()
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error getting home directory: %v\n", err)
 				os.Exit(1)
 			}
+			viper.AddConfigPath(home + "/.mantler")
 			viper.AddConfigPath(home + "/.clawcontrol")
 			viper.SetConfigName("agent")
 			viper.SetConfigType("json")
