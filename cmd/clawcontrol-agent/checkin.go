@@ -43,13 +43,15 @@ func runCheckin(cmd *cobra.Command, args []string) {
 	}
 
 	// Create runtime manager and executor
+	outcomes := &outcomeBuffer{}
 	runtimeManager := runtime.NewManager()
+	runtimeManager.SetOutcomeReporter(outcomes.Add)
 	executor := commands.NewExecutor(runtimeManager, cfg, func(payload types.AckRequest) {
 		sendInProgressAck(cl, payload)
-	})
+	}, outcomes.Add)
 
 	// Run check-in
-	runCheckIn(cfg, cl, runtimeManager, executor)
+	runCheckIn(cfg, cl, runtimeManager, executor, outcomes)
 
 	fmt.Println("Check-in completed successfully")
 }

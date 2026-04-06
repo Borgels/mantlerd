@@ -19,14 +19,16 @@ import (
 const orchestratorScannerMaxTokenSize = 1024 * 1024
 
 type orchestratorExecParams struct {
-	OrchestratorID   string
-	OrchestratorType string
-	Command          string
-	Args             []string
-	WorkingDir       string
-	Task             map[string]interface{}
-	Skills           []map[string]interface{}
-	ResourceManifest *types.ResourceManifest
+	OrchestratorID      string
+	OrchestratorType    string
+	CompatibilityPlanID string
+	MantleFingerprint   string
+	Command             string
+	Args                []string
+	WorkingDir          string
+	Task                map[string]interface{}
+	Skills              []map[string]interface{}
+	ResourceManifest    *types.ResourceManifest
 }
 
 type orchestratorExecState struct {
@@ -99,6 +101,7 @@ func (e *Executor) runOrchestratorExec(command types.AgentCommand) (ExecutionRes
 	if params.ResourceManifest != nil {
 		e.registerManifest(command.ID, params.ResourceManifest)
 		defer e.unregisterManifest(command.ID)
+		preflightStarted := time.Now()
 		preflight, preflightErr := manifest.RunPreflight(
 			ctx,
 			*params.ResourceManifest,
@@ -113,6 +116,15 @@ func (e *Executor) runOrchestratorExec(command types.AgentCommand) (ExecutionRes
 			},
 		)
 		if preflightErr != nil {
+			e.emitOutcome(types.OutcomeEvent{
+				PlanID:            params.CompatibilityPlanID,
+				MantleFingerprint: params.MantleFingerprint,
+				EventType:         "startup_failure",
+				DurationMs:        time.Since(preflightStarted).Milliseconds(),
+				CrashSignature:    "manifest_preflight_failed",
+				Detail:            preflightErr.Error(),
+				Timestamp:         time.Now().UTC().Format(time.RFC3339),
+			})
 			return ExecutionResult{}, fmt.Errorf("manifest preflight failed: %w", preflightErr)
 		}
 		if preflight != nil && !preflight.Ready {
@@ -120,8 +132,25 @@ func (e *Executor) runOrchestratorExec(command types.AgentCommand) (ExecutionRes
 			if len(preflight.Issues) > 0 {
 				detail = strings.Join(preflight.Issues, " ")
 			}
+			e.emitOutcome(types.OutcomeEvent{
+				PlanID:            params.CompatibilityPlanID,
+				MantleFingerprint: params.MantleFingerprint,
+				EventType:         "startup_failure",
+				DurationMs:        time.Since(preflightStarted).Milliseconds(),
+				CrashSignature:    "manifest_preflight_not_ready",
+				Detail:            detail,
+				Timestamp:         time.Now().UTC().Format(time.RFC3339),
+			})
 			return ExecutionResult{Details: detail}, fmt.Errorf(detail)
 		}
+		e.emitOutcome(types.OutcomeEvent{
+			PlanID:            params.CompatibilityPlanID,
+			MantleFingerprint: params.MantleFingerprint,
+			EventType:         "readiness",
+			DurationMs:        time.Since(preflightStarted).Milliseconds(),
+			Detail:            "manifest preflight passed",
+			Timestamp:         time.Now().UTC().Format(time.RFC3339),
+		})
 		manifestFile, err = writeOrchestratorPayloadFile("manifest", params.ResourceManifest)
 		if err != nil {
 			return ExecutionResult{}, err
@@ -142,6 +171,16 @@ func (e *Executor) runOrchestratorExec(command types.AgentCommand) (ExecutionRes
 					event.Content = msg
 				}
 				e.emitHarnessProgress(command.ID, msg, event)
+				if eventType == "error" {
+					e.emitOutcome(types.OutcomeEvent{
+						PlanID:            params.CompatibilityPlanID,
+						MantleFingerprint: params.MantleFingerprint,
+						EventType:         "crash",
+						CrashSignature:    "watchdog_error",
+						Detail:            msg,
+						Timestamp:         time.Now().UTC().Format(time.RFC3339),
+					})
+				}
 			},
 		)
 	}
@@ -232,6 +271,19 @@ func (e *Executor) runOrchestratorExec(command types.AgentCommand) (ExecutionRes
 		if lastLine == "" {
 			lastLine = err.Error()
 		}
+		exitCode := 1
+		if cmd.ProcessState != nil {
+			exitCode = cmd.ProcessState.ExitCode()
+		}
+		e.emitOutcome(types.OutcomeEvent{
+			PlanID:            params.CompatibilityPlanID,
+			MantleFingerprint: params.MantleFingerprint,
+			EventType:         "startup_failure",
+			ExitCode:          exitCode,
+			CrashSignature:    "orchestrator_exec_failed",
+			Detail:            lastLine,
+			Timestamp:         time.Now().UTC().Format(time.RFC3339),
+		})
 		return ExecutionResult{Details: lastLine}, fmt.Errorf("orchestrator execution failed: %w", err)
 	}
 
@@ -239,6 +291,15 @@ func (e *Executor) runOrchestratorExec(command types.AgentCommand) (ExecutionRes
 	if summary == "" {
 		summary = fmt.Sprintf("%s completed successfully.", params.OrchestratorType)
 	}
+
+	e.emitOutcome(types.OutcomeEvent{
+		PlanID:            params.CompatibilityPlanID,
+		MantleFingerprint: params.MantleFingerprint,
+		EventType:         "startup_success",
+		ExitCode:          0,
+		Detail:            summary,
+		Timestamp:         time.Now().UTC().Format(time.RFC3339),
+	})
 
 	return ExecutionResult{
 		Details: summary,
@@ -448,11 +509,13 @@ func writeOrchestratorPayloadFile(prefix string, payload any) (string, error) {
 
 func parseOrchestratorExecParams(params map[string]interface{}) (orchestratorExecParams, error) {
 	result := orchestratorExecParams{
-		OrchestratorID:   optionalStringParam(params, "orchestratorId"),
-		OrchestratorType: optionalStringParam(params, "orchestratorType"),
-		Command:          optionalStringParam(params, "command"),
-		WorkingDir:       optionalStringParam(params, "workingDir"),
-		Task:             map[string]interface{}{},
+		OrchestratorID:      optionalStringParam(params, "orchestratorId"),
+		OrchestratorType:    optionalStringParam(params, "orchestratorType"),
+		CompatibilityPlanID: optionalStringParam(params, "compatibilityPlanId"),
+		MantleFingerprint:   optionalStringParam(params, "mantleFingerprint"),
+		Command:             optionalStringParam(params, "command"),
+		WorkingDir:          optionalStringParam(params, "workingDir"),
+		Task:                map[string]interface{}{},
 	}
 	if result.OrchestratorType == "" {
 		return result, fmt.Errorf("missing orchestratorType param")

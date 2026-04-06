@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -40,18 +41,21 @@ func runStart(cmd *cobra.Command, args []string) {
 		log.Fatalf("create api client: %v", err)
 	}
 
+	outcomes := &outcomeBuffer{}
+
 	// Create runtime manager and executor
 	runtimeManager := runtime.NewManager()
+	runtimeManager.SetOutcomeReporter(outcomes.Add)
 	executor := commands.NewExecutor(runtimeManager, cfg, func(payload types.AckRequest) {
 		sendInProgressAck(cl, payload)
-	})
+	}, outcomes.Add)
 
 	// Set up signal handling
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
 	// Run initial check-in
-	runCheckIn(cfg, cl, runtimeManager, executor)
+	runCheckIn(cfg, cl, runtimeManager, executor, outcomes)
 
 	// Start ticker for periodic check-ins
 	ticker := time.NewTicker(cfg.Interval)
@@ -63,7 +67,7 @@ func runStart(cmd *cobra.Command, args []string) {
 			log.Println("Shutting down agent...")
 			return
 		case <-ticker.C:
-			runCheckIn(cfg, cl, runtimeManager, executor)
+			runCheckIn(cfg, cl, runtimeManager, executor, outcomes)
 		}
 	}
 }
@@ -127,7 +131,54 @@ func loadConfig(cmd *cobra.Command) config.Config {
 	return cfg
 }
 
-func runCheckIn(cfg config.Config, cl *client.Client, runtimeManager *runtime.Manager, executor *commands.Executor) {
+type outcomeBuffer struct {
+	mu     sync.Mutex
+	events []types.OutcomeEvent
+}
+
+func (b *outcomeBuffer) Add(event types.OutcomeEvent) {
+	if strings.TrimSpace(event.EventType) == "" {
+		return
+	}
+	if strings.TrimSpace(event.Timestamp) == "" {
+		event.Timestamp = time.Now().UTC().Format(time.RFC3339)
+	}
+	b.mu.Lock()
+	b.events = append(b.events, event)
+	b.mu.Unlock()
+}
+
+func (b *outcomeBuffer) Snapshot() []types.OutcomeEvent {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(b.events) == 0 {
+		return nil
+	}
+	result := make([]types.OutcomeEvent, len(b.events))
+	copy(result, b.events)
+	return result
+}
+
+func (b *outcomeBuffer) DropPrefix(count int) {
+	if count <= 0 {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if count >= len(b.events) {
+		b.events = nil
+		return
+	}
+	b.events = append([]types.OutcomeEvent{}, b.events[count:]...)
+}
+
+func runCheckIn(
+	cfg config.Config,
+	cl *client.Client,
+	runtimeManager *runtime.Manager,
+	executor *commands.Executor,
+	outcomes *outcomeBuffer,
+) {
 	cachedDesired := loadCachedDesiredConfig()
 
 	report := discovery.Collect()
@@ -149,6 +200,7 @@ func runCheckIn(cfg config.Config, cl *client.Client, runtimeManager *runtime.Ma
 		runtimeVersion = runtimeManager.RuntimeVersion(readyRuntimeNames[0])
 	}
 
+	pendingOutcomes := outcomes.Snapshot()
 	payload := types.CheckinRequest{
 		MachineID:              cfg.MachineID,
 		Hostname:               report.Hostname,
@@ -166,6 +218,7 @@ func runCheckIn(cfg config.Config, cl *client.Client, runtimeManager *runtime.Ma
 		InstalledModels:        toInstalledModels(runtimeManager),
 		InstalledHarnesses:     toInstalledHarnesses(cachedDesired),
 		InstalledOrchestrators: toInstalledOrchestrators(cachedDesired),
+		OutcomeEvents:          pendingOutcomes,
 	}
 
 	resp, err := client.Retry(context.Background(), 3, func() (types.CheckinResponse, error) {
@@ -175,6 +228,9 @@ func runCheckIn(cfg config.Config, cl *client.Client, runtimeManager *runtime.Ma
 		log.Printf("checkin error: %v", err)
 		enforceDesiredConfig(runtimeManager, cachedDesired)
 		return
+	}
+	if len(pendingOutcomes) > 0 {
+		outcomes.DropPrefix(len(pendingOutcomes))
 	}
 
 	if err := saveCachedDesiredConfig(resp.DesiredConfig); err != nil {
@@ -186,6 +242,8 @@ func runCheckIn(cfg config.Config, cl *client.Client, runtimeManager *runtime.Ma
 		refreshPayload := payload
 		refreshPayload.InstalledHarnesses = desiredHarnesses
 		refreshPayload.InstalledOrchestrators = desiredOrchestrators
+		// Outcome events were already sent in the main check-in above.
+		refreshPayload.OutcomeEvents = nil
 		refreshCtx, refreshCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer refreshCancel()
 		if _, err := cl.Checkin(refreshCtx, refreshPayload); err != nil {

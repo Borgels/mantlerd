@@ -1,8 +1,11 @@
 package commands
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Borgels/clawcontrol-agent/internal/types"
 )
@@ -138,5 +141,67 @@ func TestConsumeGooseReplyStreamNormalizesEvents(t *testing.T) {
 	}
 	if events[3].Type != "usage" || events[3].Usage == nil || events[3].Usage.TotalTokens != 15 {
 		t.Fatalf("expected usage event with total tokens, got %+v", events[3])
+	}
+}
+
+func TestRunCodexExecEmitsTaskSuccessOutcome(t *testing.T) {
+	tempDir := t.TempDir()
+	scriptPath := filepath.Join(tempDir, "fake-codex.sh")
+	script := strings.Join([]string{
+		"#!/bin/sh",
+		"echo '{\"type\":\"thread.started\",\"thread_id\":\"thread-1\"}'",
+		"echo '{\"type\":\"item.completed\",\"item\":{\"id\":\"item_1\",\"type\":\"agent_message\",\"text\":\"done\"}}'",
+		"echo '{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":3,\"output_tokens\":5}}'",
+		"exit 0",
+	}, "\n")
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	var outcomes []types.OutcomeEvent
+	executor := &Executor{
+		outcome: func(event types.OutcomeEvent) {
+			outcomes = append(outcomes, event)
+		},
+	}
+
+	_, err := executor.runCodexExec("cmd-1", harnessExecParams{
+		HarnessID:           "h1",
+		HarnessType:         "codex_cli",
+		DirectTargetID:      "dt-1",
+		TaskID:              "task-1",
+		CompatibilityPlanID: "plan-1",
+		MantleFingerprint:   "mf-1",
+		BaseFingerprint:     "bf-1",
+		TransportCommand:    scriptPath,
+		TransportArgs:       []string{"exec"},
+		Messages: []harnessExecMessage{
+			{Role: "user", Content: "hello"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("expected success, got error: %v", err)
+	}
+	if len(outcomes) == 0 {
+		t.Fatalf("expected at least one outcome event")
+	}
+	last := outcomes[len(outcomes)-1]
+	if last.EventType != "task_success" {
+		t.Fatalf("expected task_success, got %s", last.EventType)
+	}
+	if last.TaskID != "task-1" || last.PlanID != "plan-1" || last.MantleFingerprint != "mf-1" || last.BaseFingerprint != "bf-1" {
+		t.Fatalf("expected context fields to be propagated, got %+v", last)
+	}
+	if last.TokenUsage == nil || last.TokenUsage.PromptTokens != 3 || last.TokenUsage.CompletionTokens != 5 || last.TokenUsage.TotalTokens != 8 {
+		t.Fatalf("expected token usage to be emitted, got %+v", last.TokenUsage)
+	}
+	if last.DurationMs < 0 {
+		t.Fatalf("expected non-negative duration, got %d", last.DurationMs)
+	}
+	if strings.TrimSpace(last.Timestamp) == "" {
+		t.Fatalf("expected timestamp to be set")
+	}
+	if _, err := time.Parse(time.RFC3339, last.Timestamp); err != nil {
+		t.Fatalf("expected RFC3339 timestamp, got %q", last.Timestamp)
 	}
 }
