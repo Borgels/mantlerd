@@ -14,6 +14,9 @@ import (
 type HardwareReport struct {
 	Hostname        string
 	Addresses       []string
+	OS              string
+	CPUArch         string
+	GPUVendor       string
 	HardwareSummary string
 	RAMTotalMB      int
 	GPUs            []GPUInfo
@@ -80,10 +83,34 @@ func Collect() HardwareReport {
 	return HardwareReport{
 		Hostname:        hostname,
 		Addresses:       addresses,
+		OS:              runtime.GOOS,
+		CPUArch:         normalizeArch(runtime.GOARCH),
+		GPUVendor:       inferGPUVendor(gpus),
 		HardwareSummary: fmt.Sprintf("%d vCPU / %d GB / %s", cpu, ramGiB, gpuSummary),
 		RAMTotalMB:      ramTotalMB,
 		GPUs:            gpus,
 	}
+}
+
+func normalizeArch(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "amd64", "x64", "x86_64":
+		return "x86_64"
+	case "arm64", "aarch64":
+		return "arm64"
+	default:
+		return strings.ToLower(strings.TrimSpace(value))
+	}
+}
+
+func inferGPUVendor(gpus []GPUInfo) string {
+	if len(gpus) > 0 {
+		return "nvidia"
+	}
+	if runtime.GOOS == "darwin" {
+		return "apple"
+	}
+	return "none"
 }
 
 func collectAddresses() []string {

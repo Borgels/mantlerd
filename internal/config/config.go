@@ -33,10 +33,6 @@ func DefaultConfigPath() string {
 		if _, err := os.Stat(preferred); err == nil {
 			return preferred
 		}
-		const legacy = "/etc/clawcontrol/agent.json"
-		if _, err := os.Stat(legacy); err == nil {
-			return legacy
-		}
 		return preferred
 	}
 	home, err := os.UserHomeDir()
@@ -46,10 +42,6 @@ func DefaultConfigPath() string {
 	preferred := filepath.Join(home, ".mantler", "agent.json")
 	if _, err := os.Stat(preferred); err == nil {
 		return preferred
-	}
-	legacy := filepath.Join(home, ".clawcontrol", "agent.json")
-	if _, err := os.Stat(legacy); err == nil {
-		return legacy
 	}
 	return preferred
 }

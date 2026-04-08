@@ -3,7 +3,7 @@ WORKDIR /src
 COPY go.mod ./
 COPY cmd ./cmd
 COPY internal ./internal
-RUN go build -o /out/mantlerd ./cmd/clawcontrol-agent
+RUN go build -o /out/mantlerd ./cmd/mantler
 
 FROM alpine:3.20
 RUN addgroup -S claw && adduser -S claw -G claw

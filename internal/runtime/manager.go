@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Borgels/clawcontrol-agent/internal/types"
+	"github.com/Borgels/mantlerd/internal/types"
 )
 
 type Manager struct {
@@ -21,13 +21,7 @@ type Manager struct {
 }
 
 func NewManager() *Manager {
-	drivers := map[string]Driver{
-		"ollama":   newOllamaDriver(),
-		"vllm":     newVLLMDriver(),
-		"lmstudio": newLMStudioDriver(),
-		"tensorrt": newTensorRTDriver(),
-	}
-	return &Manager{drivers: drivers}
+	return &Manager{drivers: NewDriverRegistry()}
 }
 
 func (m *Manager) SetOutcomeReporter(reporter func(event types.OutcomeEvent)) {

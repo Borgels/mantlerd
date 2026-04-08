@@ -8,11 +8,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Borgels/clawcontrol-agent/internal/client"
-	"github.com/Borgels/clawcontrol-agent/internal/config"
-	"github.com/Borgels/clawcontrol-agent/internal/discovery"
-	"github.com/Borgels/clawcontrol-agent/internal/runtime"
-	"github.com/Borgels/clawcontrol-agent/internal/types"
+	"github.com/Borgels/mantlerd/internal/client"
+	"github.com/Borgels/mantlerd/internal/config"
+	"github.com/Borgels/mantlerd/internal/discovery"
+	"github.com/Borgels/mantlerd/internal/runtime"
+	"github.com/Borgels/mantlerd/internal/types"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -168,6 +168,9 @@ func runDoctor(cmd *cobra.Command, args []string) {
 				MachineID:       cfg.MachineID,
 				Hostname:        report.Hostname,
 				Addresses:       report.Addresses,
+				OS:              report.OS,
+				CPUArch:         report.CPUArch,
+				GPUVendor:       report.GPUVendor,
 				HardwareSummary: report.HardwareSummary,
 				AgentVersion:    agentVersion,
 			})
@@ -198,7 +201,7 @@ func runDoctor(cmd *cobra.Command, args []string) {
 		fmt.Println("✗")
 		fmt.Println("  No runtimes installed")
 		fmt.Println("  Install a runtime: mantler runtime install <runtime>")
-		fmt.Println("  Supported: ollama, lmstudio, vllm, tensorrt")
+		fmt.Println("  Supported: ollama, llamacpp, vllm, tensorrt")
 		allPassed = false
 	} else {
 		fmt.Println("✓")

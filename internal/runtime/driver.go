@@ -3,7 +3,7 @@ package runtime
 import (
 	"context"
 
-	"github.com/Borgels/clawcontrol-agent/internal/types"
+	"github.com/Borgels/mantlerd/internal/types"
 )
 
 type Driver interface {

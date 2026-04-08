@@ -3,15 +3,16 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 
-	"github.com/Borgels/clawcontrol-agent/internal/runtime"
+	"github.com/Borgels/mantlerd/internal/runtime"
 	"github.com/spf13/cobra"
 )
 
 var runtimeCmd = &cobra.Command{
 	Use:   "runtime",
 	Short: "Manage ML runtimes",
-	Long: `Manage ML runtimes (Ollama, LM Studio, vLLM, TensorRT).
+	Long: `Manage ML runtimes across backend families (Ollama, vLLM, llama.cpp bridges, TensorRT-LLM).
 
 Runtimes are the inference engines that execute models. This command
 allows you to list, install, and manage different runtime types.`,
@@ -52,11 +53,7 @@ This command downloads and installs the specified runtime if it's not
 already installed. The runtime will be configured for use with Mantler.
 
 Supported runtimes:
-  ollama    - Ollama inference engine
-  lmstudio  - LM Studio
-  vllm      - vLLM inference server
-  tensorrt  - NVIDIA TensorRT
-
+` + supportedRuntimesHelpText() + `
 Examples:
   mantler runtime install ollama
   mantler runtime install vllm`,
@@ -193,17 +190,9 @@ func showRuntimeStatus(manager *runtime.Manager, runtimeName string) {
 func runRuntimeInstall(cmd *cobra.Command, args []string) {
 	runtimeName := args[0]
 
-	// Validate runtime type
-	validRuntimes := map[string]bool{
-		"ollama":   true,
-		"lmstudio": true,
-		"vllm":     true,
-		"tensorrt": true,
-	}
-
-	if !validRuntimes[runtimeName] {
+	if !runtime.IsSupportedRuntimeName(runtimeName) {
 		fmt.Fprintf(os.Stderr, "Error: unknown runtime: %s\n", runtimeName)
-		fmt.Fprintln(os.Stderr, "Supported runtimes: ollama, lmstudio, vllm, tensorrt")
+		fmt.Fprintf(os.Stderr, "Supported runtimes: %s\n", strings.Join(runtime.SupportedRuntimeNames(), ", "))
 		os.Exit(1)
 	}
 
@@ -258,4 +247,13 @@ func runRuntimeRestart(cmd *cobra.Command, args []string) {
 	}
 
 	fmt.Printf("✓ Runtime %s restarted successfully\n", runtimeName)
+}
+
+func supportedRuntimesHelpText() string {
+	catalog := runtime.RuntimeCatalog()
+	lines := make([]string, 0, len(catalog))
+	for _, spec := range catalog {
+		lines = append(lines, fmt.Sprintf("  %-12s - %s (family: %s)", spec.Name, spec.DisplayName, spec.Family))
+	}
+	return strings.Join(lines, "\n") + "\n"
 }

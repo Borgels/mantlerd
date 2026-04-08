@@ -1,5 +1,5 @@
 APP_NAME=mantlerd
-CMD_DIR=clawcontrol-agent
+CMD_DIR=mantler
 
 .PHONY: build
 build:

@@ -8,11 +8,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Borgels/clawcontrol-agent/internal/client"
-	"github.com/Borgels/clawcontrol-agent/internal/commands"
-	"github.com/Borgels/clawcontrol-agent/internal/config"
-	"github.com/Borgels/clawcontrol-agent/internal/runtime"
-	"github.com/Borgels/clawcontrol-agent/internal/types"
+	"github.com/Borgels/mantlerd/internal/client"
+	"github.com/Borgels/mantlerd/internal/commands"
+	"github.com/Borgels/mantlerd/internal/config"
+	"github.com/Borgels/mantlerd/internal/runtime"
+	"github.com/Borgels/mantlerd/internal/types"
 )
 
 func TestRunCheckInFollowUpDoesNotResendOutcomeEvents(t *testing.T) {

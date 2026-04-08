@@ -13,7 +13,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Borgels/clawcontrol-agent/internal/types"
+	agenteval "github.com/Borgels/mantlerd/internal/eval"
+	"github.com/Borgels/mantlerd/internal/types"
 )
 
 type Client struct {
@@ -113,6 +114,105 @@ func (c *Client) Ack(ctx context.Context, payload types.AckRequest) error {
 		return fmt.Errorf("ack failed (%d): %s", resp.StatusCode, string(body))
 	}
 	return nil
+}
+
+func (c *Client) Recommend(ctx context.Context, q types.RecommendQuery) (*types.RecommendResponse, error) {
+	params := url.Values{}
+	if strings.TrimSpace(q.MachineID) != "" {
+		params.Set("machineId", strings.TrimSpace(q.MachineID))
+	}
+	if strings.TrimSpace(q.HardwareClass) != "" {
+		params.Set("hardwareClass", strings.TrimSpace(q.HardwareClass))
+	}
+	if strings.TrimSpace(q.Runtime) != "" {
+		params.Set("runtime", strings.TrimSpace(q.Runtime))
+	}
+	if strings.TrimSpace(q.ModelID) != "" {
+		params.Set("modelId", strings.TrimSpace(q.ModelID))
+	}
+	if strings.TrimSpace(q.Backend) != "" {
+		params.Set("backend", strings.TrimSpace(q.Backend))
+	}
+	if strings.TrimSpace(q.Harness) != "" {
+		params.Set("harness", strings.TrimSpace(q.Harness))
+	}
+	if strings.TrimSpace(q.Orchestrator) != "" {
+		params.Set("orchestrator", strings.TrimSpace(q.Orchestrator))
+	}
+	if strings.TrimSpace(q.Role) != "" {
+		params.Set("role", strings.TrimSpace(q.Role))
+	}
+	if strings.TrimSpace(q.Workload) != "" {
+		params.Set("workload", strings.TrimSpace(q.Workload))
+	}
+	if q.Limit > 0 {
+		params.Set("limit", fmt.Sprintf("%d", q.Limit))
+	}
+	urlWithQuery := c.baseURL + "/api/recommendations"
+	if encoded := params.Encode(); encoded != "" {
+		urlWithQuery += "?" + encoded
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlWithQuery, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create recommendations request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("recommendations request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("recommendations failed (%d): %s", resp.StatusCode, string(body))
+	}
+	var envelope struct {
+		Data types.RecommendResponse `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		return nil, fmt.Errorf("decode recommendations response: %w", err)
+	}
+	return &envelope.Data, nil
+}
+
+func (c *Client) GetEvalPrompts(ctx context.Context, workload string, profile string) ([]agenteval.Prompt, error) {
+	params := url.Values{}
+	if strings.TrimSpace(workload) != "" {
+		params.Set("workload", strings.TrimSpace(workload))
+	}
+	if strings.TrimSpace(profile) != "" {
+		params.Set("profile", strings.TrimSpace(profile))
+	}
+	urlWithQuery := c.baseURL + "/api/eval/prompts"
+	if encoded := params.Encode(); encoded != "" {
+		urlWithQuery += "?" + encoded
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlWithQuery, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create eval prompts request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("eval prompts request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("eval prompts failed (%d): %s", resp.StatusCode, string(body))
+	}
+	var envelope struct {
+		Data struct {
+			Prompts []agenteval.Prompt `json:"prompts"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		return nil, fmt.Errorf("decode eval prompts response: %w", err)
+	}
+	if len(envelope.Data.Prompts) == 0 {
+		return nil, fmt.Errorf("eval prompts response was empty")
+	}
+	return envelope.Data.Prompts, nil
 }
 
 func Retry[T any](ctx context.Context, attempts int, fn func() (T, error)) (T, error) {

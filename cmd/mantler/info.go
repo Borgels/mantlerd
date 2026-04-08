@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/Borgels/clawcontrol-agent/internal/config"
-	"github.com/Borgels/clawcontrol-agent/internal/discovery"
-	"github.com/Borgels/clawcontrol-agent/internal/runtime"
+	"github.com/Borgels/mantlerd/internal/config"
+	"github.com/Borgels/mantlerd/internal/discovery"
+	"github.com/Borgels/mantlerd/internal/runtime"
 	"github.com/spf13/cobra"
 )
 

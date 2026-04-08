@@ -1,0 +1,213 @@
+package main
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"strings"
+	"time"
+
+	"github.com/Borgels/mantlerd/internal/client"
+	agenteval "github.com/Borgels/mantlerd/internal/eval"
+	"github.com/Borgels/mantlerd/internal/runtime"
+	"github.com/Borgels/mantlerd/internal/types"
+	"github.com/spf13/cobra"
+)
+
+var evalCmd = &cobra.Command{
+	Use:   "eval <model>",
+	Short: "Run workload-aware model evaluation",
+	Args:  cobra.ExactArgs(1),
+	Run:   runEval,
+}
+
+var (
+	evalWorkload string
+	evalProfile  string
+	evalRuntime  string
+	evalJSON     bool
+)
+
+var allowedEvalWorkloads = map[string]struct{}{
+	"coding": {}, "chat": {}, "creative": {}, "reasoning": {}, "agents": {}, "vision": {},
+}
+
+func init() {
+	rootCmd.AddCommand(evalCmd)
+	evalCmd.Flags().StringVar(&evalWorkload, "workload", "coding", "Workload (coding, chat, creative, reasoning, agents, vision)")
+	evalCmd.Flags().StringVar(&evalProfile, "profile", "quick", "Eval profile (quick, standard, deep)")
+	evalCmd.Flags().StringVar(&evalRuntime, "runtime", "", "Runtime hint (llamacpp, ollama, vllm, tensorrt)")
+	evalCmd.Flags().BoolVar(&evalJSON, "json", false, "Print raw JSON summary")
+}
+
+func runEval(cmd *cobra.Command, args []string) {
+	modelID := strings.TrimSpace(args[0])
+	if modelID == "" {
+		fmt.Fprintln(os.Stderr, "Model ID is required.")
+		os.Exit(1)
+	}
+	workload := strings.TrimSpace(evalWorkload)
+	if workload == "" {
+		workload = "coding"
+	}
+	if _, ok := allowedEvalWorkloads[workload]; !ok {
+		fmt.Fprintln(os.Stderr, "Invalid workload. Use coding, chat, creative, reasoning, agents, or vision.")
+		os.Exit(1)
+	}
+	profile := strings.TrimSpace(evalProfile)
+	if profile == "" {
+		profile = "quick"
+	}
+	if profile != "quick" && profile != "standard" && profile != "deep" {
+		fmt.Fprintln(os.Stderr, "Invalid profile. Use quick, standard, or deep.")
+		os.Exit(1)
+	}
+
+	cfg := loadConfig(cmd)
+	cl, err := client.New(cfg.ServerURL, cfg.Token, cfg.Insecure)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error creating API client: %v\n", err)
+		os.Exit(1)
+	}
+	prompts := localEvalPrompts(workload, profile)
+	promptCtx, promptCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	serverPrompts, promptErr := cl.GetEvalPrompts(promptCtx, workload, profile)
+	promptCancel()
+	if promptErr == nil && len(serverPrompts) > 0 {
+		prompts = serverPrompts
+	}
+	manager := runtime.NewManager()
+	if runtimeName := strings.TrimSpace(evalRuntime); runtimeName != "" {
+		_ = manager.EnsureRuntime(runtimeName)
+	}
+	runner := agenteval.NewRunner(manager)
+
+	fmt.Printf("Evaluating %s for %s (%s, %d prompts)\n", modelID, workload, profile, len(prompts))
+	summary, err := runner.Run(context.Background(), modelID, workload, profile, prompts, nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Eval failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	rating := 0
+	if !evalJSON {
+		printEvalSummary(summary)
+		reader := bufio.NewReader(os.Stdin)
+		fmt.Print("Rate this model (1-5, or skip): ")
+		answer, _ := reader.ReadString('\n')
+		answer = strings.TrimSpace(answer)
+		switch answer {
+		case "1", "2", "3", "4", "5":
+			rating = int(answer[0] - '0')
+		}
+	}
+
+	if evalJSON {
+		raw, marshalErr := json.MarshalIndent(summary, "", "  ")
+		if marshalErr != nil {
+			fmt.Fprintf(os.Stderr, "Failed to encode JSON output: %v\n", marshalErr)
+			os.Exit(1)
+		}
+		fmt.Println(string(raw))
+	}
+
+	err = reportEvalSummary(cl, cfg.MachineID, summary, workload, rating)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to report eval outcomes to server: %v\n", err)
+		return
+	}
+	if !evalJSON {
+		fmt.Println("Results reported to Mantler server.")
+	}
+}
+
+func reportEvalSummary(
+	cl *client.Client,
+	machineID string,
+	summary types.EvalRunSummary,
+	workload string,
+	rating int,
+) error {
+	events := make([]types.OutcomeEvent, 0, len(summary.Samples)+1)
+	for _, sample := range summary.Samples {
+		eventType := "task_failure"
+		if sample.Passed {
+			eventType = "task_success"
+		}
+		score := sample.QualityScore
+		events = append(events, types.OutcomeEvent{
+			EventType:  eventType,
+			Workload:   workload,
+			DurationMs: int64(sample.LatencyMs),
+			TokenUsage: &types.OutcomeTokenUsage{
+				PromptTokens:     0,
+				CompletionTokens: sample.OutputTokens,
+				TotalTokens:      sample.OutputTokens,
+			},
+			QualityScore: &score,
+			Detail:       sample.Notes,
+			Timestamp:    time.Now().UTC().Format(time.RFC3339),
+		})
+	}
+	if rating > 0 {
+		score := float64(rating * 20)
+		events = append(events, types.OutcomeEvent{
+			EventType:    "task_success",
+			Workload:     workload,
+			QualityScore: &score,
+			Detail:       fmt.Sprintf("User preference rating: %d/5", rating),
+			Timestamp:    time.Now().UTC().Format(time.RFC3339),
+		})
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	_, err := cl.Checkin(ctx, types.CheckinRequest{
+		MachineID:     machineID,
+		OutcomeEvents: events,
+	})
+	return err
+}
+
+func localEvalPrompts(workload string, profile string) []agenteval.Prompt {
+	base := []agenteval.Prompt{
+		{ID: workload + ":quality-1", Category: "quality", Workload: workload, Prompt: "Evaluate response quality for the selected workload."},
+		{ID: workload + ":speed-1", Category: "speed", Workload: workload, Prompt: "Measure throughput and latency."},
+		{ID: workload + ":stability-1", Category: "stability", Workload: workload, Prompt: "Check instruction consistency across runs."},
+		{ID: workload + ":tool-1", Category: "tool_use", Workload: workload, Prompt: "Assess tool-call correctness and order."},
+		{ID: workload + ":context-1", Category: "context", Workload: workload, Prompt: "Evaluate short vs long context behavior.", ContextLength: "long"},
+		{ID: workload + ":eff-1", Category: "efficiency", Workload: workload, Prompt: "Estimate resource efficiency under workload."},
+	}
+	switch profile {
+	case "deep":
+		return append(base, append(base, base...)...)
+	case "standard":
+		return append(base, base...)
+	default:
+		return base
+	}
+}
+
+func printEvalSummary(summary types.EvalRunSummary) {
+	var totalScore float64
+	passed := 0
+	for _, sample := range summary.Samples {
+		totalScore += sample.QualityScore
+		if sample.Passed {
+			passed++
+		}
+	}
+	avg := 0.0
+	if len(summary.Samples) > 0 {
+		avg = totalScore / float64(len(summary.Samples))
+	}
+	fmt.Printf("Samples: %d/%d passed, avg quality %.1f\n", passed, len(summary.Samples), avg)
+	if summary.ResourceUsage != nil {
+		fmt.Printf("Resource usage: RAM %d MB", summary.ResourceUsage.RAMMB)
+		if summary.ResourceUsage.VRAMMB > 0 {
+			fmt.Printf(", VRAM %d MB", summary.ResourceUsage.VRAMMB)
+		}
+		fmt.Println()
+	}
+}
