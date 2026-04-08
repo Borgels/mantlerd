@@ -175,7 +175,7 @@ func (c *Client) Recommend(ctx context.Context, q types.RecommendQuery) (*types.
 	return &envelope.Data, nil
 }
 
-func (c *Client) GetEvalPrompts(ctx context.Context, workload string, profile string) ([]agenteval.Prompt, error) {
+func (c *Client) GetEvalPrompts(ctx context.Context, workload string, profile string) ([]agenteval.Prompt, string, error) {
 	params := url.Values{}
 	if strings.TrimSpace(workload) != "" {
 		params.Set("workload", strings.TrimSpace(workload))
@@ -189,30 +189,31 @@ func (c *Client) GetEvalPrompts(ctx context.Context, workload string, profile st
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlWithQuery, nil)
 	if err != nil {
-		return nil, fmt.Errorf("create eval prompts request: %w", err)
+		return nil, "", fmt.Errorf("create eval prompts request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("eval prompts request failed: %w", err)
+		return nil, "", fmt.Errorf("eval prompts request failed: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("eval prompts failed (%d): %s", resp.StatusCode, string(body))
+		return nil, "", fmt.Errorf("eval prompts failed (%d): %s", resp.StatusCode, string(body))
 	}
 	var envelope struct {
 		Data struct {
-			Prompts []agenteval.Prompt `json:"prompts"`
+			Prompts          []agenteval.Prompt `json:"prompts"`
+			EvalSessionToken string             `json:"evalSessionToken"`
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
-		return nil, fmt.Errorf("decode eval prompts response: %w", err)
+		return nil, "", fmt.Errorf("decode eval prompts response: %w", err)
 	}
 	if len(envelope.Data.Prompts) == 0 {
-		return nil, fmt.Errorf("eval prompts response was empty")
+		return nil, "", fmt.Errorf("eval prompts response was empty")
 	}
-	return envelope.Data.Prompts, nil
+	return envelope.Data.Prompts, strings.TrimSpace(envelope.Data.EvalSessionToken), nil
 }
 
 func Retry[T any](ctx context.Context, attempts int, fn func() (T, error)) (T, error) {

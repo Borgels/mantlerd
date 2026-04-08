@@ -9,6 +9,8 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+
+	"github.com/Borgels/mantlerd/internal/types"
 )
 
 type HardwareReport struct {
@@ -20,6 +22,7 @@ type HardwareReport struct {
 	HardwareSummary string
 	RAMTotalMB      int
 	GPUs            []GPUInfo
+	Interconnect    *types.InterconnectReport
 }
 
 type GPUInfo struct {
@@ -89,6 +92,7 @@ func Collect() HardwareReport {
 		HardwareSummary: fmt.Sprintf("%d vCPU / %d GB / %s", cpu, ramGiB, gpuSummary),
 		RAMTotalMB:      ramTotalMB,
 		GPUs:            gpus,
+		Interconnect:    CollectInterconnect(),
 	}
 }
 

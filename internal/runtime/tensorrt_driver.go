@@ -132,6 +132,42 @@ func (d *tensorrtDriver) Version() string {
 	return ""
 }
 
+func (d *tensorrtDriver) RuntimeConfig() map[string]any {
+	env := d.readEnvConfigMap()
+	config := map[string]any{
+		"version":        d.Version(),
+		"containerImage": d.containerImage(),
+	}
+	if extraArgs := strings.TrimSpace(env["TENSORRT_EXTRA_ARGS"]); extraArgs != "" {
+		config["extraArgs"] = extraArgs
+	}
+
+	modelID := ""
+	if cfg, err := d.readConfig(); err == nil {
+		modelID = strings.TrimSpace(cfg.Model)
+	}
+	if modelID == "" {
+		modelID = strings.TrimSpace(env["TENSORRT_MODEL"])
+	}
+	if modelID == "" {
+		return config
+	}
+
+	if enginePath, ok := d.BuiltEnginePath(modelID); ok {
+		config["enginePath"] = enginePath
+		if buildConfig := d.readBuiltEngineConfig(modelID); len(buildConfig) > 0 {
+			if quantization, ok := buildConfig["quantization"].(string); ok && strings.TrimSpace(quantization) != "" {
+				config["quantization"] = quantization
+			}
+			if tpSize, ok := buildConfig["tpSize"].(float64); ok && tpSize > 0 {
+				config["tpSize"] = int(tpSize)
+			}
+		}
+	}
+
+	return config
+}
+
 func (d *tensorrtDriver) PrepareModelWithFlags(modelID string, flags *types.ModelFeatureFlags) error {
 	return d.PrepareModelWithFlagsCtx(context.Background(), modelID, flags)
 }
@@ -1043,6 +1079,22 @@ func (d *tensorrtDriver) builtModels() []string {
 	}
 	sort.Strings(models)
 	return models
+}
+
+func (d *tensorrtDriver) readBuiltEngineConfig(modelID string) map[string]any {
+	if strings.TrimSpace(modelID) == "" {
+		return nil
+	}
+	configPath := filepath.Join(tensorrtEngineDir(modelID), "config.json")
+	raw, err := os.ReadFile(configPath)
+	if err != nil || len(raw) == 0 {
+		return nil
+	}
+	parsed := map[string]any{}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return nil
+	}
+	return parsed
 }
 
 // removeBuiltEngine removes a built TensorRT engine.

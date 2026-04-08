@@ -24,6 +24,22 @@ func newOllamaDriver() Driver {
 	return &ollamaDriver{}
 }
 
+const ollamaRemoteTagsURL = "https://ollama.com/api/tags"
+
+var ollamaRemoteDigestCache = struct {
+	mu        sync.Mutex
+	expiresAt time.Time
+	digests   map[string]string
+}{}
+
+type ollamaTagsResponse struct {
+	Models []struct {
+		Model  string `json:"model"`
+		Name   string `json:"name"`
+		Digest string `json:"digest"`
+	} `json:"models"`
+}
+
 func (d *ollamaDriver) Name() string { return "ollama" }
 
 func (d *ollamaDriver) Install() error {
@@ -70,6 +86,22 @@ func (d *ollamaDriver) Version() string {
 	return strings.TrimSpace(string(output))
 }
 
+func (d *ollamaDriver) RuntimeConfig() map[string]any {
+	config := map[string]any{
+		"version": d.Version(),
+	}
+	if host := strings.TrimSpace(os.Getenv("OLLAMA_HOST")); host != "" {
+		config["host"] = host
+	}
+	for _, key := range []string{"OLLAMA_CONTEXT_SIZE", "OLLAMA_NUM_CTX"} {
+		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+			config["contextSize"] = value
+			break
+		}
+	}
+	return config
+}
+
 func (d *ollamaDriver) PullModel(modelID string) error {
 	if modelID == "" {
 		return fmt.Errorf("model ID is required")
@@ -107,6 +139,160 @@ func (d *ollamaDriver) HasModel(modelID string) bool {
 		}
 	}
 	return false
+}
+
+func (d *ollamaDriver) InstalledModels() []types.InstalledModel {
+	localDigests, err := d.fetchLocalTagDigests()
+	if err != nil {
+		modelIDs := d.ListModels()
+		models := make([]types.InstalledModel, 0, len(modelIDs))
+		for _, modelID := range modelIDs {
+			modelID = strings.TrimSpace(modelID)
+			if modelID == "" {
+				continue
+			}
+			models = append(models, types.InstalledModel{
+				ModelID: modelID,
+				Runtime: types.RuntimeOllama,
+				Status:  types.ModelReady,
+			})
+		}
+		return models
+	}
+
+	remoteDigests := fetchRemoteOllamaTagDigests()
+	knownModelIDs := make([]string, 0, len(localDigests))
+	for modelID := range localDigests {
+		knownModelIDs = append(knownModelIDs, modelID)
+	}
+	sort.Strings(knownModelIDs)
+
+	models := make([]types.InstalledModel, 0, len(knownModelIDs))
+	for _, modelID := range knownModelIDs {
+		digest := strings.TrimSpace(localDigests[modelID])
+		entry := types.InstalledModel{
+			ModelID: modelID,
+			Runtime: types.RuntimeOllama,
+			Digest:  digest,
+			Status:  types.ModelReady,
+		}
+		remoteDigest := strings.TrimSpace(remoteDigests[modelID])
+		if digest != "" && remoteDigest != "" {
+			updateAvailable := !digestsMatch(digest, remoteDigest)
+			entry.UpdateAvailable = &updateAvailable
+		}
+		models = append(models, entry)
+	}
+	return models
+}
+
+func (d *ollamaDriver) fetchLocalTagDigests() (map[string]string, error) {
+	req, err := http.NewRequest(http.MethodGet, d.baseURL()+"/api/tags", nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := (&http.Client{Timeout: 4 * time.Second}).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("ollama local tags failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	var parsed ollamaTagsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+		return nil, err
+	}
+	result := make(map[string]string, len(parsed.Models))
+	for _, model := range parsed.Models {
+		modelID := strings.TrimSpace(model.Model)
+		if modelID == "" {
+			modelID = strings.TrimSpace(model.Name)
+		}
+		if modelID == "" {
+			continue
+		}
+		result[modelID] = strings.TrimSpace(model.Digest)
+	}
+	return result, nil
+}
+
+func fetchRemoteOllamaTagDigests() map[string]string {
+	now := time.Now()
+	ollamaRemoteDigestCache.mu.Lock()
+	if now.Before(ollamaRemoteDigestCache.expiresAt) && ollamaRemoteDigestCache.digests != nil {
+		cached := cloneDigestMap(ollamaRemoteDigestCache.digests)
+		ollamaRemoteDigestCache.mu.Unlock()
+		return cached
+	}
+	ollamaRemoteDigestCache.mu.Unlock()
+
+	req, err := http.NewRequest(http.MethodGet, ollamaRemoteTagsURL, nil)
+	if err != nil {
+		return nil
+	}
+	resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil
+	}
+
+	var parsed ollamaTagsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+		return nil
+	}
+	digests := make(map[string]string, len(parsed.Models))
+	for _, model := range parsed.Models {
+		modelID := strings.TrimSpace(model.Model)
+		if modelID == "" {
+			modelID = strings.TrimSpace(model.Name)
+		}
+		if modelID == "" {
+			continue
+		}
+		digest := strings.TrimSpace(model.Digest)
+		if digest == "" {
+			continue
+		}
+		digests[modelID] = digest
+	}
+
+	ollamaRemoteDigestCache.mu.Lock()
+	ollamaRemoteDigestCache.digests = cloneDigestMap(digests)
+	ollamaRemoteDigestCache.expiresAt = time.Now().Add(10 * time.Minute)
+	ollamaRemoteDigestCache.mu.Unlock()
+	return digests
+}
+
+func cloneDigestMap(input map[string]string) map[string]string {
+	if len(input) == 0 {
+		return nil
+	}
+	cloned := make(map[string]string, len(input))
+	for key, value := range input {
+		cloned[key] = value
+	}
+	return cloned
+}
+
+func normalizeDigest(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	value = strings.TrimPrefix(value, "sha256:")
+	return value
+}
+
+func digestsMatch(left string, right string) bool {
+	left = normalizeDigest(left)
+	right = normalizeDigest(right)
+	if left == "" || right == "" {
+		return false
+	}
+	return left == right || strings.HasPrefix(left, right) || strings.HasPrefix(right, left)
 }
 
 type ollamaGenerateRequest struct {
@@ -315,10 +501,8 @@ func (d *ollamaDriver) PrepareModelWithFlags(modelID string, flags *types.ModelF
 	if modelID == "" {
 		return fmt.Errorf("model ID is required")
 	}
-	if !d.HasModel(modelID) {
-		if err := d.PullModel(modelID); err != nil {
-			return err
-		}
+	if err := d.PullModel(modelID); err != nil {
+		return err
 	}
 	if flags == nil {
 		return nil

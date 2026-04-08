@@ -122,6 +122,22 @@ func (m *Manager) RuntimeVersions() map[types.RuntimeType]string {
 	return versions
 }
 
+func (m *Manager) RuntimeConfigs() map[types.RuntimeType]map[string]any {
+	configs := map[types.RuntimeType]map[string]any{}
+	for runtimeName, driver := range m.drivers {
+		configurable, ok := driver.(ConfigurableDriver)
+		if !ok {
+			continue
+		}
+		cfg := configurable.RuntimeConfig()
+		if len(cfg) == 0 {
+			continue
+		}
+		configs[types.RuntimeType(runtimeName)] = cfg
+	}
+	return configs
+}
+
 func (m *Manager) InstallRuntime(runtimeName string) error {
 	driver, err := m.driverFor(runtimeName)
 	if err != nil {

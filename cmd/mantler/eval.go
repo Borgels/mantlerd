@@ -84,13 +84,15 @@ func runEval(cmd *cobra.Command, args []string) {
 		fmt.Fprintln(os.Stderr, "Stealth mode enabled: running local eval only (no prompt fetch, no telemetry upload).")
 	}
 	prompts := localEvalPrompts(workload, profile)
+	evalSessionToken := ""
 	runtimeHint := strings.TrimSpace(evalRuntime)
 	if reportingCtx != nil {
 		promptCtx, promptCancel := context.WithTimeout(context.Background(), 15*time.Second)
-		serverPrompts, promptErr := reportingCtx.client.GetEvalPrompts(promptCtx, workload, profile)
+		serverPrompts, sessionToken, promptErr := reportingCtx.client.GetEvalPrompts(promptCtx, workload, profile)
 		promptCancel()
 		if promptErr == nil && len(serverPrompts) > 0 {
 			prompts = serverPrompts
+			evalSessionToken = strings.TrimSpace(sessionToken)
 		}
 	}
 	manager := runtime.NewManager()
@@ -103,6 +105,9 @@ func runEval(cmd *cobra.Command, args []string) {
 
 	fmt.Printf("Evaluating %s for %s (%s, %d prompts)\n", modelID, workload, profile, len(prompts))
 	summary, err := runner.Run(context.Background(), modelID, workload, profile, prompts, nil)
+	if evalSessionToken != "" {
+		summary.EvalSessionToken = evalSessionToken
+	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Eval failed: %v\n", err)
 		os.Exit(1)
@@ -139,6 +144,7 @@ func runEval(cmd *cobra.Command, args []string) {
 			summary,
 			workload,
 			rating,
+			evalSessionToken,
 		)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to report eval outcomes to server: %v\n", err)
@@ -197,6 +203,7 @@ func reportEvalSummary(
 	summary types.EvalRunSummary,
 	workload string,
 	rating int,
+	evalSessionToken string,
 ) error {
 	baseFingerprint := buildBaseFingerprint(machineID, modelID, runtimeName, "")
 	events := make([]types.OutcomeEvent, 0, len(summary.Samples)+1)
@@ -207,11 +214,14 @@ func reportEvalSummary(
 		}
 		score := sample.QualityScore
 		events = append(events, types.OutcomeEvent{
-			BaseFingerprint: baseFingerprint,
-			EventType:       eventType,
-			EvidenceKind:    "benchmark",
-			Workload:        workload,
-			DurationMs:      int64(sample.LatencyMs),
+			BaseFingerprint:  baseFingerprint,
+			EventType:        eventType,
+			EvidenceKind:     "benchmark",
+			Workload:         workload,
+			EvalPromptID:     sample.PromptID,
+			EvalOutput:       sample.Output,
+			EvalSessionToken: strings.TrimSpace(evalSessionToken),
+			DurationMs:       int64(sample.LatencyMs),
 			TokenUsage: &types.OutcomeTokenUsage{
 				PromptTokens:     0,
 				CompletionTokens: sample.OutputTokens,
@@ -225,13 +235,14 @@ func reportEvalSummary(
 	if rating > 0 {
 		score := float64(rating * 20)
 		events = append(events, types.OutcomeEvent{
-			BaseFingerprint: baseFingerprint,
-			EventType:       "task_success",
-			EvidenceKind:    "benchmark",
-			Workload:        workload,
-			QualityScore:    &score,
-			Detail:          fmt.Sprintf("User preference rating: %d/5", rating),
-			Timestamp:       time.Now().UTC().Format(time.RFC3339),
+			BaseFingerprint:  baseFingerprint,
+			EventType:        "task_success",
+			EvidenceKind:     "benchmark",
+			Workload:         workload,
+			EvalSessionToken: strings.TrimSpace(evalSessionToken),
+			QualityScore:     &score,
+			Detail:           fmt.Sprintf("User preference rating: %d/5", rating),
+			Timestamp:        time.Now().UTC().Format(time.RFC3339),
 		})
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
