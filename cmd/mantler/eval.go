@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Borgels/mantlerd/internal/client"
+	"github.com/Borgels/mantlerd/internal/config"
 	agenteval "github.com/Borgels/mantlerd/internal/eval"
 	"github.com/Borgels/mantlerd/internal/runtime"
 	"github.com/Borgels/mantlerd/internal/types"
@@ -32,6 +33,11 @@ var (
 
 var allowedEvalWorkloads = map[string]struct{}{
 	"coding": {}, "chat": {}, "creative": {}, "reasoning": {}, "agents": {}, "vision": {},
+}
+
+type evalReportingContext struct {
+	client    *client.Client
+	machineID string
 }
 
 func init() {
@@ -65,18 +71,18 @@ func runEval(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 
-	cfg := loadConfig(cmd)
-	cl, err := client.New(cfg.ServerURL, cfg.Token, cfg.Insecure)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error creating API client: %v\n", err)
-		os.Exit(1)
+	reportingCtx, reportingErr := loadEvalReportingContext(cmd)
+	if reportingErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: eval telemetry reporting disabled: %v\n", reportingErr)
 	}
 	prompts := localEvalPrompts(workload, profile)
-	promptCtx, promptCancel := context.WithTimeout(context.Background(), 15*time.Second)
-	serverPrompts, promptErr := cl.GetEvalPrompts(promptCtx, workload, profile)
-	promptCancel()
-	if promptErr == nil && len(serverPrompts) > 0 {
-		prompts = serverPrompts
+	if reportingCtx != nil {
+		promptCtx, promptCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		serverPrompts, promptErr := reportingCtx.client.GetEvalPrompts(promptCtx, workload, profile)
+		promptCancel()
+		if promptErr == nil && len(serverPrompts) > 0 {
+			prompts = serverPrompts
+		}
 	}
 	manager := runtime.NewManager()
 	if runtimeName := strings.TrimSpace(evalRuntime); runtimeName != "" {
@@ -113,14 +119,55 @@ func runEval(cmd *cobra.Command, args []string) {
 		fmt.Println(string(raw))
 	}
 
-	err = reportEvalSummary(cl, cfg.MachineID, summary, workload, rating)
+	if reportingCtx != nil {
+		err = reportEvalSummary(reportingCtx.client, reportingCtx.machineID, summary, workload, rating)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to report eval outcomes to server: %v\n", err)
+			return
+		}
+		if !evalJSON {
+			fmt.Println("Results reported to Mantler server.")
+		}
+	}
+}
+
+func loadEvalReportingContext(cmd *cobra.Command) (*evalReportingContext, error) {
+	configPath := cfgFile
+	if configPath == "" {
+		configPath = config.DefaultConfigPath()
+	}
+	fileCfg := config.Config{}
+	if loadedCfg, err := config.Load(configPath); err == nil {
+		fileCfg = loadedCfg
+	} else if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("load config: %w", err)
+	}
+
+	flagsCfg := config.Config{}
+	if cmd.Flags().Changed("server") {
+		flagsCfg.ServerURL = serverURL
+	}
+	if cmd.Flags().Changed("token") {
+		flagsCfg.Token = token
+	}
+	if cmd.Flags().Changed("machine") {
+		flagsCfg.MachineID = machineID
+	}
+	if cmd.Flags().Changed("insecure") {
+		flagsCfg.Insecure = insecure
+	}
+	cfg := config.Merge(fileCfg, flagsCfg)
+	if cfg.ServerURL == "" || cfg.Token == "" || cfg.MachineID == "" {
+		return nil, fmt.Errorf("missing config fields (server/token/machine)")
+	}
+	cl, err := client.New(cfg.ServerURL, cfg.Token, cfg.Insecure)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to report eval outcomes to server: %v\n", err)
-		return
+		return nil, fmt.Errorf("create api client: %w", err)
 	}
-	if !evalJSON {
-		fmt.Println("Results reported to Mantler server.")
-	}
+	return &evalReportingContext{
+		client:    cl,
+		machineID: cfg.MachineID,
+	}, nil
 }
 
 func reportEvalSummary(
