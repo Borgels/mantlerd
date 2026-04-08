@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -49,7 +50,14 @@ func DefaultConfigPath() string {
 func Load(path string) (Config, error) {
 	content, err := os.ReadFile(path)
 	if err != nil {
-		return Config{}, err
+		if os.IsNotExist(err) {
+			if fallbackPath, ok := userConfigFallbackPath(path); ok {
+				content, err = os.ReadFile(fallbackPath)
+			}
+		}
+		if err != nil {
+			return Config{}, err
+		}
 	}
 
 	var raw FileConfig
@@ -64,6 +72,14 @@ func Load(path string) (Config, error) {
 		Insecure:  raw.Insecure,
 		LogLevel:  raw.LogLevel,
 	}, nil
+}
+
+func userConfigFallbackPath(path string) (string, bool) {
+	normalized := filepath.ToSlash(strings.TrimSpace(path))
+	if strings.HasSuffix(normalized, "/.mantler/agent.json") {
+		return "/etc/mantler/agent.json", true
+	}
+	return "", false
 }
 
 func Save(path string, cfg Config) error {
