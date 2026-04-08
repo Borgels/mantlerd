@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	stdruntime "runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -19,7 +20,7 @@ import (
 
 	"github.com/Borgels/mantlerd/internal/config"
 	agenteval "github.com/Borgels/mantlerd/internal/eval"
-	"github.com/Borgels/mantlerd/internal/runtime"
+	agentruntime "github.com/Borgels/mantlerd/internal/runtime"
 	"github.com/Borgels/mantlerd/internal/types"
 )
 
@@ -27,7 +28,7 @@ import (
 var ErrCommandCancelled = errors.New("command cancelled")
 
 type Executor struct {
-	runtimeManager *runtime.Manager
+	runtimeManager *agentruntime.Manager
 	cfg            config.Config
 	progress       func(payload types.AckRequest)
 	outcome        func(event types.OutcomeEvent)
@@ -49,7 +50,7 @@ type ExecutionResult struct {
 const gooseInstallScriptURL = "https://github.com/block/goose/raw/main/download_cli.sh"
 
 func NewExecutor(
-	runtimeManager *runtime.Manager,
+	runtimeManager *agentruntime.Manager,
 	cfg config.Config,
 	progress func(payload types.AckRequest),
 	outcome func(event types.OutcomeEvent),
@@ -185,6 +186,16 @@ func (e *Executor) ExecuteWithContext(ctx context.Context, command types.AgentCo
 				return e.runtimeManager.InstallRuntime(runtimeName)
 			})
 		}
+		if strings.EqualFold(strings.TrimSpace(runtimeName), "llamacpp") {
+			return ExecutionResult{}, withLlamaCppConfig(command.Params, func() error {
+				return e.runtimeManager.InstallRuntime(runtimeName)
+			})
+		}
+		if strings.EqualFold(strings.TrimSpace(runtimeName), "quantcpp") {
+			return ExecutionResult{}, withQuantCppConfig(command.Params, func() error {
+				return e.runtimeManager.InstallRuntime(runtimeName)
+			})
+		}
 		return ExecutionResult{}, e.runtimeManager.InstallRuntime(runtimeName)
 	case "pull_model":
 		modelID, err := stringParam(command.Params, "modelId")
@@ -313,6 +324,9 @@ func (e *Executor) ExecuteWithContext(ctx context.Context, command types.AgentCo
 			}
 			return ExecutionResult{}, err
 		}
+		if token := optionalStringParam(command.Params, "evalSessionToken"); token != "" {
+			summary.EvalSessionToken = token
+		}
 		details, err := json.Marshal(summary)
 		if err != nil {
 			return ExecutionResult{}, fmt.Errorf("encode eval summary: %w", err)
@@ -338,6 +352,16 @@ func (e *Executor) ExecuteWithContext(ctx context.Context, command types.AgentCo
 		}
 		if strings.EqualFold(strings.TrimSpace(runtimeName), "vllm") {
 			return ExecutionResult{}, withVLLMRuntimeEnv(command.Params, func() error {
+				return e.runtimeManager.RestartRuntimeNamed(runtimeName)
+			})
+		}
+		if strings.EqualFold(strings.TrimSpace(runtimeName), "llamacpp") {
+			return ExecutionResult{}, withLlamaCppConfig(command.Params, func() error {
+				return e.runtimeManager.RestartRuntimeNamed(runtimeName)
+			})
+		}
+		if strings.EqualFold(strings.TrimSpace(runtimeName), "quantcpp") {
+			return ExecutionResult{}, withQuantCppConfig(command.Params, func() error {
 				return e.runtimeManager.RestartRuntimeNamed(runtimeName)
 			})
 		}
@@ -487,8 +511,8 @@ func evalPromptsParam(params map[string]interface{}) ([]agenteval.Prompt, error)
 	return prompts, nil
 }
 
-func parseBuildOptions(params map[string]interface{}) runtime.BuildOptions {
-	opts := runtime.BuildOptions{
+func parseBuildOptions(params map[string]interface{}) agentruntime.BuildOptions {
+	opts := agentruntime.BuildOptions{
 		Quantization: optionalStringParam(params, "quantization"),
 		TPSize:       intParam(params, "tpSize", 1),
 		MaxBatchSize: intParam(params, "maxBatchSize", 4),
@@ -529,9 +553,11 @@ var runtimeMountPaths = map[string]map[string]string{
 }
 
 var (
-	vllmRuntimeEnvPath      = "/etc/mantler/vllm.env"
-	tensorrtRuntimeEnvPath  = "/etc/mantler/tensorrt.env"
-	runtimeProfileStateRoot = "/var/lib/mantler/runtime-profiles"
+	vllmRuntimeEnvPath        = "/etc/mantler/vllm.env"
+	tensorrtRuntimeEnvPath    = "/etc/mantler/tensorrt.env"
+	llamaCppRuntimeConfigPath = "/etc/mantler/llamacpp.json"
+	quantCppRuntimeConfigPath = "/etc/mantler/quantcpp.json"
+	runtimeProfileStateRoot   = "/var/lib/mantler/runtime-profiles"
 )
 
 // resolveHostPath converts a container destination path to a host path.
@@ -826,6 +852,185 @@ func withVLLMRuntimeEnv(params map[string]interface{}, fn func() error) error {
 		}
 	}()
 
+	return fn()
+}
+
+type llamaCppRuntimeConfig struct {
+	Model       string `json:"model,omitempty"`
+	Port        int    `json:"port,omitempty"`
+	Backend     string `json:"backend,omitempty"`
+	NGPULayers  int    `json:"nGpuLayers,omitempty"`
+	ContextSize int    `json:"contextSize,omitempty"`
+}
+
+type quantCppRuntimeConfig struct {
+	Model          string `json:"model,omitempty"`
+	Port           int    `json:"port,omitempty"`
+	KeyQuantType   string `json:"keyQuantType,omitempty"`
+	ValueQuantType string `json:"valueQuantType,omitempty"`
+	Threads        int    `json:"threads,omitempty"`
+	ContextSize    int    `json:"contextSize,omitempty"`
+}
+
+func parseOptionalIntParam(params map[string]interface{}, key string) (int, bool) {
+	raw, ok := params[key]
+	if !ok {
+		return 0, false
+	}
+	switch value := raw.(type) {
+	case float64:
+		return int(value), true
+	case int:
+		return value, true
+	default:
+		return 0, false
+	}
+}
+
+func isSafeQuantToken(value string) bool {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return false
+	}
+	for _, ch := range trimmed {
+		if (ch >= 'a' && ch <= 'z') ||
+			(ch >= 'A' && ch <= 'Z') ||
+			(ch >= '0' && ch <= '9') ||
+			ch == '_' || ch == '-' || ch == '.' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func withLlamaCppConfig(params map[string]interface{}, fn func() error) error {
+	backend := strings.ToLower(optionalStringParam(params, "backend"))
+	nGpuLayers, hasNGpuLayers := parseOptionalIntParam(params, "nGpuLayers")
+	contextSize, hasContextSize := parseOptionalIntParam(params, "contextSize")
+
+	if backend == "" && !hasNGpuLayers && !hasContextSize {
+		return fn()
+	}
+	if backend != "" && backend != "cpu" && backend != "cuda" && backend != "vulkan" && backend != "metal" && backend != "rocm" {
+		return fmt.Errorf("invalid backend param for llamacpp: %s", backend)
+	}
+	if hasNGpuLayers && nGpuLayers < -1 {
+		return fmt.Errorf("invalid nGpuLayers param for llamacpp: %d", nGpuLayers)
+	}
+	if hasContextSize && contextSize <= 0 {
+		return fmt.Errorf("invalid contextSize param for llamacpp: %d", contextSize)
+	}
+
+	cfg := llamaCppRuntimeConfig{
+		Port:        1234,
+		Backend:     "cpu",
+		NGPULayers:  -1,
+		ContextSize: 8192,
+	}
+	if raw, err := os.ReadFile(llamaCppRuntimeConfigPath); err == nil && len(raw) > 0 {
+		_ = json.Unmarshal(raw, &cfg)
+	}
+	if backend != "" {
+		cfg.Backend = backend
+	}
+	if hasNGpuLayers {
+		cfg.NGPULayers = nGpuLayers
+	}
+	if hasContextSize {
+		cfg.ContextSize = contextSize
+	}
+	if cfg.Port <= 0 {
+		cfg.Port = 1234
+	}
+	if cfg.ContextSize <= 0 {
+		cfg.ContextSize = 8192
+	}
+	if cfg.NGPULayers == 0 {
+		cfg.NGPULayers = -1
+	}
+	if err := os.MkdirAll(filepath.Dir(llamaCppRuntimeConfigPath), 0o755); err != nil {
+		return fmt.Errorf("create llamacpp config directory: %w", err)
+	}
+	encoded, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode llamacpp config: %w", err)
+	}
+	if err := os.WriteFile(llamaCppRuntimeConfigPath, append(encoded, '\n'), 0o600); err != nil {
+		return fmt.Errorf("write llamacpp config: %w", err)
+	}
+	return fn()
+}
+
+func withQuantCppConfig(params map[string]interface{}, fn func() error) error {
+	keyQuantType := strings.TrimSpace(optionalStringParam(params, "keyQuantType"))
+	valueQuantType := strings.TrimSpace(optionalStringParam(params, "valueQuantType"))
+	threads, hasThreads := parseOptionalIntParam(params, "threads")
+	contextSize, hasContextSize := parseOptionalIntParam(params, "contextSize")
+
+	if keyQuantType == "" && valueQuantType == "" && !hasThreads && !hasContextSize {
+		return fn()
+	}
+	if hasThreads && threads <= 0 {
+		return fmt.Errorf("invalid threads param for quantcpp: %d", threads)
+	}
+	if hasContextSize && contextSize <= 0 {
+		return fmt.Errorf("invalid contextSize param for quantcpp: %d", contextSize)
+	}
+	if keyQuantType != "" && !isSafeQuantToken(keyQuantType) {
+		return fmt.Errorf("invalid keyQuantType param for quantcpp: %s", keyQuantType)
+	}
+	if valueQuantType != "" && !isSafeQuantToken(valueQuantType) {
+		return fmt.Errorf("invalid valueQuantType param for quantcpp: %s", valueQuantType)
+	}
+
+	cfg := quantCppRuntimeConfig{
+		Port:           8080,
+		KeyQuantType:   "uniform_4b",
+		ValueQuantType: "q4",
+		Threads:        max(1, stdruntime.NumCPU()),
+		ContextSize:    8192,
+	}
+	if raw, err := os.ReadFile(quantCppRuntimeConfigPath); err == nil && len(raw) > 0 {
+		_ = json.Unmarshal(raw, &cfg)
+	}
+	if keyQuantType != "" {
+		cfg.KeyQuantType = keyQuantType
+	}
+	if valueQuantType != "" {
+		cfg.ValueQuantType = valueQuantType
+	}
+	if hasThreads {
+		cfg.Threads = threads
+	}
+	if hasContextSize {
+		cfg.ContextSize = contextSize
+	}
+	if cfg.Port <= 0 {
+		cfg.Port = 8080
+	}
+	if strings.TrimSpace(cfg.KeyQuantType) == "" {
+		cfg.KeyQuantType = "uniform_4b"
+	}
+	if strings.TrimSpace(cfg.ValueQuantType) == "" {
+		cfg.ValueQuantType = "q4"
+	}
+	if cfg.Threads <= 0 {
+		cfg.Threads = max(1, stdruntime.NumCPU())
+	}
+	if cfg.ContextSize <= 0 {
+		cfg.ContextSize = 8192
+	}
+	if err := os.MkdirAll(filepath.Dir(quantCppRuntimeConfigPath), 0o755); err != nil {
+		return fmt.Errorf("create quantcpp config directory: %w", err)
+	}
+	encoded, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode quantcpp config: %w", err)
+	}
+	if err := os.WriteFile(quantCppRuntimeConfigPath, append(encoded, '\n'), 0o600); err != nil {
+		return fmt.Errorf("write quantcpp config: %w", err)
+	}
 	return fn()
 }
 

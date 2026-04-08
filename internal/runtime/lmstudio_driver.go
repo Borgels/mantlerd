@@ -1,15 +1,19 @@
 package runtime
 
 import (
+	"archive/zip"
 	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -18,337 +22,213 @@ import (
 )
 
 const (
-	lmsInstallScriptURL   = "https://lmstudio.ai/install.sh"
-	lmsServiceUnitPath    = "/etc/systemd/system/llamacpp.service"
-	lmsConfigPath         = "/etc/mantler/llamacpp.json"
-	lmsDefaultPort        = 1234
-	lmsReadyTimeout       = 90 * time.Second
-	lmsDefaultSystemdPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+	llamaCppServiceUnitPath = "/etc/systemd/system/llamacpp.service"
+	llamaCppConfigPath      = "/etc/mantler/llamacpp.json"
+	llamaCppInstallDir      = "/opt/mantler/llamacpp"
+	llamaCppBinaryPath      = "/opt/mantler/llamacpp/llama-server"
+	llamaCppModelsDir       = "/var/lib/mantler/models/llamacpp"
+	llamaCppDefaultPort     = 1234
+	llamaCppReadyTimeout    = 90 * time.Second
 )
 
-type lmstudioConfig struct {
-	Model string `json:"model"`
-	Port  int    `json:"port"`
+type llamaCppConfig struct {
+	Model       string `json:"model"`
+	Port        int    `json:"port"`
+	Backend     string `json:"backend,omitempty"`
+	NGPULayers  int    `json:"nGpuLayers,omitempty"`
+	ContextSize int    `json:"contextSize,omitempty"`
 }
 
-type lmstudioCommandContext struct {
-	path string
-	home string
-}
-
-type lmstudioDriver struct{}
+type llamaCppDriver struct{}
 
 func newLMStudioDriver() Driver {
-	return &lmstudioDriver{}
+	return &llamaCppDriver{}
 }
 
 func newLlamaCppDriver() Driver {
-	return &lmstudioDriver{}
+	return &llamaCppDriver{}
 }
 
-func (d *lmstudioDriver) Name() string { return "llamacpp" }
+func (d *llamaCppDriver) Name() string { return "llamacpp" }
 
-func (d *lmstudioDriver) Install() error {
-	path := strings.TrimSpace(d.resolveLMSPath())
-	if path == "" {
-		// If LM Studio API is already healthy, avoid failing the ensure loop just
-		// because the CLI path is not currently resolvable in this environment.
-		if d.IsReady() {
-			return nil
-		}
-	}
-	if !d.IsInstalled() {
-		if err := runCommand("sh", "-c", "curl -fsSL "+lmsInstallScriptURL+" | bash"); err != nil {
-			return fmt.Errorf("install llamacpp cli: %w", err)
-		}
-		path = strings.TrimSpace(d.resolveLMSPath())
-	}
-	if path != "" {
-		if err := d.ensureServiceUnit(); err != nil {
-			return err
-		}
-		if err := d.startOrRestartService(); err != nil {
-			return err
-		}
-	} else if !d.IsReady() {
-		return fmt.Errorf("llamacpp cli not installed")
-	}
+func (d *llamaCppDriver) Install() error {
 	cfg, err := d.readConfig()
-	if err == nil && strings.TrimSpace(cfg.Model) != "" {
-		if path == "" {
-			return nil
-		}
-		resolvedModelID, err := d.loadModel(cfg.Model)
+	if err != nil {
+		return err
+	}
+	if cfg.Port <= 0 {
+		cfg.Port = llamaCppDefaultPort
+	}
+	availablePort, err := resolveLlamaCppPort(cfg.Port)
+	if err != nil {
+		return err
+	}
+	cfg.Port = availablePort
+	if cfg.Backend == "" {
+		cfg.Backend = detectBestBackend()
+	}
+	if cfg.ContextSize <= 0 {
+		cfg.ContextSize = 8192
+	}
+	if cfg.NGPULayers == 0 {
+		cfg.NGPULayers = -1
+	}
+
+	if !d.IsInstalled() {
+		assetURL, err := resolveLlamaCppReleaseAssetURL(cfg.Backend)
 		if err != nil {
-			return fmt.Errorf("load configured llamacpp model %q: %w", cfg.Model, err)
+			return fmt.Errorf("resolve llama.cpp release asset: %w", err)
 		}
-		if resolvedModelID != "" && resolvedModelID != cfg.Model {
-			cfg.Model = resolvedModelID
-			_ = d.writeConfig(cfg)
+		if err := installLlamaCppFromAsset(assetURL); err != nil {
+			return err
 		}
+		if err := verifyLlamaCppBinary(); err != nil {
+			_ = os.Remove(llamaCppBinaryPath)
+			return err
+		}
+	}
+
+	if err := d.writeConfig(cfg); err != nil {
+		return err
+	}
+	if err := d.ensureServiceUnit(cfg); err != nil {
+		return err
+	}
+	if err := runCommand("systemctl", "enable", "llamacpp"); err != nil {
+		return fmt.Errorf("enable llamacpp service: %w", err)
+	}
+	if err := runCommand("systemctl", "restart", "llamacpp"); err != nil {
+		return fmt.Errorf("restart llamacpp service: %w", err)
+	}
+	if err := d.waitForReady(llamaCppReadyTimeout); err != nil {
+		return err
+	}
+	isExternal, err := isServiceListeningOnNonLoopback(cfg.Port)
+	if err != nil {
+		return err
+	}
+	if !isExternal {
+		return fmt.Errorf("llamacpp server is only listening on localhost; expected non-loopback bind")
 	}
 	return nil
 }
 
-func (d *lmstudioDriver) Uninstall() error {
+func (d *llamaCppDriver) Uninstall() error {
 	_ = runCommand("systemctl", "stop", "llamacpp")
 	_ = runCommand("systemctl", "disable", "llamacpp")
-	_ = os.Remove(lmsServiceUnitPath)
+	_ = os.Remove(llamaCppServiceUnitPath)
 	_ = runCommand("systemctl", "daemon-reload")
-	path := d.resolveLMSPath()
-	if path != "" {
-		cmd := exec.Command(path, "daemon", "down")
-		cmd.Env = d.envForPath(path)
-		_ = cmd.Run()
-	}
-	_ = os.Remove(lmsConfigPath)
+	_ = os.RemoveAll(llamaCppInstallDir)
+	_ = os.Remove(llamaCppConfigPath)
 	return nil
 }
 
-func (d *lmstudioDriver) IsInstalled() bool {
-	cliPath := strings.TrimSpace(d.resolveLMSPath())
-	if cliPath != "" {
-		return true
-	}
-	// Under hardened systemd settings (ProtectHome=true), the daemon may not
-	// be able to stat /home/*/.lmstudio/bin/lms even when LM Studio is
-	// installed and managed via systemd. Treat managed artifacts as installed.
-	if _, err := os.Stat(lmsServiceUnitPath); err == nil {
-		return true
-	}
-	if _, err := os.Stat(lmsConfigPath); err == nil {
-		return true
-	}
-	return false
+func (d *llamaCppDriver) IsInstalled() bool {
+	info, err := os.Stat(llamaCppBinaryPath)
+	return err == nil && !info.IsDir()
 }
 
-func (d *lmstudioDriver) IsReady() bool {
-	// LM Studio's CLI often daemonizes/returns immediately, which can make the
-	// systemd unit report transient "deactivating" states even while the API is
-	// healthy. Treat API health as the source of truth for readiness.
+func (d *llamaCppDriver) IsReady() bool {
 	_, err := d.fetchRemoteModels()
 	return err == nil
 }
 
-func (d *lmstudioDriver) Version() string {
-	path := d.resolveLMSPath()
-	if path == "" {
-		return ""
-	}
-	cmd := exec.Command(path, "daemon", "status", "--json", "--quiet")
-	cmd.Env = d.envForPath(path)
-	output, err := cmd.Output()
-	if err == nil {
-		var payload struct {
-			Version string `json:"version"`
-		}
-		if json.Unmarshal(output, &payload) == nil && strings.TrimSpace(payload.Version) != "" {
-			return strings.TrimSpace(payload.Version)
-		}
-	}
-	cmd = exec.Command(path, "--version")
-	cmd.Env = d.envForPath(path)
-	output, err = cmd.Output()
+func (d *llamaCppDriver) Version() string {
+	output, err := exec.Command(llamaCppBinaryPath, "--version").CombinedOutput()
 	if err != nil {
 		return ""
 	}
 	return strings.TrimSpace(string(output))
 }
 
-func (d *lmstudioDriver) daemonRunning(path string) (bool, bool) {
-	cmd := exec.Command(path, "daemon", "status", "--json", "--quiet")
-	cmd.Env = d.envForPath(path)
-	output, err := cmd.Output()
-	if err != nil {
-		return false, false
-	}
-	var payload struct {
-		Running *bool  `json:"running"`
-		Status  string `json:"status"`
-		State   string `json:"state"`
-	}
-	if err := json.Unmarshal(output, &payload); err != nil {
-		return false, false
-	}
-	if payload.Running != nil {
-		return *payload.Running, true
-	}
-	state := strings.ToLower(strings.TrimSpace(payload.State))
-	if state == "" {
-		state = strings.ToLower(strings.TrimSpace(payload.Status))
-	}
-	if state == "" {
-		return false, false
-	}
-	switch state {
-	case "running", "active", "up":
-		return true, true
-	case "stopped", "inactive", "down":
-		return false, true
-	default:
-		return false, false
-	}
+func (d *llamaCppDriver) EnsureModelWithFlags(modelID string, flags *types.ModelFeatureFlags) error {
+	return d.StartModelWithFlags(modelID, flags)
 }
 
-func (d *lmstudioDriver) PrepareModelWithFlags(modelID string, _ *types.ModelFeatureFlags) error {
-	modelID = strings.TrimSpace(modelID)
-	if modelID == "" {
-		return fmt.Errorf("model ID is required")
-	}
-	if err := d.Install(); err != nil {
+func (d *llamaCppDriver) PrepareModelWithFlags(modelID string, _ *types.ModelFeatureFlags) error {
+	modelPath, err := d.resolveModelPath(modelID)
+	if err != nil {
 		return err
 	}
-	normalizedModelID := normalizeLMStudioModelID(modelID)
-	resolvedModelID := normalizedModelID
-	if !d.HasModel(normalizedModelID) {
-		loadedModelID, err := d.loadModel(modelID)
-		if err != nil {
-			return err
-		}
-		resolvedModelID = normalizeLMStudioModelID(loadedModelID)
+	cfg, err := d.readConfig()
+	if err != nil {
+		return err
 	}
-	cfg, _ := d.readConfig()
-	cfg.Model = resolvedModelID
+	cfg.Model = modelPath
 	if cfg.Port <= 0 {
-		cfg.Port = lmsDefaultPort
+		cfg.Port = llamaCppDefaultPort
+	}
+	availablePort, err := resolveLlamaCppPort(cfg.Port)
+	if err != nil {
+		return err
+	}
+	cfg.Port = availablePort
+	if cfg.Backend == "" {
+		cfg.Backend = detectBestBackend()
+	}
+	if cfg.ContextSize <= 0 {
+		cfg.ContextSize = 8192
+	}
+	if cfg.NGPULayers == 0 {
+		cfg.NGPULayers = -1
 	}
 	if err := d.writeConfig(cfg); err != nil {
 		return err
 	}
-	return nil
+	if err := d.ensureServiceUnit(cfg); err != nil {
+		return err
+	}
+	if err := runCommand("systemctl", "restart", "llamacpp"); err != nil {
+		return fmt.Errorf("restart llamacpp service: %w", err)
+	}
+	return d.waitForReady(llamaCppReadyTimeout)
 }
 
-func (d *lmstudioDriver) ListModels() []string {
+func (d *llamaCppDriver) StartModelWithFlags(modelID string, flags *types.ModelFeatureFlags) error {
+	return d.PrepareModelWithFlags(modelID, flags)
+}
+
+func (d *llamaCppDriver) StopModel(modelID string) error {
+	_ = modelID
+	return runCommand("systemctl", "stop", "llamacpp")
+}
+
+func (d *llamaCppDriver) ListModels() []string {
 	models, err := d.fetchRemoteModels()
 	if err != nil {
 		return nil
 	}
-	return collapseLMStudioModelIDs(models)
+	return models
 }
 
-func (d *lmstudioDriver) InstalledModels() []types.InstalledModel {
-	result := make([]types.InstalledModel, 0)
-	seen := map[string]struct{}{}
-	cfg, _ := d.readConfig()
-	configured := normalizeLMStudioModelID(strings.TrimSpace(cfg.Model))
-
-	models, err := d.fetchRemoteModels()
-	if err == nil {
-		for _, model := range collapseLMStudioModelIDs(models) {
-			if model == "" {
-				continue
-			}
-			seen[strings.ToLower(model)] = struct{}{}
-			result = append(result, types.InstalledModel{
-				ModelID: model,
-				Runtime: types.RuntimeLlamaCpp,
-				Status:  types.ModelReady,
-			})
-		}
-		if configured != "" {
-			if _, ok := seen[strings.ToLower(configured)]; !ok {
-				result = append(result, types.InstalledModel{
-					ModelID: configured,
-					Runtime: types.RuntimeLlamaCpp,
-					Status:  types.ModelInstalling,
-				})
-			}
-		}
-		return result
-	}
-
-	if configured != "" {
-		failReason := ""
-		if serviceLikelyOutOfMemory("llamacpp", err) {
-			failReason = modelFailReasonInsufficientMemory
-		}
-		result = append(result, types.InstalledModel{
-			ModelID:    configured,
-			Runtime:    types.RuntimeLlamaCpp,
-			Status:     types.ModelFailed,
-			FailReason: failReason,
-		})
-	}
-	return result
-}
-
-func (d *lmstudioDriver) HasModel(modelID string) bool {
+func (d *llamaCppDriver) HasModel(modelID string) bool {
 	modelID = strings.TrimSpace(modelID)
 	if modelID == "" {
 		return false
 	}
 	for _, model := range d.ListModels() {
-		if llamacppModelIDsEquivalent(model, modelID) {
+		if strings.EqualFold(strings.TrimSpace(model), modelID) {
 			return true
 		}
 	}
 	return false
 }
 
-func (d *lmstudioDriver) StartModelWithFlags(modelID string, flags *types.ModelFeatureFlags) error {
-	return d.PrepareModelWithFlags(modelID, flags)
-}
-
-func (d *lmstudioDriver) StopModel(modelID string) error {
-	return runCommand("systemctl", "stop", "llamacpp")
-}
-
-func (d *lmstudioDriver) EnsureModelWithFlags(modelID string, flags *types.ModelFeatureFlags) error {
-	return d.StartModelWithFlags(modelID, flags)
-}
-
-func (d *lmstudioDriver) RemoveModel(modelID string) error {
-	modelID = strings.TrimSpace(modelID)
-	if modelID == "" {
-		return fmt.Errorf("model ID is required")
+func (d *llamaCppDriver) RemoveModel(modelID string) error {
+	cfg, err := d.readConfig()
+	if err != nil {
+		return err
 	}
-	contexts := d.resolveLMSContexts()
-	if len(contexts) == 0 {
-		// Hardened hosts may hide /home-based LM Studio CLI paths from this
-		// service context. Fall back to stopping the runtime service to unload
-		// GPU memory instead of failing stale-model ejection.
-		_ = runCommand("systemctl", "stop", "llamacpp")
-		if remoteModels, err := d.fetchRemoteModels(); err == nil && len(remoteModels) > 0 {
-			d.forceStopLingeringProcesses()
-		}
-		d.clearConfiguredModel(modelID)
-		return nil
-	}
-
-	targets := []string{modelID}
-	normalizedModelID := normalizeLMStudioModelID(modelID)
-	if normalizedModelID != "" && !llamacppModelIDsEquivalent(normalizedModelID, modelID) {
-		targets = append(targets, normalizedModelID)
-	}
-	if remoteModels, err := d.fetchRemoteModels(); err == nil {
-		for _, remoteModel := range remoteModels {
-			if llamacppModelIDsEquivalent(remoteModel, modelID) {
-				targets = append(targets, strings.TrimSpace(remoteModel))
-			}
+	if strings.EqualFold(strings.TrimSpace(cfg.Model), strings.TrimSpace(modelID)) {
+		cfg.Model = ""
+		if err := d.writeConfig(cfg); err != nil {
+			return err
 		}
 	}
-	targets = uniqueStrings(targets)
-
-	var hadSuccess bool
-	var lastErr error
-	for _, target := range targets {
-		if err := d.unloadModelAcrossContexts(target, contexts); err != nil {
-			lastErr = err
-			continue
-		}
-		hadSuccess = true
-	}
-	if hadSuccess {
-		d.clearConfiguredModel(modelID)
-		return nil
-	}
-	if lastErr != nil {
-		return lastErr
-	}
-		return fmt.Errorf("unload llamacpp model %q failed", modelID)
+	return runCommand("systemctl", "restart", "llamacpp")
 }
 
-func (d *lmstudioDriver) BenchmarkModel(
+func (d *llamaCppDriver) BenchmarkModel(
 	modelID string,
 	samplePromptTokens int,
 	sampleOutputTokens int,
@@ -434,14 +314,54 @@ func (d *lmstudioDriver) BenchmarkModel(
 	return summarizeBenchmarkResults(results), nil
 }
 
-func (d *lmstudioDriver) RestartRuntime() error {
-	if err := d.Install(); err != nil {
+func (d *llamaCppDriver) RestartRuntime() error {
+	cfg, err := d.readConfig()
+	if err != nil {
 		return err
 	}
-	return d.startOrRestartService()
+	if cfg.Port <= 0 {
+		cfg.Port = llamaCppDefaultPort
+	}
+	availablePort, err := resolveLlamaCppPort(cfg.Port)
+	if err != nil {
+		return err
+	}
+	cfg.Port = availablePort
+	if cfg.Backend == "" {
+		cfg.Backend = detectBestBackend()
+	}
+	if cfg.ContextSize <= 0 {
+		cfg.ContextSize = 8192
+	}
+	if cfg.NGPULayers == 0 {
+		cfg.NGPULayers = -1
+	}
+	if err := d.writeConfig(cfg); err != nil {
+		return err
+	}
+	if err := d.ensureServiceUnit(cfg); err != nil {
+		return err
+	}
+	if err := runCommand("systemctl", "restart", "llamacpp"); err != nil {
+		return fmt.Errorf("restart llamacpp service: %w", err)
+	}
+	return d.waitForReady(llamaCppReadyTimeout)
 }
 
-func (d *lmstudioDriver) benchmarkOnce(modelID string, prompt string, sampleOutputTokens int) (BenchmarkResult, error) {
+func (d *llamaCppDriver) RuntimeConfig() map[string]any {
+	cfg, err := d.readConfig()
+	if err != nil {
+		return nil
+	}
+	return map[string]any{
+		"backend":     cfg.Backend,
+		"nGpuLayers":  cfg.NGPULayers,
+		"contextSize": cfg.ContextSize,
+		"version":     strings.TrimSpace(d.Version()),
+	}
+}
+
+func (d *llamaCppDriver) benchmarkOnce(modelID string, prompt string, sampleOutputTokens int) (BenchmarkResult, error) {
 	reqBody := map[string]any{
 		"model": modelID,
 		"messages": []map[string]string{
@@ -495,58 +415,483 @@ func (d *lmstudioDriver) benchmarkOnce(modelID string, prompt string, sampleOutp
 	}, nil
 }
 
-func (d *lmstudioDriver) loadModel(modelID string) (string, error) {
-	path := d.resolveLMSPath()
-	if path == "" {
-		return "", fmt.Errorf("llamacpp cli not installed")
+func (d *llamaCppDriver) resolveModelPath(modelID string) (string, error) {
+	modelID = strings.TrimSpace(modelID)
+	if modelID == "" {
+		return "", fmt.Errorf("model ID is required")
 	}
-	candidates := []string{modelID}
-	if normalized := normalizeLMStudioModelID(modelID); normalized != modelID {
-		candidates = []string{normalized, modelID}
+	if strings.HasPrefix(modelID, "/") {
+		if _, err := os.Stat(modelID); err != nil {
+			return "", fmt.Errorf("model path not found: %w", err)
+		}
+		return modelID, nil
 	}
-	var lastErr error
-	for _, candidate := range candidates {
-		loadCmd := exec.Command(path, "load", candidate)
-		loadCmd.Env = d.envForPath(path)
-		output, err := loadCmd.CombinedOutput()
+	if strings.HasPrefix(modelID, "http://") || strings.HasPrefix(modelID, "https://") {
+		if !strings.HasSuffix(strings.ToLower(modelID), ".gguf") {
+			return "", fmt.Errorf("remote model URL must point to .gguf")
+		}
+		name := filepath.Base(modelID)
+		target := filepath.Join(llamaCppModelsDir, name)
+		if err := os.MkdirAll(llamaCppModelsDir, 0o755); err != nil {
+			return "", err
+		}
+		if err := downloadFile(modelID, target); err != nil {
+			return "", err
+		}
+		return target, nil
+	}
+
+	// Hugging Face repo id fallback.
+	if err := os.MkdirAll(llamaCppModelsDir, 0o755); err != nil {
+		return "", err
+	}
+	dir := filepath.Join(llamaCppModelsDir, strings.ReplaceAll(modelID, "/", "__"))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	hfPath, err := exec.LookPath("hf")
+	if err == nil {
+		cmd := exec.Command(hfPath, "download", modelID, "--include", "*.gguf", "--local-dir", dir)
+		if output, cmdErr := cmd.CombinedOutput(); cmdErr != nil {
+			return "", fmt.Errorf("hf download %s failed: %w (%s)", modelID, cmdErr, strings.TrimSpace(string(output)))
+		}
+		matches, globErr := filepath.Glob(filepath.Join(dir, "*.gguf"))
+		if globErr == nil && len(matches) > 0 {
+			slices.Sort(matches)
+			return matches[0], nil
+		}
+	}
+	return "", fmt.Errorf("unable to resolve model %q to a local GGUF file", modelID)
+}
+
+func (d *llamaCppDriver) fetchRemoteModels() ([]string, error) {
+	req, err := http.NewRequest(http.MethodGet, d.baseURL()+"/v1/models", nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("llamacpp models endpoint failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var payload struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return nil, err
+	}
+	models := make([]string, 0, len(payload.Data))
+	for _, item := range payload.Data {
+		id := strings.TrimSpace(item.ID)
+		if id != "" {
+			models = append(models, id)
+		}
+	}
+	return models, nil
+}
+
+func (d *llamaCppDriver) baseURL() string {
+	cfg, err := d.readConfig()
+	port := llamaCppDefaultPort
+	if err == nil && cfg.Port > 0 {
+		port = cfg.Port
+	}
+	return fmt.Sprintf("http://127.0.0.1:%d", port)
+}
+
+func (d *llamaCppDriver) waitForReady(timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	client := &http.Client{Timeout: 3 * time.Second}
+	lastErr := ""
+	for time.Now().Before(deadline) {
+		req, err := http.NewRequest(http.MethodGet, d.baseURL()+"/v1/models", nil)
 		if err == nil {
+			resp, reqErr := client.Do(req)
+			if reqErr == nil {
+				_, _ = io.ReadAll(resp.Body)
+				resp.Body.Close()
+				if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+					return nil
+				}
+				lastErr = fmt.Sprintf("status %d", resp.StatusCode)
+			} else {
+				lastErr = reqErr.Error()
+			}
+		} else {
+			lastErr = err.Error()
+		}
+		time.Sleep(2 * time.Second)
+	}
+	if strings.TrimSpace(lastErr) == "" {
+		lastErr = "timed out waiting for /v1/models"
+	}
+	return fmt.Errorf("llamacpp api not ready: %s", lastErr)
+}
+
+func (d *llamaCppDriver) readConfig() (llamaCppConfig, error) {
+	cfg := llamaCppConfig{
+		Port:        llamaCppDefaultPort,
+		Backend:     detectBestBackend(),
+		NGPULayers:  -1,
+		ContextSize: 8192,
+	}
+	raw, err := os.ReadFile(llamaCppConfigPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return cfg, nil
+		}
+		return cfg, fmt.Errorf("read llamacpp config: %w", err)
+	}
+	if len(raw) == 0 {
+		return cfg, nil
+	}
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return cfg, fmt.Errorf("parse llamacpp config: %w", err)
+	}
+	if cfg.Port <= 0 {
+		cfg.Port = llamaCppDefaultPort
+	}
+	if strings.TrimSpace(cfg.Backend) == "" {
+		cfg.Backend = detectBestBackend()
+	}
+	if cfg.ContextSize <= 0 {
+		cfg.ContextSize = 8192
+	}
+	if cfg.NGPULayers == 0 {
+		cfg.NGPULayers = -1
+	}
+	return cfg, nil
+}
+
+func (d *llamaCppDriver) writeConfig(cfg llamaCppConfig) error {
+	if cfg.Port <= 0 {
+		cfg.Port = llamaCppDefaultPort
+	}
+	if cfg.Backend == "" {
+		cfg.Backend = detectBestBackend()
+	}
+	if cfg.ContextSize <= 0 {
+		cfg.ContextSize = 8192
+	}
+	if cfg.NGPULayers == 0 {
+		cfg.NGPULayers = -1
+	}
+	if err := os.MkdirAll(filepath.Dir(llamaCppConfigPath), 0o755); err != nil {
+		return fmt.Errorf("create llamacpp config directory: %w", err)
+	}
+	payload, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode llamacpp config: %w", err)
+	}
+	if err := os.WriteFile(llamaCppConfigPath, append(payload, '\n'), 0o600); err != nil {
+		return fmt.Errorf("write llamacpp config: %w", err)
+	}
+	return nil
+}
+
+func (d *llamaCppDriver) ensureServiceUnit(cfg llamaCppConfig) error {
+	if err := os.MkdirAll(filepath.Dir(llamaCppServiceUnitPath), 0o755); err != nil {
+		return fmt.Errorf("create systemd directory: %w", err)
+	}
+	execStart := fmt.Sprintf(
+		"%s --host 0.0.0.0 --port %d -ngl %d -c %d",
+		llamaCppBinaryPath,
+		cfg.Port,
+		cfg.NGPULayers,
+		cfg.ContextSize,
+	)
+	if model := strings.TrimSpace(cfg.Model); model != "" {
+		execStart += " --model " + shellQuote(model)
+	}
+	unit := `[Unit]
+Description=llama.cpp server managed by mantlerd
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/bin/sh -lc '` + execStart + `'
+Restart=always
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target
+`
+	if err := os.WriteFile(llamaCppServiceUnitPath, []byte(unit), 0o644); err != nil {
+		return fmt.Errorf("write service unit: %w", err)
+	}
+	return runCommand("systemctl", "daemon-reload")
+}
+
+func detectBestBackend() string {
+	if _, err := exec.LookPath("nvidia-smi"); err == nil {
+		return "cuda"
+	}
+	if runtime.GOOS == "darwin" {
+		return "metal"
+	}
+	if runtime.GOOS == "linux" {
+		if _, err := os.Stat("/dev/kfd"); err == nil {
+			return "rocm"
+		}
+		if _, err := exec.LookPath("vulkaninfo"); err == nil {
+			return "vulkan"
+		}
+		if _, err := os.Stat("/usr/share/vulkan/icd.d"); err == nil {
+			return "vulkan"
+		}
+	}
+	return "cpu"
+}
+
+func resolveLlamaCppReleaseAssetURL(backend string) (string, error) {
+	backend = strings.ToLower(strings.TrimSpace(backend))
+	if backend == "" {
+		backend = detectBestBackend()
+	}
+	if runtime.GOOS == "darwin" {
+		if runtime.GOARCH != "arm64" && runtime.GOARCH != "amd64" {
+			return "", fmt.Errorf("unsupported darwin arch: %s", runtime.GOARCH)
+		}
+		if runtime.GOARCH == "arm64" {
+			return "https://github.com/ggerganov/llama.cpp/releases/latest/download/llama-b8708-bin-macos-arm64.tar.gz", nil
+		}
+		return "https://github.com/ggerganov/llama.cpp/releases/latest/download/llama-b8708-bin-macos-x64.tar.gz", nil
+	}
+	if runtime.GOOS != "linux" {
+		return "", fmt.Errorf("unsupported OS for automatic llama.cpp install: %s", runtime.GOOS)
+	}
+	if runtime.GOARCH == "arm64" {
+		switch backend {
+		case "vulkan":
+			return "https://github.com/ggerganov/llama.cpp/releases/latest/download/llama-b8708-bin-ubuntu-vulkan-arm64.tar.gz", nil
+		default:
+			return "https://github.com/ggerganov/llama.cpp/releases/latest/download/llama-b8708-bin-ubuntu-arm64.tar.gz", nil
+		}
+	}
+	if runtime.GOARCH != "amd64" {
+		return "", fmt.Errorf("unsupported linux arch for automatic llama.cpp install: %s", runtime.GOARCH)
+	}
+	switch backend {
+	case "cuda":
+		return "https://github.com/ggerganov/llama.cpp/releases/latest/download/llama-b8708-bin-ubuntu-x64.tar.gz", nil
+	case "vulkan":
+		return "https://github.com/ggerganov/llama.cpp/releases/latest/download/llama-b8708-bin-ubuntu-vulkan-x64.tar.gz", nil
+	case "rocm":
+		return "https://github.com/ggerganov/llama.cpp/releases/latest/download/llama-b8708-bin-ubuntu-rocm-7.2-x64.tar.gz", nil
+	default:
+		return "https://github.com/ggerganov/llama.cpp/releases/latest/download/llama-b8708-bin-ubuntu-x64.tar.gz", nil
+	}
+}
+
+func verifyLlamaCppBinary() error {
+	info, err := os.Stat(llamaCppBinaryPath)
+	if err != nil {
+		return fmt.Errorf("verify llama.cpp binary: %w", err)
+	}
+	if info.IsDir() {
+		return fmt.Errorf("verify llama.cpp binary: %s is a directory", llamaCppBinaryPath)
+	}
+	if info.Mode()&0o111 == 0 {
+		return fmt.Errorf("verify llama.cpp binary: %s is not executable", llamaCppBinaryPath)
+	}
+	output, err := exec.Command(llamaCppBinaryPath, "--version").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("verify llama.cpp binary execution: %w (%s)", err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
+func resolveLlamaCppPort(preferredPort int) (int, error) {
+	if preferredPort <= 0 {
+		preferredPort = llamaCppDefaultPort
+	}
+	if isTcpPortAvailable(preferredPort) {
+		return preferredPort, nil
+	}
+	for candidate := preferredPort + 1; candidate <= preferredPort+50; candidate += 1 {
+		if isTcpPortAvailable(candidate) {
 			return candidate, nil
 		}
-		outText := strings.TrimSpace(string(output))
-		if shouldAvoidInteractiveLMStudioGet(outText) {
-			lastErr = fmt.Errorf("load llamacpp model %q failed: %w (%s)", candidate, err, outText)
-			continue
-		}
+	}
+	return 0, fmt.Errorf("no available TCP port found for llama.cpp runtime near %d", preferredPort)
+}
 
-		getCmd := exec.Command(path, "get", candidate)
-		getCmd.Env = d.envForPath(path)
-		if getOut, getErr := getCmd.CombinedOutput(); getErr != nil {
-			lastErr = fmt.Errorf(
-				"load llamacpp model %q failed: %w (%s); download attempt failed: %w (%s)",
-				candidate,
-				err,
-				outText,
-				getErr,
-				strings.TrimSpace(string(getOut)),
-			)
+func isTcpPortAvailable(port int) bool {
+	listener, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", port))
+	if err != nil {
+		return false
+	}
+	_ = listener.Close()
+	return true
+}
+
+func installLlamaCppFromAsset(assetURL string) error {
+	tmpDir, err := os.MkdirTemp("", "llamacpp-install-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmpDir)
+
+	archivePath := filepath.Join(tmpDir, filepath.Base(assetURL))
+	if err := downloadFile(assetURL, archivePath); err != nil {
+		return err
+	}
+	extractDir := filepath.Join(tmpDir, "extract")
+	if err := os.MkdirAll(extractDir, 0o755); err != nil {
+		return err
+	}
+	if strings.HasSuffix(strings.ToLower(archivePath), ".zip") {
+		if err := unzipArchive(archivePath, extractDir); err != nil {
+			return err
+		}
+	} else {
+		if err := runCommand("tar", "-xzf", archivePath, "-C", extractDir); err != nil {
+			return fmt.Errorf("extract llama.cpp archive: %w", err)
+		}
+	}
+	binary, err := findExecutableNamed(extractDir, "llama-server")
+	if err != nil {
+		return err
+	}
+	_ = os.RemoveAll(llamaCppInstallDir)
+	if err := os.MkdirAll(llamaCppInstallDir, 0o755); err != nil {
+		return err
+	}
+	if err := copyLlamaCppArtifacts(filepath.Dir(binary), llamaCppInstallDir); err != nil {
+		return err
+	}
+	return nil
+}
+
+func copyLlamaCppArtifacts(sourceDir string, targetDir string) error {
+	entries, err := os.ReadDir(sourceDir)
+	if err != nil {
+		return fmt.Errorf("read llama.cpp artifacts: %w", err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
 			continue
 		}
-		retryCmd := exec.Command(path, "load", candidate)
-		retryCmd.Env = d.envForPath(path)
-		if retryOut, retryErr := retryCmd.CombinedOutput(); retryErr != nil {
-			lastErr = fmt.Errorf("load llamacpp model %q after download: %w (%s)", candidate, retryErr, strings.TrimSpace(string(retryOut)))
+		sourcePath := filepath.Join(sourceDir, entry.Name())
+		info, err := os.Stat(sourcePath)
+		if err != nil {
+			return fmt.Errorf("stat llama.cpp artifact %s: %w", entry.Name(), err)
+		}
+		data, err := os.ReadFile(sourcePath)
+		if err != nil {
+			return fmt.Errorf("read llama.cpp artifact %s: %w", entry.Name(), err)
+		}
+		mode := info.Mode().Perm()
+		if mode == 0 {
+			mode = 0o644
+		}
+		if err := os.WriteFile(filepath.Join(targetDir, entry.Name()), data, mode); err != nil {
+			return fmt.Errorf("write llama.cpp artifact %s: %w", entry.Name(), err)
+		}
+	}
+	return nil
+}
+
+func downloadFile(url string, destination string) error {
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("User-Agent", "mantlerd")
+	resp, err := (&http.Client{Timeout: 10 * time.Minute}).Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return fmt.Errorf("download failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
+		return err
+	}
+	file, err := os.Create(destination)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	_, err = io.Copy(file, resp.Body)
+	return err
+}
+
+func unzipArchive(zipPath string, destDir string) error {
+	reader, err := zip.OpenReader(zipPath)
+	if err != nil {
+		return err
+	}
+	defer reader.Close()
+	for _, file := range reader.File {
+		targetPath := filepath.Join(destDir, file.Name)
+		if file.FileInfo().IsDir() {
+			if err := os.MkdirAll(targetPath, 0o755); err != nil {
+				return err
+			}
 			continue
 		}
-		return candidate, nil
+		if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
+			return err
+		}
+		src, err := file.Open()
+		if err != nil {
+			return err
+		}
+		dst, err := os.OpenFile(targetPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, file.Mode())
+		if err != nil {
+			src.Close()
+			return err
+		}
+		_, copyErr := io.Copy(dst, src)
+		_ = dst.Close()
+		_ = src.Close()
+		if copyErr != nil {
+			return copyErr
+		}
 	}
-	if lastErr != nil {
-		return "", lastErr
+	return nil
+}
+
+func findExecutableNamed(root string, name string) (string, error) {
+	var found string
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		if entry.Name() != name {
+			return nil
+		}
+		found = path
+		return io.EOF
+	})
+	if err != nil && err != io.EOF {
+		return "", err
 	}
-	return "", fmt.Errorf("failed to load llamacpp model %q", modelID)
+	if found == "" {
+		return "", fmt.Errorf("%s not found in extracted archive", name)
+	}
+	return found, nil
+}
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
 var lmstudioNumericSuffixPattern = regexp.MustCompile(`^(.*):[0-9]+$`)
-var lmstudioBinaryPathPattern = regexp.MustCompile(`(/[^'"\s;]+/lms)\b`)
 
 func normalizeLMStudioModelID(modelID string) string {
 	modelID = strings.TrimSpace(modelID)
@@ -587,35 +932,6 @@ func llamacppModelIDsEquivalent(left string, right string) bool {
 	return strings.EqualFold(l, r)
 }
 
-func uniqueStrings(values []string) []string {
-	result := make([]string, 0, len(values))
-	seen := map[string]struct{}{}
-	for _, value := range values {
-		value = strings.TrimSpace(value)
-		if value == "" {
-			continue
-		}
-		key := strings.ToLower(value)
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
-		result = append(result, value)
-	}
-	return result
-}
-
-func shouldAvoidInteractiveLMStudioGet(output string) bool {
-	text := strings.ToLower(strings.TrimSpace(output))
-	if text == "" {
-		return false
-	}
-	return strings.Contains(text, "enotty") ||
-		strings.Contains(text, "not a typewriter") ||
-		strings.Contains(text, "please select one from the list below") ||
-		strings.Contains(text, "cannot find a model matching the provided model key")
-}
-
 func llamacppAuthPasskeyError(output string) bool {
 	text := strings.ToLower(strings.TrimSpace(output))
 	if text == "" {
@@ -635,366 +951,4 @@ func llamacppModelAlreadyRemoved(output string) bool {
 		strings.Contains(text, "already unloaded") ||
 		strings.Contains(text, "no model is loaded") ||
 		strings.Contains(text, "cannot find a model")
-}
-
-func (d *lmstudioDriver) unloadModelAcrossContexts(
-	modelID string,
-	contexts []lmstudioCommandContext,
-) error {
-	var sawPasskeyFailure bool
-	var firstErr error
-	for _, ctx := range contexts {
-		cmd := exec.Command(ctx.path, "unload", modelID)
-		cmd.Env = d.envForPathWithHome(ctx.path, ctx.home)
-		output, err := cmd.CombinedOutput()
-		outText := strings.TrimSpace(string(output))
-
-		if err == nil || llamacppModelAlreadyRemoved(outText) {
-			return nil
-		}
-		if llamacppAuthPasskeyError(outText) {
-			sawPasskeyFailure = true
-			continue
-		}
-		if firstErr == nil {
-			firstErr = fmt.Errorf("unload llamacpp model %q via %s (HOME=%s): %w (%s)", modelID, ctx.path, ctx.home, err, outText)
-		}
-	}
-	if firstErr != nil {
-		return firstErr
-	}
-	if sawPasskeyFailure {
-		return fmt.Errorf("unload llamacpp model %q failed due to llamacpp CLI passkey mismatch; ensure agent uses the bundled lms binary", modelID)
-	}
-	return fmt.Errorf("unload llamacpp model %q failed", modelID)
-}
-
-func (d *lmstudioDriver) baseURL() string {
-	cfg, err := d.readConfig()
-	port := lmsDefaultPort
-	if err == nil && cfg.Port > 0 {
-		port = cfg.Port
-	}
-	return fmt.Sprintf("http://127.0.0.1:%d", port)
-}
-
-func (d *lmstudioDriver) ensureServiceUnit() error {
-	path := d.resolveLMSPath()
-	if path == "" {
-		return fmt.Errorf("llamacpp cli not installed")
-	}
-	if _, err := exec.LookPath("systemctl"); err != nil {
-		return nil
-	}
-	if err := os.MkdirAll(filepath.Dir(lmsServiceUnitPath), 0o755); err != nil {
-		return fmt.Errorf("create llamacpp systemd directory: %w", err)
-	}
-	home := d.homeForPath(path)
-	binDir := filepath.Dir(path)
-	pathEnv := binDir + ":" + lmsDefaultSystemdPath
-	unit := `[Unit]
-Description=llamacpp OpenAI API Server
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-Environment=HOME=` + home + `
-Environment=PATH=` + pathEnv + `
-Environment=LMS_SERVER_PORT=` + fmt.Sprintf("%d", lmsDefaultPort) + `
-Environment=LMS_BIND_ADDRESS=0.0.0.0
-ExecStart=/bin/sh -lc 'set -e; ` + path + ` daemon up --json >/dev/null 2>&1 || ` + path + ` daemon up >/dev/null 2>&1; HELP="$(` + path + ` server start --help 2>&1 || true)"; case "$HELP" in *"--bind"*) exec ` + path + ` server start --port "${LMS_SERVER_PORT:-1234}" --bind "${LMS_BIND_ADDRESS:-0.0.0.0}" ;; *"--host"*) exec ` + path + ` server start --port "${LMS_SERVER_PORT:-1234}" --host "${LMS_BIND_ADDRESS:-0.0.0.0}" ;; *) export LMS_SERVER_HOST="${LMS_BIND_ADDRESS:-0.0.0.0}"; exec ` + path + ` server start --port "${LMS_SERVER_PORT:-1234}" ;; esac'
-Restart=always
-RestartSec=5
-User=root
-
-[Install]
-WantedBy=multi-user.target
-`
-	if err := os.WriteFile(lmsServiceUnitPath, []byte(unit), 0o644); err != nil {
-		return fmt.Errorf("write llamacpp service unit: %w", err)
-	}
-	if err := runCommand("systemctl", "daemon-reload"); err != nil {
-		return fmt.Errorf("reload systemd daemon: %w", err)
-	}
-	if err := runCommand("systemctl", "enable", "llamacpp"); err != nil {
-		return fmt.Errorf("enable llamacpp service: %w", err)
-	}
-	return nil
-}
-
-func (d *lmstudioDriver) startOrRestartService() error {
-	if _, err := exec.LookPath("systemctl"); err != nil {
-		return fmt.Errorf("systemctl not available")
-	}
-	if err := d.ensureServiceUnit(); err != nil {
-		return err
-	}
-	if err := runCommand("systemctl", "restart", "llamacpp"); err != nil {
-		return fmt.Errorf("restart llamacpp service: %w", err)
-	}
-	if err := d.waitForAPIReady(lmsReadyTimeout); err != nil {
-		return err
-	}
-	cfg, cfgErr := d.readConfig()
-	port := lmsDefaultPort
-	if cfgErr == nil && cfg.Port > 0 {
-		port = cfg.Port
-	}
-	isExternal, err := isServiceListeningOnNonLoopback(port)
-	if err != nil {
-		return err
-	}
-	if !isExternal {
-		return fmt.Errorf("llamacpp server is only listening on localhost; expected 0.0.0.0 or non-loopback interface")
-	}
-	return nil
-}
-
-func (d *lmstudioDriver) waitForAPIReady(timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	client := &http.Client{Timeout: 3 * time.Second}
-	lastErr := ""
-	for time.Now().Before(deadline) {
-		req, err := http.NewRequest(http.MethodGet, d.baseURL()+"/v1/models", nil)
-		if err == nil {
-			resp, reqErr := client.Do(req)
-			if reqErr == nil {
-				_, _ = io.ReadAll(resp.Body)
-				resp.Body.Close()
-				if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-					return nil
-				}
-				lastErr = fmt.Sprintf("status %d", resp.StatusCode)
-			} else {
-				lastErr = reqErr.Error()
-			}
-		} else {
-			lastErr = err.Error()
-		}
-		time.Sleep(2 * time.Second)
-	}
-	if strings.TrimSpace(lastErr) == "" {
-		lastErr = "timed out waiting for /v1/models"
-	}
-	return fmt.Errorf("llamacpp api not ready: %s", lastErr)
-}
-
-func (d *lmstudioDriver) fetchRemoteModels() ([]string, error) {
-	req, err := http.NewRequest(http.MethodGet, d.baseURL()+"/v1/models", nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("llamacpp models endpoint failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
-	}
-	var payload struct {
-		Data []struct {
-			ID string `json:"id"`
-		} `json:"data"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return nil, err
-	}
-	models := make([]string, 0, len(payload.Data))
-	for _, item := range payload.Data {
-		id := strings.TrimSpace(item.ID)
-		if id != "" {
-			models = append(models, id)
-		}
-	}
-	return models, nil
-}
-
-func (d *lmstudioDriver) readConfig() (lmstudioConfig, error) {
-	cfg := lmstudioConfig{Port: lmsDefaultPort}
-	raw, err := os.ReadFile(lmsConfigPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return cfg, nil
-		}
-		return cfg, fmt.Errorf("read llamacpp config: %w", err)
-	}
-	if len(raw) == 0 {
-		return cfg, nil
-	}
-	if err := json.Unmarshal(raw, &cfg); err != nil {
-		return lmstudioConfig{}, fmt.Errorf("parse llamacpp config: %w", err)
-	}
-	if cfg.Port <= 0 {
-		cfg.Port = lmsDefaultPort
-	}
-	return cfg, nil
-}
-
-func (d *lmstudioDriver) writeConfig(cfg lmstudioConfig) error {
-	if cfg.Port <= 0 {
-		cfg.Port = lmsDefaultPort
-	}
-	if err := os.MkdirAll(filepath.Dir(lmsConfigPath), 0o755); err != nil {
-		return fmt.Errorf("create llamacpp config directory: %w", err)
-	}
-	payload, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return fmt.Errorf("encode llamacpp config: %w", err)
-	}
-	if err := os.WriteFile(lmsConfigPath, append(payload, '\n'), 0o600); err != nil {
-		return fmt.Errorf("write llamacpp config: %w", err)
-	}
-	return nil
-}
-
-func (d *lmstudioDriver) resolveLMSPath() string {
-	if unitPath, _ := d.resolveLMSFromServiceUnit(); unitPath != "" {
-		unitPath = strings.TrimSpace(unitPath)
-		if info, statErr := os.Stat(unitPath); statErr == nil && !info.IsDir() {
-			return unitPath
-		}
-	}
-	if path, err := exec.LookPath("lms"); err == nil {
-		path = strings.TrimSpace(path)
-		if info, statErr := os.Stat(path); statErr == nil && !info.IsDir() {
-			return path
-		}
-	}
-	candidates := []string{"/root/.lmstudio/bin/lms"}
-	if paths, err := filepath.Glob("/home/*/.lmstudio/bin/lms"); err == nil {
-		candidates = append(candidates, paths...)
-	}
-	for _, candidate := range candidates {
-		candidate = strings.TrimSpace(candidate)
-		if candidate == "" {
-			continue
-		}
-		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
-			return candidate
-		}
-	}
-	return ""
-}
-
-func (d *lmstudioDriver) resolveLMSContexts() []lmstudioCommandContext {
-	contexts := make([]lmstudioCommandContext, 0, 6)
-	seen := map[string]struct{}{}
-	add := func(path string, home string) {
-		path = strings.TrimSpace(path)
-		home = strings.TrimSpace(home)
-		if path == "" {
-			return
-		}
-		if info, err := os.Stat(path); err != nil || info.IsDir() {
-			return
-		}
-		if home == "" {
-			home = d.homeForPath(path)
-		}
-		key := path + "|" + home
-		if _, ok := seen[key]; ok {
-			return
-		}
-		seen[key] = struct{}{}
-		contexts = append(contexts, lmstudioCommandContext{
-			path: path,
-			home: home,
-		})
-	}
-
-	unitPath, unitHome := d.resolveLMSFromServiceUnit()
-	add(unitPath, unitHome)
-	add(d.resolveLMSPath(), "")
-
-	candidates := []string{
-		"/root/.lmstudio/bin/lms",
-	}
-	if paths, err := filepath.Glob("/home/*/.lmstudio/bin/lms"); err == nil {
-		candidates = append(candidates, paths...)
-	}
-	for _, candidate := range candidates {
-		add(candidate, "")
-	}
-	if path, err := exec.LookPath("lms"); err == nil {
-		add(path, "")
-	}
-	return contexts
-}
-
-func (d *lmstudioDriver) resolveLMSFromServiceUnit() (string, string) {
-	raw, err := os.ReadFile(lmsServiceUnitPath)
-	if err != nil {
-		return "", ""
-	}
-	unit := string(raw)
-	home := ""
-	for _, line := range strings.Split(unit, "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "Environment=HOME=") {
-			home = strings.TrimSpace(strings.TrimPrefix(line, "Environment=HOME="))
-			home = strings.Trim(home, `"`)
-			break
-		}
-	}
-	matches := lmstudioBinaryPathPattern.FindStringSubmatch(unit)
-	if len(matches) < 2 {
-		return "", home
-	}
-	return strings.TrimSpace(matches[1]), home
-}
-
-func (d *lmstudioDriver) clearConfiguredModel(modelID string) {
-	cfg, err := d.readConfig()
-	if err != nil {
-		return
-	}
-	configured := strings.TrimSpace(cfg.Model)
-	if configured == "" {
-		return
-	}
-	if llamacppModelIDsEquivalent(configured, modelID) {
-		cfg.Model = ""
-		_ = d.writeConfig(cfg)
-	}
-}
-
-func (d *lmstudioDriver) homeForPath(path string) string {
-	path = strings.TrimSpace(path)
-	if path == "" {
-		return "/root"
-	}
-	marker := "/.lmstudio/bin/lms"
-	if strings.Contains(path, marker) {
-		return strings.TrimSuffix(path, marker)
-	}
-	return "/root"
-}
-
-func (d *lmstudioDriver) envForPath(path string) []string {
-	return d.envForPathWithHome(path, d.homeForPath(path))
-}
-
-func (d *lmstudioDriver) envForPathWithHome(path string, home string) []string {
-	home = strings.TrimSpace(home)
-	if home == "" {
-		home = d.homeForPath(path)
-	}
-	binDir := filepath.Dir(path)
-	env := os.Environ()
-	env = append(env, "HOME="+home)
-	env = append(env, "PATH="+binDir+":"+lmsDefaultSystemdPath)
-	return env
-}
-
-func (d *lmstudioDriver) forceStopLingeringProcesses() {
-	patterns := []string{
-		"/.lmstudio/.internal/utils/node",
-		"/.lmstudio/bin/lms",
-	}
-	for _, pattern := range patterns {
-		_ = exec.Command("pkill", "-f", pattern).Run()
-	}
 }

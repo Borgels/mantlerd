@@ -37,6 +37,12 @@ type CancellableDriver interface {
 	PrepareModelWithFlagsCtx(ctx context.Context, modelID string, flags *types.ModelFeatureFlags) error
 }
 
+// ConfigurableDriver exposes runtime-specific configuration for check-in reporting.
+type ConfigurableDriver interface {
+	Driver
+	RuntimeConfig() map[string]any
+}
+
 // BuildOptions specifies parameters for TensorRT engine compilation.
 type BuildOptions struct {
 	Quantization string // "fp4", "fp8", "int8", "none"

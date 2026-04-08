@@ -122,6 +122,7 @@ func runSetup(cmd *cobra.Command, args []string) {
 				summary,
 				workload,
 				0,
+				"",
 			); reportErr != nil {
 				fmt.Fprintf(os.Stderr, "Warning: failed to report eval outcomes: %v\n", reportErr)
 			} else {

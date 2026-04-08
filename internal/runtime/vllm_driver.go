@@ -211,6 +211,28 @@ func (d *vllmDriver) Version() string {
 	return ""
 }
 
+func (d *vllmDriver) RuntimeConfig() map[string]any {
+	config := map[string]any{
+		"version":        d.Version(),
+		"runtimeMode":    d.runtimeMode(),
+		"containerImage": d.effectiveContainerImage(),
+	}
+
+	env := d.readEnvConfigMap()
+	if gpuMemoryUtilization := strings.TrimSpace(env["VLLM_GPU_MEMORY_UTILIZATION"]); gpuMemoryUtilization != "" {
+		if parsed, err := strconv.ParseFloat(gpuMemoryUtilization, 64); err == nil {
+			config["gpuMemoryUtilization"] = parsed
+		} else {
+			config["gpuMemoryUtilization"] = gpuMemoryUtilization
+		}
+	}
+	if extraArgs := strings.TrimSpace(env["VLLM_EXTRA_ARGS"]); extraArgs != "" {
+		config["extraArgs"] = extraArgs
+	}
+
+	return config
+}
+
 func (d *vllmDriver) PrepareModelWithFlags(modelID string, flags *types.ModelFeatureFlags) error {
 	return d.PrepareModelWithFlagsCtx(context.Background(), modelID, flags)
 }

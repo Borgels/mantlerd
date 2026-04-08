@@ -9,6 +9,7 @@ const (
 	FamilyVLLM     Family = "vllm"
 	FamilyLlamaCPP Family = "llama.cpp"
 	FamilyTensorRT Family = "tensorrt"
+	FamilyQuantCPP Family = "quant.cpp"
 )
 
 type RuntimeSpec struct {
@@ -42,7 +43,7 @@ var runtimeCatalog = []RuntimeSpec{
 		DisplayName:     "llama.cpp",
 		Family:          FamilyLlamaCPP,
 		Description:     "llama.cpp runtime managed by mantlerd",
-		BackendVariants: []string{"cpu", "cuda", "vulkan"},
+		BackendVariants: []string{"cpu", "cuda", "vulkan", "metal", "rocm"},
 		CreateDriver:    newLlamaCppDriver,
 	},
 	{
@@ -52,6 +53,14 @@ var runtimeCatalog = []RuntimeSpec{
 		Description:     "NVIDIA TensorRT-LLM optimized serving runtime",
 		BackendVariants: []string{"cuda"},
 		CreateDriver:    newTensorRTDriver,
+	},
+	{
+		Name:            "quantcpp",
+		DisplayName:     "quant.cpp",
+		Family:          FamilyQuantCPP,
+		Description:     "Minimal quant.cpp runtime with KV cache compression",
+		BackendVariants: []string{"cpu"},
+		CreateDriver:    newQuantCppDriver,
 	},
 }
 
