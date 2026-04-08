@@ -29,6 +29,7 @@ var (
 	evalProfile  string
 	evalRuntime  string
 	evalJSON     bool
+	evalStealth  bool
 )
 
 var allowedEvalWorkloads = map[string]struct{}{
@@ -46,6 +47,7 @@ func init() {
 	evalCmd.Flags().StringVar(&evalProfile, "profile", "quick", "Eval profile (quick, standard, deep)")
 	evalCmd.Flags().StringVar(&evalRuntime, "runtime", "", "Runtime hint (llamacpp, ollama, vllm, tensorrt)")
 	evalCmd.Flags().BoolVar(&evalJSON, "json", false, "Print raw JSON summary")
+	evalCmd.Flags().BoolVar(&evalStealth, "stealth", false, "Run local-only eval (skip prompt fetch and telemetry upload)")
 }
 
 func runEval(cmd *cobra.Command, args []string) {
@@ -71,9 +73,15 @@ func runEval(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 
-	reportingCtx, reportingErr := loadEvalReportingContext(cmd)
-	if reportingErr != nil {
-		fmt.Fprintf(os.Stderr, "Warning: eval telemetry reporting disabled: %v\n", reportingErr)
+	var reportingCtx *evalReportingContext
+	if !evalStealth {
+		var reportingErr error
+		reportingCtx, reportingErr = loadEvalReportingContext(cmd)
+		if reportingErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: eval telemetry reporting disabled: %v\n", reportingErr)
+		}
+	} else {
+		fmt.Fprintln(os.Stderr, "Stealth mode enabled: running local eval only (no prompt fetch, no telemetry upload).")
 	}
 	prompts := localEvalPrompts(workload, profile)
 	if reportingCtx != nil {
