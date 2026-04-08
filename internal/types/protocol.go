@@ -122,6 +122,7 @@ type OutcomeEvent struct {
 	MantleFingerprint string             `json:"mantleFingerprint,omitempty"`
 	BaseFingerprint   string             `json:"baseFingerprint,omitempty"`
 	EventType         string             `json:"eventType"`
+	EvidenceKind      string             `json:"evidenceKind,omitempty"`
 	Workload          string             `json:"workload,omitempty"`
 	RuntimeImage      string             `json:"runtimeImage,omitempty"`
 	DurationMs        int64              `json:"durationMs,omitempty"`

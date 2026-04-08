@@ -84,6 +84,7 @@ func runEval(cmd *cobra.Command, args []string) {
 		fmt.Fprintln(os.Stderr, "Stealth mode enabled: running local eval only (no prompt fetch, no telemetry upload).")
 	}
 	prompts := localEvalPrompts(workload, profile)
+	runtimeHint := strings.TrimSpace(evalRuntime)
 	if reportingCtx != nil {
 		promptCtx, promptCancel := context.WithTimeout(context.Background(), 15*time.Second)
 		serverPrompts, promptErr := reportingCtx.client.GetEvalPrompts(promptCtx, workload, profile)
@@ -93,10 +94,12 @@ func runEval(cmd *cobra.Command, args []string) {
 		}
 	}
 	manager := runtime.NewManager()
-	if runtimeName := strings.TrimSpace(evalRuntime); runtimeName != "" {
+	if runtimeHint != "" {
+		runtimeName := runtimeHint
 		_ = manager.EnsureRuntime(runtimeName)
 	}
 	runner := agenteval.NewRunner(manager)
+	effectiveRuntime := resolveEvalRuntime(manager, modelID, runtimeHint)
 
 	fmt.Printf("Evaluating %s for %s (%s, %d prompts)\n", modelID, workload, profile, len(prompts))
 	summary, err := runner.Run(context.Background(), modelID, workload, profile, prompts, nil)
@@ -128,7 +131,15 @@ func runEval(cmd *cobra.Command, args []string) {
 	}
 
 	if reportingCtx != nil {
-		err = reportEvalSummary(reportingCtx.client, reportingCtx.machineID, summary, workload, rating)
+		err = reportEvalSummary(
+			reportingCtx.client,
+			reportingCtx.machineID,
+			modelID,
+			effectiveRuntime,
+			summary,
+			workload,
+			rating,
+		)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to report eval outcomes to server: %v\n", err)
 			return
@@ -181,10 +192,13 @@ func loadEvalReportingContext(cmd *cobra.Command) (*evalReportingContext, error)
 func reportEvalSummary(
 	cl *client.Client,
 	machineID string,
+	modelID string,
+	runtimeName string,
 	summary types.EvalRunSummary,
 	workload string,
 	rating int,
 ) error {
+	baseFingerprint := buildBaseFingerprint(machineID, modelID, runtimeName, "")
 	events := make([]types.OutcomeEvent, 0, len(summary.Samples)+1)
 	for _, sample := range summary.Samples {
 		eventType := "task_failure"
@@ -193,9 +207,11 @@ func reportEvalSummary(
 		}
 		score := sample.QualityScore
 		events = append(events, types.OutcomeEvent{
-			EventType:  eventType,
-			Workload:   workload,
-			DurationMs: int64(sample.LatencyMs),
+			BaseFingerprint: baseFingerprint,
+			EventType:       eventType,
+			EvidenceKind:    "benchmark",
+			Workload:        workload,
+			DurationMs:      int64(sample.LatencyMs),
 			TokenUsage: &types.OutcomeTokenUsage{
 				PromptTokens:     0,
 				CompletionTokens: sample.OutputTokens,
@@ -209,11 +225,13 @@ func reportEvalSummary(
 	if rating > 0 {
 		score := float64(rating * 20)
 		events = append(events, types.OutcomeEvent{
-			EventType:    "task_success",
-			Workload:     workload,
-			QualityScore: &score,
-			Detail:       fmt.Sprintf("User preference rating: %d/5", rating),
-			Timestamp:    time.Now().UTC().Format(time.RFC3339),
+			BaseFingerprint: baseFingerprint,
+			EventType:       "task_success",
+			EvidenceKind:    "benchmark",
+			Workload:        workload,
+			QualityScore:    &score,
+			Detail:          fmt.Sprintf("User preference rating: %d/5", rating),
+			Timestamp:       time.Now().UTC().Format(time.RFC3339),
 		})
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -223,6 +241,54 @@ func reportEvalSummary(
 		OutcomeEvents: events,
 	})
 	return err
+}
+
+func resolveEvalRuntime(manager *runtime.Manager, modelID string, runtimeHint string) string {
+	hint := strings.TrimSpace(runtimeHint)
+	if hint != "" {
+		return hint
+	}
+	targetModel := strings.TrimSpace(modelID)
+	if targetModel == "" {
+		return "ollama"
+	}
+	for _, runtimeName := range manager.InstalledRuntimes() {
+		driver, err := manager.DriverFor(runtimeName)
+		if err != nil {
+			continue
+		}
+		for _, installed := range driver.ListModels() {
+			if strings.TrimSpace(installed) == targetModel {
+				return runtimeName
+			}
+		}
+	}
+	return "ollama"
+}
+
+func stableHash(input string) string {
+	hash := uint32(5381)
+	for _, ch := range input {
+		hash = ((hash << 5) + hash) ^ uint32(ch)
+	}
+	return fmt.Sprintf("%08x", hash)
+}
+
+func hashSeed(seed string) string {
+	runes := []rune(seed)
+	for i, j := 0, len(runes)-1; i < j; i, j = i+1, j-1 {
+		runes[i], runes[j] = runes[j], runes[i]
+	}
+	reversed := string(runes)
+	return stableHash(seed) + stableHash(reversed)
+}
+
+func buildBaseFingerprint(machineID string, modelID string, runtimeName string, backend string) string {
+	seed := strings.TrimSpace(machineID) + "|" +
+		strings.TrimSpace(modelID) + "|" +
+		strings.TrimSpace(runtimeName) + "|" +
+		strings.TrimSpace(backend)
+	return hashSeed(seed)
 }
 
 func localEvalPrompts(workload string, profile string) []agenteval.Prompt {
