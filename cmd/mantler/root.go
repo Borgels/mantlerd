@@ -62,7 +62,6 @@ func initConfig() {
 				os.Exit(1)
 			}
 			viper.AddConfigPath(home + "/.mantler")
-			viper.AddConfigPath(home + "/.clawcontrol")
 			viper.SetConfigName("agent")
 			viper.SetConfigType("json")
 		}

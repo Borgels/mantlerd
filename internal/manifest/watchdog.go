@@ -7,8 +7,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Borgels/clawcontrol-agent/internal/runtime"
-	"github.com/Borgels/clawcontrol-agent/internal/types"
+	"github.com/Borgels/mantlerd/internal/runtime"
+	"github.com/Borgels/mantlerd/internal/types"
 )
 
 type Watchdog struct {

@@ -6,8 +6,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/Borgels/clawcontrol-agent/internal/runtime"
-	"github.com/Borgels/clawcontrol-agent/internal/types"
+	"github.com/Borgels/mantlerd/internal/runtime"
+	"github.com/Borgels/mantlerd/internal/types"
 	"github.com/spf13/cobra"
 )
 
@@ -40,7 +40,7 @@ If no runtime is specified, it uses the default runtime (usually ollama).
 Examples:
   mantler model pull llama2:7b
   mantler model pull llama2:7b --runtime ollama
-  mantler model pull mistral:7b --runtime lmstudio`,
+  mantler model pull mistral:7b --runtime llamacpp`,
 	Args: cobra.ExactArgs(1),
 	Run:  runModelPull,
 }
@@ -97,7 +97,7 @@ func init() {
 	modelCmd.AddCommand(modelBenchmarkCmd)
 
 	// Flags for pull command
-	modelPullCmd.Flags().StringVarP(&modelRuntime, "runtime", "r", "", "Runtime to use (ollama, lmstudio, vllm, tensorrt)")
+	modelPullCmd.Flags().StringVarP(&modelRuntime, "runtime", "r", "", "Runtime to use (ollama, llamacpp, vllm, tensorrt)")
 
 	// Flags for remove command
 	modelRemoveCmd.Flags().StringVarP(&modelRuntime, "runtime", "r", "", "Runtime to remove from (default: all runtimes)")

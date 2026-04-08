@@ -12,8 +12,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Borgels/clawcontrol-agent/internal/manifest"
-	"github.com/Borgels/clawcontrol-agent/internal/types"
+	"github.com/Borgels/mantlerd/internal/manifest"
+	"github.com/Borgels/mantlerd/internal/types"
 )
 
 const orchestratorScannerMaxTokenSize = 1024 * 1024

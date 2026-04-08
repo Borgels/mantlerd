@@ -5,7 +5,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/Borgels/clawcontrol-agent/internal/config"
+	"github.com/Borgels/mantlerd/internal/config"
 	"github.com/spf13/cobra"
 )
 

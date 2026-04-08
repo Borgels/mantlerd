@@ -13,16 +13,16 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Borgels/clawcontrol-agent/internal/client"
-	"github.com/Borgels/clawcontrol-agent/internal/runtime"
-	"github.com/Borgels/clawcontrol-agent/internal/types"
+	"github.com/Borgels/mantlerd/internal/client"
+	"github.com/Borgels/mantlerd/internal/runtime"
+	"github.com/Borgels/mantlerd/internal/types"
 )
 
 const desiredConfigCachePath = "/etc/mantler/desired-config.json"
-const lmstudioKeepWarmEnv = "MANTLER_LMSTUDIO_KEEP_WARM"
+const llamaCppKeepWarmEnv = "MANTLER_LLAMACPP_KEEP_WARM"
 
 func enforceDesiredConfig(runtimeManager *runtime.Manager, desired types.DesiredConfig) {
-	ejectLMStudio := shouldAutoEjectLMStudio(desired)
+	ejectLlamaCpp := shouldAutoEjectLlamaCpp(desired)
 	for _, runtimeType := range desired.Runtimes {
 		if err := runtimeManager.EnsureRuntime(string(runtimeType)); err != nil {
 			log.Printf("failed to ensure runtime %s: %v", runtimeType, err)
@@ -33,11 +33,11 @@ func enforceDesiredConfig(runtimeManager *runtime.Manager, desired types.Desired
 	for _, target := range desired.ModelTargets {
 		modelsHandled[target.ModelID] = true
 		runtimeName := strings.ToLower(strings.TrimSpace(string(target.Runtime)))
-		if ejectLMStudio && runtimeName == string(types.RuntimeLMStudio) {
+		if ejectLlamaCpp && runtimeName == string(types.RuntimeLlamaCpp) {
 			log.Printf(
-				"skipping lmstudio ensure for %s due to idle-eject policy; set %s=true to keep warm",
+				"skipping llamacpp ensure for %s due to idle-eject policy; set %s=true to keep warm",
 				strings.TrimSpace(target.ModelID),
-				lmstudioKeepWarmEnv,
+				llamaCppKeepWarmEnv,
 			)
 			continue
 		}
@@ -57,7 +57,7 @@ func enforceDesiredConfig(runtimeManager *runtime.Manager, desired types.Desired
 }
 
 func reconcileStaleModels(runtimeManager *runtime.Manager, desired types.DesiredConfig, protectedModelIDs []string) {
-	ejectLMStudio := shouldAutoEjectLMStudio(desired)
+	ejectLlamaCpp := shouldAutoEjectLlamaCpp(desired)
 	desiredGlobal := map[string]struct{}{}
 	desiredByRuntime := map[string]map[string]struct{}{}
 	protected := map[string]struct{}{}
@@ -115,7 +115,7 @@ func reconcileStaleModels(runtimeManager *runtime.Manager, desired types.Desired
 			if _, isProtected := protected[modelID]; isProtected {
 				continue
 			}
-			if !(ejectLMStudio && runtimeName == string(types.RuntimeLMStudio)) {
+			if !(ejectLlamaCpp && runtimeName == string(types.RuntimeLlamaCpp)) {
 				if _, ok := desiredGlobal[modelID]; ok {
 					continue
 				}
@@ -137,12 +137,12 @@ func reconcileStaleModels(runtimeManager *runtime.Manager, desired types.Desired
 	}
 }
 
-func shouldAutoEjectLMStudio(_ types.DesiredConfig) bool {
-	return !lmstudioKeepWarmEnabled()
+func shouldAutoEjectLlamaCpp(_ types.DesiredConfig) bool {
+	return !llamaCppKeepWarmEnabled()
 }
 
-func lmstudioKeepWarmEnabled() bool {
-	value := strings.ToLower(strings.TrimSpace(os.Getenv(lmstudioKeepWarmEnv)))
+func llamaCppKeepWarmEnabled() bool {
+	value := strings.ToLower(strings.TrimSpace(os.Getenv(llamaCppKeepWarmEnv)))
 	switch value {
 	case "1", "true", "yes", "on":
 		return true

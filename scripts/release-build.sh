@@ -19,7 +19,7 @@ build_target() {
   echo "Building ${out}"
   GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 \
     go build -buildvcs=false -trimpath -ldflags "-s -w -X main.agentVersion=${VERSION}" \
-    -o "$out" "${ROOT_DIR}/cmd/clawcontrol-agent"
+    -o "$out" "${ROOT_DIR}/cmd/mantler"
 
   if command -v sha256sum >/dev/null 2>&1; then
     sha256sum "$out" | awk '{print $1}' > "${out}.sha256"

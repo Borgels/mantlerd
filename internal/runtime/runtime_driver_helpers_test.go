@@ -226,7 +226,7 @@ func TestKnownModelImageIncompatibility(t *testing.T) {
 	}
 }
 
-func TestLMStudioAuthPasskeyError(t *testing.T) {
+func TestLlamaCppAuthPasskeyError(t *testing.T) {
 	t.Parallel()
 
 	cases := []struct {
@@ -236,12 +236,12 @@ func TestLMStudioAuthPasskeyError(t *testing.T) {
 	}{
 		{
 			name:   "matches invalid passkey message",
-			output: "Invalid passkey for lms CLI client. Please make sure you are using the lms shipped with LM Studio.",
+			output: "Invalid passkey for lms CLI client. Please make sure you are using the bundled lms binary.",
 			want:   true,
 		},
 		{
-			name:   "matches shipped lms hint",
-			output: "Please make sure you are using the lms shipped with LM Studio.",
+			name:   "matches bundled lms hint",
+			output: "Please make sure you are using the bundled lms binary.",
 			want:   true,
 		},
 		{
@@ -255,15 +255,15 @@ func TestLMStudioAuthPasskeyError(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := lmstudioAuthPasskeyError(tc.output)
+			got := llamacppAuthPasskeyError(tc.output)
 			if got != tc.want {
-				t.Fatalf("lmstudioAuthPasskeyError() = %v, want %v", got, tc.want)
+				t.Fatalf("llamacppAuthPasskeyError() = %v, want %v", got, tc.want)
 			}
 		})
 	}
 }
 
-func TestLMStudioModelAlreadyRemoved(t *testing.T) {
+func TestLlamaCppModelAlreadyRemoved(t *testing.T) {
 	t.Parallel()
 
 	cases := []struct {
@@ -292,9 +292,9 @@ func TestLMStudioModelAlreadyRemoved(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := lmstudioModelAlreadyRemoved(tc.output)
+			got := llamacppModelAlreadyRemoved(tc.output)
 			if got != tc.want {
-				t.Fatalf("lmstudioModelAlreadyRemoved() = %v, want %v", got, tc.want)
+				t.Fatalf("llamacppModelAlreadyRemoved() = %v, want %v", got, tc.want)
 			}
 		})
 	}
@@ -325,7 +325,7 @@ func TestCollapseLMStudioModelIDs(t *testing.T) {
 	}
 }
 
-func TestLMStudioModelIDsEquivalent(t *testing.T) {
+func TestLlamaCppModelIDsEquivalent(t *testing.T) {
 	t.Parallel()
 
 	cases := []struct {
@@ -352,9 +352,9 @@ func TestLMStudioModelIDsEquivalent(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := lmstudioModelIDsEquivalent(tc.left, tc.right)
+			got := llamacppModelIDsEquivalent(tc.left, tc.right)
 			if got != tc.want {
-				t.Fatalf("lmstudioModelIDsEquivalent() = %v, want %v", got, tc.want)
+				t.Fatalf("llamacppModelIDsEquivalent() = %v, want %v", got, tc.want)
 			}
 		})
 	}

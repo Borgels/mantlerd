@@ -14,13 +14,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Borgels/clawcontrol-agent/internal/types"
+	"github.com/Borgels/mantlerd/internal/types"
 )
 
 const (
 	lmsInstallScriptURL   = "https://lmstudio.ai/install.sh"
-	lmsServiceUnitPath    = "/etc/systemd/system/lmstudio.service"
-	lmsConfigPath         = "/etc/mantler/lmstudio.json"
+	lmsServiceUnitPath    = "/etc/systemd/system/llamacpp.service"
+	lmsConfigPath         = "/etc/mantler/llamacpp.json"
 	lmsDefaultPort        = 1234
 	lmsReadyTimeout       = 90 * time.Second
 	lmsDefaultSystemdPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -42,7 +42,11 @@ func newLMStudioDriver() Driver {
 	return &lmstudioDriver{}
 }
 
-func (d *lmstudioDriver) Name() string { return "lmstudio" }
+func newLlamaCppDriver() Driver {
+	return &lmstudioDriver{}
+}
+
+func (d *lmstudioDriver) Name() string { return "llamacpp" }
 
 func (d *lmstudioDriver) Install() error {
 	path := strings.TrimSpace(d.resolveLMSPath())
@@ -55,7 +59,7 @@ func (d *lmstudioDriver) Install() error {
 	}
 	if !d.IsInstalled() {
 		if err := runCommand("sh", "-c", "curl -fsSL "+lmsInstallScriptURL+" | bash"); err != nil {
-			return fmt.Errorf("install lmstudio cli: %w", err)
+			return fmt.Errorf("install llamacpp cli: %w", err)
 		}
 		path = strings.TrimSpace(d.resolveLMSPath())
 	}
@@ -67,7 +71,7 @@ func (d *lmstudioDriver) Install() error {
 			return err
 		}
 	} else if !d.IsReady() {
-		return fmt.Errorf("lmstudio cli not installed")
+		return fmt.Errorf("llamacpp cli not installed")
 	}
 	cfg, err := d.readConfig()
 	if err == nil && strings.TrimSpace(cfg.Model) != "" {
@@ -76,7 +80,7 @@ func (d *lmstudioDriver) Install() error {
 		}
 		resolvedModelID, err := d.loadModel(cfg.Model)
 		if err != nil {
-			return fmt.Errorf("load configured lmstudio model %q: %w", cfg.Model, err)
+			return fmt.Errorf("load configured llamacpp model %q: %w", cfg.Model, err)
 		}
 		if resolvedModelID != "" && resolvedModelID != cfg.Model {
 			cfg.Model = resolvedModelID
@@ -87,8 +91,8 @@ func (d *lmstudioDriver) Install() error {
 }
 
 func (d *lmstudioDriver) Uninstall() error {
-	_ = runCommand("systemctl", "stop", "lmstudio")
-	_ = runCommand("systemctl", "disable", "lmstudio")
+	_ = runCommand("systemctl", "stop", "llamacpp")
+	_ = runCommand("systemctl", "disable", "llamacpp")
 	_ = os.Remove(lmsServiceUnitPath)
 	_ = runCommand("systemctl", "daemon-reload")
 	path := d.resolveLMSPath()
@@ -237,7 +241,7 @@ func (d *lmstudioDriver) InstalledModels() []types.InstalledModel {
 			seen[strings.ToLower(model)] = struct{}{}
 			result = append(result, types.InstalledModel{
 				ModelID: model,
-				Runtime: types.RuntimeLMStudio,
+				Runtime: types.RuntimeLlamaCpp,
 				Status:  types.ModelReady,
 			})
 		}
@@ -245,7 +249,7 @@ func (d *lmstudioDriver) InstalledModels() []types.InstalledModel {
 			if _, ok := seen[strings.ToLower(configured)]; !ok {
 				result = append(result, types.InstalledModel{
 					ModelID: configured,
-					Runtime: types.RuntimeLMStudio,
+					Runtime: types.RuntimeLlamaCpp,
 					Status:  types.ModelInstalling,
 				})
 			}
@@ -255,12 +259,12 @@ func (d *lmstudioDriver) InstalledModels() []types.InstalledModel {
 
 	if configured != "" {
 		failReason := ""
-		if serviceLikelyOutOfMemory("lmstudio", err) {
+		if serviceLikelyOutOfMemory("llamacpp", err) {
 			failReason = modelFailReasonInsufficientMemory
 		}
 		result = append(result, types.InstalledModel{
 			ModelID:    configured,
-			Runtime:    types.RuntimeLMStudio,
+			Runtime:    types.RuntimeLlamaCpp,
 			Status:     types.ModelFailed,
 			FailReason: failReason,
 		})
@@ -274,7 +278,7 @@ func (d *lmstudioDriver) HasModel(modelID string) bool {
 		return false
 	}
 	for _, model := range d.ListModels() {
-		if lmstudioModelIDsEquivalent(model, modelID) {
+		if llamacppModelIDsEquivalent(model, modelID) {
 			return true
 		}
 	}
@@ -286,7 +290,7 @@ func (d *lmstudioDriver) StartModelWithFlags(modelID string, flags *types.ModelF
 }
 
 func (d *lmstudioDriver) StopModel(modelID string) error {
-	return runCommand("systemctl", "stop", "lmstudio")
+	return runCommand("systemctl", "stop", "llamacpp")
 }
 
 func (d *lmstudioDriver) EnsureModelWithFlags(modelID string, flags *types.ModelFeatureFlags) error {
@@ -303,7 +307,7 @@ func (d *lmstudioDriver) RemoveModel(modelID string) error {
 		// Hardened hosts may hide /home-based LM Studio CLI paths from this
 		// service context. Fall back to stopping the runtime service to unload
 		// GPU memory instead of failing stale-model ejection.
-		_ = runCommand("systemctl", "stop", "lmstudio")
+		_ = runCommand("systemctl", "stop", "llamacpp")
 		if remoteModels, err := d.fetchRemoteModels(); err == nil && len(remoteModels) > 0 {
 			d.forceStopLingeringProcesses()
 		}
@@ -313,12 +317,12 @@ func (d *lmstudioDriver) RemoveModel(modelID string) error {
 
 	targets := []string{modelID}
 	normalizedModelID := normalizeLMStudioModelID(modelID)
-	if normalizedModelID != "" && !lmstudioModelIDsEquivalent(normalizedModelID, modelID) {
+	if normalizedModelID != "" && !llamacppModelIDsEquivalent(normalizedModelID, modelID) {
 		targets = append(targets, normalizedModelID)
 	}
 	if remoteModels, err := d.fetchRemoteModels(); err == nil {
 		for _, remoteModel := range remoteModels {
-			if lmstudioModelIDsEquivalent(remoteModel, modelID) {
+			if llamacppModelIDsEquivalent(remoteModel, modelID) {
 				targets = append(targets, strings.TrimSpace(remoteModel))
 			}
 		}
@@ -341,7 +345,7 @@ func (d *lmstudioDriver) RemoveModel(modelID string) error {
 	if lastErr != nil {
 		return lastErr
 	}
-	return fmt.Errorf("unload lmstudio model %q failed", modelID)
+		return fmt.Errorf("unload llamacpp model %q failed", modelID)
 }
 
 func (d *lmstudioDriver) BenchmarkModel(
@@ -448,23 +452,23 @@ func (d *lmstudioDriver) benchmarkOnce(modelID string, prompt string, sampleOutp
 	}
 	raw, err := json.Marshal(reqBody)
 	if err != nil {
-		return BenchmarkResult{}, fmt.Errorf("encode lmstudio benchmark request: %w", err)
+		return BenchmarkResult{}, fmt.Errorf("encode llamacpp benchmark request: %w", err)
 	}
 
 	start := time.Now()
 	req, err := http.NewRequest(http.MethodPost, d.baseURL()+"/v1/chat/completions", bytes.NewReader(raw))
 	if err != nil {
-		return BenchmarkResult{}, fmt.Errorf("create lmstudio benchmark request: %w", err)
+		return BenchmarkResult{}, fmt.Errorf("create llamacpp benchmark request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := (&http.Client{Timeout: 120 * time.Second}).Do(req)
 	if err != nil {
-		return BenchmarkResult{}, fmt.Errorf("lmstudio benchmark request failed: %w", err)
+		return BenchmarkResult{}, fmt.Errorf("llamacpp benchmark request failed: %w", err)
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 400 {
-		return BenchmarkResult{}, fmt.Errorf("lmstudio benchmark failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return BenchmarkResult{}, fmt.Errorf("llamacpp benchmark failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
 	var parsed struct {
@@ -474,7 +478,7 @@ func (d *lmstudioDriver) benchmarkOnce(modelID string, prompt string, sampleOutp
 		} `json:"usage"`
 	}
 	if err := json.Unmarshal(body, &parsed); err != nil {
-		return BenchmarkResult{}, fmt.Errorf("decode lmstudio benchmark response: %w", err)
+		return BenchmarkResult{}, fmt.Errorf("decode llamacpp benchmark response: %w", err)
 	}
 
 	latencyMs := float64(time.Since(start).Milliseconds())
@@ -494,7 +498,7 @@ func (d *lmstudioDriver) benchmarkOnce(modelID string, prompt string, sampleOutp
 func (d *lmstudioDriver) loadModel(modelID string) (string, error) {
 	path := d.resolveLMSPath()
 	if path == "" {
-		return "", fmt.Errorf("lmstudio cli not installed")
+		return "", fmt.Errorf("llamacpp cli not installed")
 	}
 	candidates := []string{modelID}
 	if normalized := normalizeLMStudioModelID(modelID); normalized != modelID {
@@ -510,7 +514,7 @@ func (d *lmstudioDriver) loadModel(modelID string) (string, error) {
 		}
 		outText := strings.TrimSpace(string(output))
 		if shouldAvoidInteractiveLMStudioGet(outText) {
-			lastErr = fmt.Errorf("load lmstudio model %q failed: %w (%s)", candidate, err, outText)
+			lastErr = fmt.Errorf("load llamacpp model %q failed: %w (%s)", candidate, err, outText)
 			continue
 		}
 
@@ -518,7 +522,7 @@ func (d *lmstudioDriver) loadModel(modelID string) (string, error) {
 		getCmd.Env = d.envForPath(path)
 		if getOut, getErr := getCmd.CombinedOutput(); getErr != nil {
 			lastErr = fmt.Errorf(
-				"load lmstudio model %q failed: %w (%s); download attempt failed: %w (%s)",
+				"load llamacpp model %q failed: %w (%s); download attempt failed: %w (%s)",
 				candidate,
 				err,
 				outText,
@@ -530,7 +534,7 @@ func (d *lmstudioDriver) loadModel(modelID string) (string, error) {
 		retryCmd := exec.Command(path, "load", candidate)
 		retryCmd.Env = d.envForPath(path)
 		if retryOut, retryErr := retryCmd.CombinedOutput(); retryErr != nil {
-			lastErr = fmt.Errorf("load lmstudio model %q after download: %w (%s)", candidate, retryErr, strings.TrimSpace(string(retryOut)))
+			lastErr = fmt.Errorf("load llamacpp model %q after download: %w (%s)", candidate, retryErr, strings.TrimSpace(string(retryOut)))
 			continue
 		}
 		return candidate, nil
@@ -538,7 +542,7 @@ func (d *lmstudioDriver) loadModel(modelID string) (string, error) {
 	if lastErr != nil {
 		return "", lastErr
 	}
-	return "", fmt.Errorf("failed to load lmstudio model %q", modelID)
+	return "", fmt.Errorf("failed to load llamacpp model %q", modelID)
 }
 
 var lmstudioNumericSuffixPattern = regexp.MustCompile(`^(.*):[0-9]+$`)
@@ -574,7 +578,7 @@ func collapseLMStudioModelIDs(models []string) []string {
 	return result
 }
 
-func lmstudioModelIDsEquivalent(left string, right string) bool {
+func llamacppModelIDsEquivalent(left string, right string) bool {
 	l := normalizeLMStudioModelID(left)
 	r := normalizeLMStudioModelID(right)
 	if l == "" || r == "" {
@@ -612,16 +616,16 @@ func shouldAvoidInteractiveLMStudioGet(output string) bool {
 		strings.Contains(text, "cannot find a model matching the provided model key")
 }
 
-func lmstudioAuthPasskeyError(output string) bool {
+func llamacppAuthPasskeyError(output string) bool {
 	text := strings.ToLower(strings.TrimSpace(output))
 	if text == "" {
 		return false
 	}
 	return strings.Contains(text, "invalid passkey for lms cli client") ||
-		strings.Contains(text, "using the lms shipped with lm studio")
+		strings.Contains(text, "using the bundled lms binary")
 }
 
-func lmstudioModelAlreadyRemoved(output string) bool {
+func llamacppModelAlreadyRemoved(output string) bool {
 	text := strings.ToLower(strings.TrimSpace(output))
 	if text == "" {
 		return false
@@ -645,24 +649,24 @@ func (d *lmstudioDriver) unloadModelAcrossContexts(
 		output, err := cmd.CombinedOutput()
 		outText := strings.TrimSpace(string(output))
 
-		if err == nil || lmstudioModelAlreadyRemoved(outText) {
+		if err == nil || llamacppModelAlreadyRemoved(outText) {
 			return nil
 		}
-		if lmstudioAuthPasskeyError(outText) {
+		if llamacppAuthPasskeyError(outText) {
 			sawPasskeyFailure = true
 			continue
 		}
 		if firstErr == nil {
-			firstErr = fmt.Errorf("unload lmstudio model %q via %s (HOME=%s): %w (%s)", modelID, ctx.path, ctx.home, err, outText)
+			firstErr = fmt.Errorf("unload llamacpp model %q via %s (HOME=%s): %w (%s)", modelID, ctx.path, ctx.home, err, outText)
 		}
 	}
 	if firstErr != nil {
 		return firstErr
 	}
 	if sawPasskeyFailure {
-		return fmt.Errorf("unload lmstudio model %q failed due to lmstudio CLI passkey mismatch; ensure agent uses the LM Studio-shipped lms binary", modelID)
+		return fmt.Errorf("unload llamacpp model %q failed due to llamacpp CLI passkey mismatch; ensure agent uses the bundled lms binary", modelID)
 	}
-	return fmt.Errorf("unload lmstudio model %q failed", modelID)
+	return fmt.Errorf("unload llamacpp model %q failed", modelID)
 }
 
 func (d *lmstudioDriver) baseURL() string {
@@ -677,19 +681,19 @@ func (d *lmstudioDriver) baseURL() string {
 func (d *lmstudioDriver) ensureServiceUnit() error {
 	path := d.resolveLMSPath()
 	if path == "" {
-		return fmt.Errorf("lmstudio cli not installed")
+		return fmt.Errorf("llamacpp cli not installed")
 	}
 	if _, err := exec.LookPath("systemctl"); err != nil {
 		return nil
 	}
 	if err := os.MkdirAll(filepath.Dir(lmsServiceUnitPath), 0o755); err != nil {
-		return fmt.Errorf("create lmstudio systemd directory: %w", err)
+		return fmt.Errorf("create llamacpp systemd directory: %w", err)
 	}
 	home := d.homeForPath(path)
 	binDir := filepath.Dir(path)
 	pathEnv := binDir + ":" + lmsDefaultSystemdPath
 	unit := `[Unit]
-Description=LM Studio OpenAI API Server
+Description=llamacpp OpenAI API Server
 After=network-online.target
 Wants=network-online.target
 
@@ -708,13 +712,13 @@ User=root
 WantedBy=multi-user.target
 `
 	if err := os.WriteFile(lmsServiceUnitPath, []byte(unit), 0o644); err != nil {
-		return fmt.Errorf("write lmstudio service unit: %w", err)
+		return fmt.Errorf("write llamacpp service unit: %w", err)
 	}
 	if err := runCommand("systemctl", "daemon-reload"); err != nil {
 		return fmt.Errorf("reload systemd daemon: %w", err)
 	}
-	if err := runCommand("systemctl", "enable", "lmstudio"); err != nil {
-		return fmt.Errorf("enable lmstudio service: %w", err)
+	if err := runCommand("systemctl", "enable", "llamacpp"); err != nil {
+		return fmt.Errorf("enable llamacpp service: %w", err)
 	}
 	return nil
 }
@@ -726,8 +730,8 @@ func (d *lmstudioDriver) startOrRestartService() error {
 	if err := d.ensureServiceUnit(); err != nil {
 		return err
 	}
-	if err := runCommand("systemctl", "restart", "lmstudio"); err != nil {
-		return fmt.Errorf("restart lmstudio service: %w", err)
+	if err := runCommand("systemctl", "restart", "llamacpp"); err != nil {
+		return fmt.Errorf("restart llamacpp service: %w", err)
 	}
 	if err := d.waitForAPIReady(lmsReadyTimeout); err != nil {
 		return err
@@ -742,7 +746,7 @@ func (d *lmstudioDriver) startOrRestartService() error {
 		return err
 	}
 	if !isExternal {
-		return fmt.Errorf("lmstudio server is only listening on localhost; expected 0.0.0.0 or non-loopback interface")
+		return fmt.Errorf("llamacpp server is only listening on localhost; expected 0.0.0.0 or non-loopback interface")
 	}
 	return nil
 }
@@ -773,7 +777,7 @@ func (d *lmstudioDriver) waitForAPIReady(timeout time.Duration) error {
 	if strings.TrimSpace(lastErr) == "" {
 		lastErr = "timed out waiting for /v1/models"
 	}
-	return fmt.Errorf("lmstudio api not ready: %s", lastErr)
+	return fmt.Errorf("llamacpp api not ready: %s", lastErr)
 }
 
 func (d *lmstudioDriver) fetchRemoteModels() ([]string, error) {
@@ -788,7 +792,7 @@ func (d *lmstudioDriver) fetchRemoteModels() ([]string, error) {
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("lmstudio models endpoint failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return nil, fmt.Errorf("llamacpp models endpoint failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	var payload struct {
 		Data []struct {
@@ -815,13 +819,13 @@ func (d *lmstudioDriver) readConfig() (lmstudioConfig, error) {
 		if os.IsNotExist(err) {
 			return cfg, nil
 		}
-		return cfg, fmt.Errorf("read lmstudio config: %w", err)
+		return cfg, fmt.Errorf("read llamacpp config: %w", err)
 	}
 	if len(raw) == 0 {
 		return cfg, nil
 	}
 	if err := json.Unmarshal(raw, &cfg); err != nil {
-		return lmstudioConfig{}, fmt.Errorf("parse lmstudio config: %w", err)
+		return lmstudioConfig{}, fmt.Errorf("parse llamacpp config: %w", err)
 	}
 	if cfg.Port <= 0 {
 		cfg.Port = lmsDefaultPort
@@ -834,14 +838,14 @@ func (d *lmstudioDriver) writeConfig(cfg lmstudioConfig) error {
 		cfg.Port = lmsDefaultPort
 	}
 	if err := os.MkdirAll(filepath.Dir(lmsConfigPath), 0o755); err != nil {
-		return fmt.Errorf("create lmstudio config directory: %w", err)
+		return fmt.Errorf("create llamacpp config directory: %w", err)
 	}
 	payload, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
-		return fmt.Errorf("encode lmstudio config: %w", err)
+		return fmt.Errorf("encode llamacpp config: %w", err)
 	}
 	if err := os.WriteFile(lmsConfigPath, append(payload, '\n'), 0o600); err != nil {
-		return fmt.Errorf("write lmstudio config: %w", err)
+		return fmt.Errorf("write llamacpp config: %w", err)
 	}
 	return nil
 }
@@ -951,7 +955,7 @@ func (d *lmstudioDriver) clearConfiguredModel(modelID string) {
 	if configured == "" {
 		return
 	}
-	if lmstudioModelIDsEquivalent(configured, modelID) {
+	if llamacppModelIDsEquivalent(configured, modelID) {
 		cfg.Model = ""
 		_ = d.writeConfig(cfg)
 	}

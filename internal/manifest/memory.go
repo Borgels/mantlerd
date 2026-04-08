@@ -1,25 +1,43 @@
 package manifest
 
 import (
+	"bufio"
 	"fmt"
+	"os"
 	"os/exec"
 	"sort"
 	"strconv"
 	"strings"
 
-	"github.com/Borgels/clawcontrol-agent/internal/types"
+	"github.com/Borgels/mantlerd/internal/discovery"
+	"github.com/Borgels/mantlerd/internal/types"
 )
 
 type MemoryEstimate struct {
 	RequiredMB   int  `json:"requiredMb"`
 	AvailableMB  int  `json:"availableMb"`
 	FitsInMemory bool `json:"fitsInMemory"`
+	HeadroomMB   int  `json:"headroomMb,omitempty"`
 }
 
 type LoadPlan struct {
-	EjectModelIDs []string `json:"ejectModelIds"`
-	LoadModelIDs  []string `json:"loadModelIds"`
-	Sequential    bool     `json:"sequential"`
+	EjectModelIDs   []string `json:"ejectModelIds"`
+	LoadModelIDs    []string `json:"loadModelIds"`
+	Sequential      bool     `json:"sequential"`
+	ProjectedUsedMB int      `json:"projectedUsedMb,omitempty"`
+	ProjectedFreeMB int      `json:"projectedFreeMb,omitempty"`
+	HeadroomMB      int      `json:"headroomMb,omitempty"`
+	SteadyStateFits bool     `json:"steadyStateFits,omitempty"`
+	MemorySource    string   `json:"memorySource,omitempty"`
+}
+
+type MemorySnapshot struct {
+	TotalMB  int
+	UsedMB   int
+	Source   string
+	Unified  bool
+	Known    bool
+	QueryErr error
 }
 
 func parseParameterCountInBillions(value string) float64 {
@@ -66,7 +84,7 @@ func EstimateModelVRAM(modelID string, runtime string, parameterCount string) in
 		overheadMB = 3072
 	case "tensorrt":
 		overheadMB = 4096
-	case "lmstudio":
+	case "llamacpp":
 		overheadMB = 2048
 	case "ollama":
 		overheadMB = 1536
@@ -129,12 +147,113 @@ func QueryGPUUtilization() (totalMB int, usedMB int, err error) {
 	return totalMB, usedMB, nil
 }
 
+func querySystemMemoryUtilization() (totalMB int, usedMB int, err error) {
+	file, openErr := os.Open("/proc/meminfo")
+	if openErr != nil {
+		return 0, 0, fmt.Errorf("open /proc/meminfo: %w", openErr)
+	}
+	defer file.Close()
+
+	var totalKiB int
+	var availableKiB int
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) < 2 {
+			continue
+		}
+		switch fields[0] {
+		case "MemTotal:":
+			parsed, parseErr := strconv.Atoi(fields[1])
+			if parseErr == nil {
+				totalKiB = parsed
+			}
+		case "MemAvailable:":
+			parsed, parseErr := strconv.Atoi(fields[1])
+			if parseErr == nil {
+				availableKiB = parsed
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return 0, 0, fmt.Errorf("scan /proc/meminfo: %w", err)
+	}
+	if totalKiB <= 0 {
+		return 0, 0, fmt.Errorf("MemTotal unavailable")
+	}
+	totalMB = totalKiB / 1024
+	if availableKiB <= 0 {
+		return totalMB, 0, nil
+	}
+	availableMB := availableKiB / 1024
+	usedMB = totalMB - availableMB
+	if usedMB < 0 {
+		usedMB = 0
+	}
+	return totalMB, usedMB, nil
+}
+
+func QueryMemorySnapshot() MemorySnapshot {
+	unified := discovery.DetectUnifiedMemory()
+	if unified != nil && *unified {
+		totalMB, usedMB, err := querySystemMemoryUtilization()
+		if err == nil && totalMB > 0 {
+			return MemorySnapshot{TotalMB: totalMB, UsedMB: usedMB, Source: "system_ram", Unified: true, Known: true}
+		}
+		return MemorySnapshot{Source: "system_ram", Unified: true, QueryErr: err}
+	}
+
+	if totalMB, usedMB, err := QueryGPUUtilization(); err == nil && totalMB > 0 {
+		return MemorySnapshot{TotalMB: totalMB, UsedMB: usedMB, Source: "gpu_vram", Known: true}
+	}
+
+	totalMB, usedMB, err := querySystemMemoryUtilization()
+	if err == nil && totalMB > 0 {
+		return MemorySnapshot{TotalMB: totalMB, UsedMB: usedMB, Source: "system_ram", Known: true}
+	}
+	return MemorySnapshot{Source: "unknown", QueryErr: err}
+}
+
+func estimateHeadroomMB(totalMB int, unified bool) int {
+	if totalMB <= 0 {
+		if unified {
+			return 4096
+		}
+		return 2048
+	}
+	minimum := 2048
+	ratio := 0.10
+	if unified {
+		minimum = 4096
+		ratio = 0.15
+	}
+	headroom := int(float64(totalMB) * ratio)
+	if headroom < minimum {
+		headroom = minimum
+	}
+	return headroom
+}
+
 func PlanModelLoading(
 	manifest types.ResourceManifest,
 	localMachineID string,
 	currentlyLoaded []string,
 	totalMB int,
 	usedMB int,
+) LoadPlan {
+	return PlanModelLoadingWithSnapshot(manifest, localMachineID, currentlyLoaded, MemorySnapshot{
+		TotalMB: totalMB,
+		UsedMB:  usedMB,
+		Known:   totalMB > 0,
+		Source:  "gpu_vram",
+	})
+}
+
+func PlanModelLoadingWithSnapshot(
+	manifest types.ResourceManifest,
+	localMachineID string,
+	currentlyLoaded []string,
+	snapshot MemorySnapshot,
 ) LoadPlan {
 	desired := make([]types.ManifestModel, 0)
 	for _, model := range manifest.Models {
@@ -148,10 +267,10 @@ func PlanModelLoading(
 	}
 
 	desiredIDs := make(map[string]struct{}, len(desired))
-	requiredMB := 0
+	desiredModelByID := make(map[string]types.ManifestModel, len(desired))
 	for _, model := range desired {
 		desiredIDs[model.ModelID] = struct{}{}
-		requiredMB += EstimateModelVRAM(model.ModelID, model.Runtime, model.ParameterCount)
+		desiredModelByID[model.ModelID] = model
 	}
 
 	loadModelIDs := make([]string, 0, len(desired))
@@ -174,15 +293,41 @@ func PlanModelLoading(
 	sort.Strings(ejectModelIDs)
 	sort.Strings(loadModelIDs)
 
-	availableMB := totalMB - usedMB
-	sequential := requiredMB > availableMB && availableMB > 0
-	if availableMB <= 0 {
-		sequential = true
+	headroomMB := estimateHeadroomMB(snapshot.TotalMB, snapshot.Unified)
+	reclaimableMB := 0
+	for _, modelID := range ejectModelIDs {
+		reclaimableMB += EstimateModelVRAM(modelID, "", "")
+	}
+	loadRequiredMB := 0
+	maxSingleLoadMB := 0
+	for _, modelID := range loadModelIDs {
+		model := desiredModelByID[modelID]
+		estimate := EstimateModelVRAM(model.ModelID, model.Runtime, model.ParameterCount)
+		loadRequiredMB += estimate
+		if estimate > maxSingleLoadMB {
+			maxSingleLoadMB = estimate
+		}
 	}
 
+	projectedUsedMB := snapshot.UsedMB - reclaimableMB + loadRequiredMB
+	if projectedUsedMB < 0 {
+		projectedUsedMB = 0
+	}
+	projectedFreeMB := snapshot.TotalMB - projectedUsedMB
+	if projectedFreeMB < 0 {
+		projectedFreeMB = 0
+	}
+	steadyStateFits := !snapshot.Known || projectedUsedMB+headroomMB <= snapshot.TotalMB
+	sequential := snapshot.Known && maxSingleLoadMB > 0 && !steadyStateFits && (snapshot.UsedMB-reclaimableMB+maxSingleLoadMB+headroomMB <= snapshot.TotalMB)
+
 	return LoadPlan{
-		EjectModelIDs: ejectModelIDs,
-		LoadModelIDs:  loadModelIDs,
-		Sequential:    sequential,
+		EjectModelIDs:   ejectModelIDs,
+		LoadModelIDs:    loadModelIDs,
+		Sequential:      sequential,
+		ProjectedUsedMB: projectedUsedMB,
+		ProjectedFreeMB: projectedFreeMB,
+		HeadroomMB:      headroomMB,
+		SteadyStateFits: steadyStateFits,
+		MemorySource:    snapshot.Source,
 	}
 }

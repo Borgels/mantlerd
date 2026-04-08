@@ -17,9 +17,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Borgels/clawcontrol-agent/internal/config"
-	"github.com/Borgels/clawcontrol-agent/internal/runtime"
-	"github.com/Borgels/clawcontrol-agent/internal/types"
+	"github.com/Borgels/mantlerd/internal/config"
+	agenteval "github.com/Borgels/mantlerd/internal/eval"
+	"github.com/Borgels/mantlerd/internal/runtime"
+	"github.com/Borgels/mantlerd/internal/types"
 )
 
 // ErrCommandCancelled is returned when a command is cancelled via CancelCommand.
@@ -54,11 +55,11 @@ func NewExecutor(
 	outcome func(event types.OutcomeEvent),
 ) *Executor {
 	return &Executor{
-		runtimeManager: runtimeManager,
-		cfg:            cfg,
-		progress:       progress,
-		outcome:        outcome,
-		activeCancel:   make(map[string]context.CancelFunc),
+		runtimeManager:  runtimeManager,
+		cfg:             cfg,
+		progress:        progress,
+		outcome:         outcome,
+		activeCancel:    make(map[string]context.CancelFunc),
 		activeManifests: make(map[string]*types.ResourceManifest),
 	}
 }
@@ -238,10 +239,10 @@ func (e *Executor) ExecuteWithContext(ctx context.Context, command types.AgentCo
 			PlanID:            compatibilityPlanID,
 			MantleFingerprint: mantleFingerprint,
 			BaseFingerprint:   baseFingerprint,
-			EventType:  eventType,
-			DurationMs: time.Since(startedAt).Milliseconds(),
-			Detail:     detail,
-			Timestamp:  time.Now().UTC().Format(time.RFC3339),
+			EventType:         eventType,
+			DurationMs:        time.Since(startedAt).Milliseconds(),
+			Detail:            detail,
+			Timestamp:         time.Now().UTC().Format(time.RFC3339),
 		})
 		return ExecutionResult{}, stopErr
 	case "remove_model":
@@ -265,80 +266,61 @@ func (e *Executor) ExecuteWithContext(ctx context.Context, command types.AgentCo
 		}
 		return ExecutionResult{Details: "engine built successfully"}, nil
 	case "health_check":
-		scope, _ := command.Params["scope"].(string)
-		if scope != "model_benchmark" {
-			return ExecutionResult{}, nil
-		}
+		return ExecutionResult{}, nil
+	case "model_eval":
 		modelID, err := stringParam(command.Params, "modelId")
 		if err != nil {
 			return ExecutionResult{}, err
 		}
-		samplePromptTokens := intParam(command.Params, "samplePromptTokens", 640)
-		sampleOutputTokens := intParam(command.Params, "sampleOutputTokens", 256)
-		concurrency := intParam(command.Params, "concurrency", 2)
-		runs := intParam(command.Params, "runs", 8)
-		metrics, err := e.runtimeManager.BenchmarkModel(
-			modelID,
-			samplePromptTokens,
-			sampleOutputTokens,
-			concurrency,
-			runs,
-			func(progress runtime.BenchmarkProgress) {
-				if e.progress == nil {
-					return
-				}
-				payload := map[string]any{
-					"progress": map[string]any{
-						"scope":            "model_benchmark",
-						"runsCompleted":    progress.RunsCompleted,
-						"runsTotal":        progress.RunsTotal,
-						"successfulRuns":   progress.SuccessfulRuns,
-						"failedRuns":       progress.FailedRuns,
-						"lastRunLatencyMs": progress.LastRunLatencyMs,
-					},
-				}
-				if progress.Benchmark != nil {
-					payload["progress"] = map[string]any{
-						"scope":                       "model_benchmark",
-						"runsCompleted":               progress.RunsCompleted,
-						"runsTotal":                   progress.RunsTotal,
-						"successfulRuns":              progress.SuccessfulRuns,
-						"failedRuns":                  progress.FailedRuns,
-						"lastRunLatencyMs":            progress.LastRunLatencyMs,
-						"ttftMs":                      progress.Benchmark.TTFTMs,
-						"outputTokensPerSec":          progress.Benchmark.OutputTokensPerSec,
-						"totalLatencyMs":              progress.Benchmark.TotalLatencyMs,
-						"promptTokensPerSec":          progress.Benchmark.PromptTokensPerSec,
-						"p95TtftMsAtSmallConcurrency": progress.Benchmark.P95TTFTMsAtSmallConcurrency,
-					}
-				}
-				raw, err := json.Marshal(payload)
-				if err != nil {
-					return
-				}
-				e.progress(types.AckRequest{
-					CommandID: command.ID,
-					Status:    "in_progress",
-					Details:   string(raw),
-				})
-			},
-		)
+		workload := optionalStringParam(command.Params, "workload")
+		if workload == "" {
+			workload = "coding"
+		}
+		profile := optionalStringParam(command.Params, "profile")
+		if profile == "" {
+			profile = "standard"
+		}
+		prompts, err := evalPromptsParam(command.Params)
 		if err != nil {
 			return ExecutionResult{}, err
 		}
-		details, err := json.Marshal(map[string]any{
-			"benchmark": types.ModelBenchmarkMetrics{
-				TTFTMs:                      metrics.TTFTMs,
-				OutputTokensPerSec:          metrics.OutputTokensPerSec,
-				TotalLatencyMs:              metrics.TotalLatencyMs,
-				PromptTokensPerSec:          metrics.PromptTokensPerSec,
-				P95TTFTMsAtSmallConcurrency: metrics.P95TTFTMsAtSmallConcurrency,
-			},
+		runner := agenteval.NewRunner(e.runtimeManager)
+		summary, err := runner.Run(cmdCtx, modelID, workload, profile, prompts, func(progress agenteval.Progress) {
+			if e.progress == nil {
+				return
+			}
+			raw, marshalErr := json.Marshal(map[string]any{
+				"progress": map[string]any{
+					"scope":         "model_eval",
+					"category":      progress.Category,
+					"currentPrompt": progress.CurrentPrompt,
+					"completed":     progress.Completed,
+					"total":         progress.Total,
+				},
+			})
+			if marshalErr != nil {
+				return
+			}
+			e.progress(types.AckRequest{
+				CommandID: command.ID,
+				Status:    "in_progress",
+				Details:   string(raw),
+			})
 		})
 		if err != nil {
-			return ExecutionResult{}, fmt.Errorf("encode benchmark metrics: %w", err)
+			if errors.Is(err, context.Canceled) {
+				return ExecutionResult{}, ErrCommandCancelled
+			}
+			return ExecutionResult{}, err
 		}
-		return ExecutionResult{Details: string(details)}, nil
+		details, err := json.Marshal(summary)
+		if err != nil {
+			return ExecutionResult{}, fmt.Errorf("encode eval summary: %w", err)
+		}
+		return ExecutionResult{
+			Details:       string(details),
+			ResultPayload: summary,
+		}, nil
 	case "uninstall_runtime":
 		rawRuntime, ok := command.Params["runtime"]
 		if !ok {
@@ -486,6 +468,25 @@ func optionalStringParam(params map[string]interface{}, key string) string {
 	return strings.TrimSpace(value)
 }
 
+func evalPromptsParam(params map[string]interface{}) ([]agenteval.Prompt, error) {
+	raw, ok := params["prompts"]
+	if !ok {
+		return nil, fmt.Errorf("missing prompts param")
+	}
+	payload, err := json.Marshal(raw)
+	if err != nil {
+		return nil, fmt.Errorf("marshal prompts param: %w", err)
+	}
+	var prompts []agenteval.Prompt
+	if err := json.Unmarshal(payload, &prompts); err != nil {
+		return nil, fmt.Errorf("decode prompts param: %w", err)
+	}
+	if len(prompts) == 0 {
+		return nil, fmt.Errorf("prompts param must not be empty")
+	}
+	return prompts, nil
+}
+
 func parseBuildOptions(params map[string]interface{}) runtime.BuildOptions {
 	opts := runtime.BuildOptions{
 		Quantization: optionalStringParam(params, "quantization"),
@@ -528,8 +529,8 @@ var runtimeMountPaths = map[string]map[string]string{
 }
 
 var (
-	vllmRuntimeEnvPath   = "/etc/mantler/vllm.env"
-	tensorrtRuntimeEnvPath = "/etc/mantler/tensorrt.env"
+	vllmRuntimeEnvPath      = "/etc/mantler/vllm.env"
+	tensorrtRuntimeEnvPath  = "/etc/mantler/tensorrt.env"
 	runtimeProfileStateRoot = "/var/lib/mantler/runtime-profiles"
 )
 
@@ -635,9 +636,9 @@ func verifyRuntimeProfileApplied(runtimeName string, profile runtimeProfileParam
 		return fmt.Errorf("create runtime profile state directory: %w", err)
 	}
 	statePayload := map[string]any{
-		"id":        strings.TrimSpace(profile.ID),
-		"label":     strings.TrimSpace(profile.Label),
-		"runtime":   strings.ToLower(strings.TrimSpace(runtimeName)),
+		"id":         strings.TrimSpace(profile.ID),
+		"label":      strings.TrimSpace(profile.Label),
+		"runtime":    strings.ToLower(strings.TrimSpace(runtimeName)),
 		"verifiedAt": time.Now().UTC().Format(time.RFC3339),
 	}
 	raw, err := json.Marshal(statePayload)

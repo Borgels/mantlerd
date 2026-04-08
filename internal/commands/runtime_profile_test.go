@@ -11,7 +11,7 @@ func TestApplyAndVerifyRuntimeProfileOverridesForVLLM(t *testing.T) {
 	oldVLLMEnvPath := vllmRuntimeEnvPath
 	oldStateRoot := runtimeProfileStateRoot
 	oldMounts := runtimeMountPaths
-	vllmRuntimeEnvPath = filepath.Join(tempDir, "etc", "clawcontrol", "vllm.env")
+	vllmRuntimeEnvPath = filepath.Join(tempDir, "etc", "mantler", "vllm.env")
 	runtimeProfileStateRoot = filepath.Join(tempDir, "state")
 	runtimeMountPaths = map[string]map[string]string{
 		"vllm": {

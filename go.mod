@@ -1,4 +1,4 @@
-module github.com/Borgels/clawcontrol-agent
+module github.com/Borgels/mantlerd
 
 go 1.22
 

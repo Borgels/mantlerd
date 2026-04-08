@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Borgels/clawcontrol-agent/internal/types"
+	"github.com/Borgels/mantlerd/internal/types"
 )
 
 func TestBuildCodexArgsAddsRequiredFlags(t *testing.T) {
@@ -66,14 +66,14 @@ func TestConsumeCodexStdoutNormalizesEvents(t *testing.T) {
 }
 
 func TestRepositoryLookupCandidatesFallsBackToBasename(t *testing.T) {
-	candidates := repositoryLookupCandidates("/home/agent/repos/clawcontrol")
+	candidates := repositoryLookupCandidates("/home/agent/repos/mantler")
 	if len(candidates) < 2 {
 		t.Fatalf("expected multiple candidates, got %v", candidates)
 	}
-	if candidates[0] != "/home/agent/repos/clawcontrol" {
+	if candidates[0] != "/home/agent/repos/mantler" {
 		t.Fatalf("expected full path candidate first, got %v", candidates)
 	}
-	if candidates[1] != "clawcontrol" {
+	if candidates[1] != "mantler" {
 		t.Fatalf("expected basename candidate second, got %v", candidates)
 	}
 }

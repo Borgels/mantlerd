@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Borgels/clawcontrol-agent/internal/runtime"
-	"github.com/Borgels/clawcontrol-agent/internal/types"
+	"github.com/Borgels/mantlerd/internal/runtime"
+	"github.com/Borgels/mantlerd/internal/types"
 )
 
 type PreflightResult struct {
@@ -92,21 +92,22 @@ func RunPreflight(
 		}, nil
 	}
 
-	totalMB, usedMB, gpuErr := QueryGPUUtilization()
-	if gpuErr != nil {
-		// Non-fatal fallback for systems without nvidia-smi.
-		totalMB = 0
-		usedMB = 0
-	}
+	snapshot := QueryMemorySnapshot()
 	currentlyLoaded := runtimeManager.ListModels()
-	loadPlan := PlanModelLoading(manifest, localMachineID, currentlyLoaded, totalMB, usedMB)
+	loadPlan := PlanModelLoadingWithSnapshot(manifest, localMachineID, currentlyLoaded, snapshot)
 
 	requiredMB := 0
 	for _, model := range localModels {
 		requiredMB += EstimateModelVRAM(model.ModelID, model.Runtime, model.ParameterCount)
 	}
-	availableMB := totalMB - usedMB
-	fits := totalMB == 0 || availableMB <= 0 || requiredMB <= availableMB || loadPlan.Sequential
+	availableMB := snapshot.TotalMB - snapshot.UsedMB - loadPlan.HeadroomMB
+	if availableMB < 0 {
+		availableMB = 0
+	}
+	fits := loadPlan.SteadyStateFits
+	if !snapshot.Known {
+		fits = true
+	}
 
 	result := &PreflightResult{
 		Ready: true,
@@ -114,19 +115,47 @@ func RunPreflight(
 			RequiredMB:   requiredMB,
 			AvailableMB:  availableMB,
 			FitsInMemory: fits,
+			HeadroomMB:   loadPlan.HeadroomMB,
 		},
 		LoadPlan: loadPlan,
+	}
+	if snapshot.QueryErr != nil && progress != nil {
+		progress(fmt.Sprintf("Preflight memory check fell back to %s: %v", loadPlan.MemorySource, snapshot.QueryErr))
 	}
 	if !fits {
 		result.Ready = false
 		result.Issues = append(
 			result.Issues,
-			fmt.Sprintf("manifest requires ~%dMB but only ~%dMB appears available", requiredMB, availableMB),
+			fmt.Sprintf(
+				"projected steady-state memory use is too high: need ~%dMB with ~%dMB headroom, projected used ~%dMB of %dMB total",
+				requiredMB,
+				loadPlan.HeadroomMB,
+				loadPlan.ProjectedUsedMB,
+				snapshot.TotalMB,
+			),
 		)
 		return result, nil
 	}
 
+	for _, modelID := range loadPlan.EjectModelIDs {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+		if progress != nil {
+			progress(fmt.Sprintf("Preflight ejecting no-longer-needed model %s...", modelID))
+		}
+		if err := runtimeManager.StopModelWithRuntime(modelID, ""); err != nil {
+			result.Issues = append(result.Issues, fmt.Sprintf("failed to eject model %s before load: %v", modelID, err))
+		}
+	}
+
 	for _, model := range localModels {
+		if _, alreadyLoaded := containsModelID(currentlyLoaded, model.ModelID); alreadyLoaded {
+			result.LoadedModels = append(result.LoadedModels, model.ModelID)
+			continue
+		}
 		if progress != nil {
 			progress(fmt.Sprintf("Preflight loading model %s (%s)...", model.ModelID, model.Runtime))
 		}
@@ -169,4 +198,14 @@ func RunPreflight(
 	}
 
 	return result, nil
+}
+
+func containsModelID(items []string, target string) (string, bool) {
+	trimmedTarget := strings.TrimSpace(target)
+	for _, item := range items {
+		if strings.TrimSpace(item) == trimmedTarget {
+			return item, true
+		}
+	}
+	return "", false
 }

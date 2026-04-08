@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Borgels/clawcontrol-agent/internal/types"
+	"github.com/Borgels/mantlerd/internal/types"
 )
 
 type ollamaDriver struct{}

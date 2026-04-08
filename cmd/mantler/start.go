@@ -10,12 +10,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Borgels/clawcontrol-agent/internal/client"
-	"github.com/Borgels/clawcontrol-agent/internal/commands"
-	"github.com/Borgels/clawcontrol-agent/internal/config"
-	"github.com/Borgels/clawcontrol-agent/internal/discovery"
-	"github.com/Borgels/clawcontrol-agent/internal/runtime"
-	"github.com/Borgels/clawcontrol-agent/internal/types"
+	"github.com/Borgels/mantlerd/internal/client"
+	"github.com/Borgels/mantlerd/internal/commands"
+	"github.com/Borgels/mantlerd/internal/config"
+	"github.com/Borgels/mantlerd/internal/discovery"
+	"github.com/Borgels/mantlerd/internal/runtime"
+	"github.com/Borgels/mantlerd/internal/types"
 	"github.com/spf13/cobra"
 )
 
@@ -205,6 +205,9 @@ func runCheckIn(
 		MachineID:              cfg.MachineID,
 		Hostname:               report.Hostname,
 		Addresses:              report.Addresses,
+		OS:                     report.OS,
+		CPUArch:                report.CPUArch,
+		GPUVendor:              report.GPUVendor,
 		HardwareSummary:        report.HardwareSummary,
 		RAMTotalMB:             report.RAMTotalMB,
 		GPUs:                   toProtocolGPUInfo(report.GPUs),
@@ -252,6 +255,9 @@ func runCheckIn(
 	}
 	enforceDesiredConfig(runtimeManager, resp.DesiredConfig)
 	reconcileStaleModels(runtimeManager, resp.DesiredConfig, executor.ActiveManifestModelIDs(cfg.MachineID))
+	if len(installedRuntimeNames) == 0 && resp.Recommendations != nil && len(resp.Recommendations.Stacks) > 0 {
+		log.Printf("Recommended stack available. Run 'mantler recommend' for details or 'mantler setup --recommended' to install.")
+	}
 
 	// Execute commands
 	for _, command := range resp.Commands {

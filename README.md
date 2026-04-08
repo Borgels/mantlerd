@@ -50,8 +50,8 @@ Legacy `CLAWCONTROL_*` installer environment variables are still accepted for co
 
 Default config path:
 
-- root: `/etc/mantler/agent.json` (fallback: `/etc/clawcontrol/agent.json`)
-- non-root: `~/.mantler/agent.json` (fallback: `~/.clawcontrol/agent.json`)
+- root: `/etc/mantler/agent.json` (fallback: `/etc/mantler/agent.json`)
+- non-root: `~/.mantler/agent.json` (fallback: `~/.mantler/agent.json`)
 
 Manage config via CLI:
 
