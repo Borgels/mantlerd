@@ -114,7 +114,15 @@ func runSetup(cmd *cobra.Command, args []string) {
 			fmt.Fprintf(os.Stderr, "Warning: quick eval failed: %v\n", evalErr)
 		} else {
 			printEvalSummary(summary)
-			if reportErr := reportEvalSummary(cl, cfg.MachineID, summary, workload, 0); reportErr != nil {
+			if reportErr := reportEvalSummary(
+				cl,
+				cfg.MachineID,
+				modelID,
+				runtimeName,
+				summary,
+				workload,
+				0,
+			); reportErr != nil {
 				fmt.Fprintf(os.Stderr, "Warning: failed to report eval outcomes: %v\n", reportErr)
 			} else {
 				fmt.Println("Quick eval reported to Mantler server.")
