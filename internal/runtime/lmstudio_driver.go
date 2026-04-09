@@ -11,8 +11,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"regexp"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -412,6 +412,83 @@ func (d *llamaCppDriver) benchmarkOnce(modelID string, prompt string, sampleOutp
 		TotalLatencyMs:              roundTo(latencyMs, 2),
 		PromptTokensPerSec:          roundTo(float64(parsed.Usage.PromptTokens)/seconds, 2),
 		P95TTFTMsAtSmallConcurrency: roundTo(latencyMs, 2),
+	}, nil
+}
+
+func (d *llamaCppDriver) CompletePrompt(
+	modelID string,
+	systemPrompt string,
+	prompt string,
+	maxTokens int,
+) (PromptCompletionResult, error) {
+	if strings.TrimSpace(modelID) == "" {
+		return PromptCompletionResult{}, fmt.Errorf("model ID is required")
+	}
+	if maxTokens <= 0 {
+		maxTokens = 128
+	}
+	if err := d.EnsureModelWithFlags(modelID, nil); err != nil {
+		return PromptCompletionResult{}, err
+	}
+	messages := []map[string]string{}
+	if strings.TrimSpace(systemPrompt) != "" {
+		messages = append(messages, map[string]string{"role": "system", "content": systemPrompt})
+	}
+	messages = append(messages, map[string]string{"role": "user", "content": prompt})
+	reqBody := map[string]any{
+		"model":      modelID,
+		"messages":   messages,
+		"max_tokens": maxTokens,
+		"stream":     false,
+	}
+	raw, err := json.Marshal(reqBody)
+	if err != nil {
+		return PromptCompletionResult{}, fmt.Errorf("encode llamacpp completion request: %w", err)
+	}
+	start := time.Now()
+	req, err := http.NewRequest(http.MethodPost, d.baseURL()+"/v1/chat/completions", bytes.NewReader(raw))
+	if err != nil {
+		return PromptCompletionResult{}, fmt.Errorf("create llamacpp completion request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := (&http.Client{Timeout: 120 * time.Second}).Do(req)
+	if err != nil {
+		return PromptCompletionResult{}, fmt.Errorf("llamacpp completion request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		return PromptCompletionResult{}, fmt.Errorf("llamacpp completion failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var parsed struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+		Usage struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return PromptCompletionResult{}, fmt.Errorf("decode llamacpp completion response: %w", err)
+	}
+	latencyMs := float64(time.Since(start).Milliseconds())
+	seconds := latencyMs / 1000.0
+	if seconds <= 0 {
+		seconds = 0.001
+	}
+	output := ""
+	if len(parsed.Choices) > 0 {
+		output = strings.TrimSpace(parsed.Choices[0].Message.Content)
+	}
+	return PromptCompletionResult{
+		Output:       output,
+		LatencyMs:    roundTo(latencyMs, 2),
+		TTFTMs:       roundTo(latencyMs, 2),
+		TokensPerSec: roundTo(float64(parsed.Usage.CompletionTokens)/seconds, 2),
+		OutputTokens: parsed.Usage.CompletionTokens,
 	}, nil
 }
 

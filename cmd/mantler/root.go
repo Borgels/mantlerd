@@ -9,13 +9,14 @@ import (
 )
 
 var (
-	cfgFile    string
-	serverURL  string
-	token      string
-	machineID  string
-	interval   string
-	insecure   bool
-	logLevel   string
+	cfgFile          string
+	serverURL        string
+	token            string
+	machineID        string
+	interval         string
+	insecure         bool
+	logLevel         string
+	cloudProvisioned bool
 )
 
 var rootCmd = &cobra.Command{
@@ -38,6 +39,7 @@ func init() {
 	rootCmd.PersistentFlags().StringVarP(&interval, "interval", "i", "30s", "Check-in interval")
 	rootCmd.PersistentFlags().BoolVarP(&insecure, "insecure", "k", false, "Allow non-HTTPS server")
 	rootCmd.PersistentFlags().StringVarP(&logLevel, "log-level", "l", "info", "Log level (debug, info, warn, error)")
+	rootCmd.PersistentFlags().BoolVar(&cloudProvisioned, "cloud-provisioned", false, "Mark this agent as cloud provisioned")
 
 	// Bind flags to viper
 	viper.BindPFlag("server", rootCmd.PersistentFlags().Lookup("server"))
@@ -46,6 +48,7 @@ func init() {
 	viper.BindPFlag("interval", rootCmd.PersistentFlags().Lookup("interval"))
 	viper.BindPFlag("insecure", rootCmd.PersistentFlags().Lookup("insecure"))
 	viper.BindPFlag("log-level", rootCmd.PersistentFlags().Lookup("log-level"))
+	viper.BindPFlag("cloud-provisioned", rootCmd.PersistentFlags().Lookup("cloud-provisioned"))
 }
 
 func initConfig() {

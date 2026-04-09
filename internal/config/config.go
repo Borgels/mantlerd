@@ -11,21 +11,25 @@ import (
 )
 
 type Config struct {
-	ServerURL string        `json:"serverUrl"`
-	Token     string        `json:"token"`
-	MachineID string        `json:"machineId"`
-	Interval  time.Duration `json:"interval"`
-	Insecure  bool          `json:"insecure"`
-	LogLevel  string        `json:"logLevel"`
+	ServerURL        string                 `json:"serverUrl"`
+	Token            string                 `json:"token"`
+	MachineID        string                 `json:"machineId"`
+	Interval         time.Duration          `json:"interval"`
+	Insecure         bool                   `json:"insecure"`
+	LogLevel         string                 `json:"logLevel"`
+	CloudProvisioned bool                   `json:"cloudProvisioned"`
+	Origin           map[string]interface{} `json:"origin,omitempty"`
 }
 
 type FileConfig struct {
-	ServerURL  string `json:"serverUrl"`
-	Token      string `json:"token"`
-	MachineID  string `json:"machineId"`
-	IntervalMS int64  `json:"intervalMs"`
-	Insecure   bool   `json:"insecure"`
-	LogLevel   string `json:"logLevel"`
+	ServerURL        string                 `json:"serverUrl"`
+	Token            string                 `json:"token"`
+	MachineID        string                 `json:"machineId"`
+	IntervalMS       int64                  `json:"intervalMs"`
+	Insecure         bool                   `json:"insecure"`
+	LogLevel         string                 `json:"logLevel"`
+	CloudProvisioned bool                   `json:"cloudProvisioned"`
+	Origin           map[string]interface{} `json:"origin,omitempty"`
 }
 
 func DefaultConfigPath() string {
@@ -65,12 +69,14 @@ func Load(path string) (Config, error) {
 		return Config{}, fmt.Errorf("parse config: %w", err)
 	}
 	return Config{
-		ServerURL: raw.ServerURL,
-		Token:     raw.Token,
-		MachineID: raw.MachineID,
-		Interval:  time.Duration(raw.IntervalMS) * time.Millisecond,
-		Insecure:  raw.Insecure,
-		LogLevel:  raw.LogLevel,
+		ServerURL:        raw.ServerURL,
+		Token:            raw.Token,
+		MachineID:        raw.MachineID,
+		Interval:         time.Duration(raw.IntervalMS) * time.Millisecond,
+		Insecure:         raw.Insecure,
+		LogLevel:         raw.LogLevel,
+		CloudProvisioned: raw.CloudProvisioned,
+		Origin:           raw.Origin,
 	}, nil
 }
 
@@ -88,12 +94,14 @@ func Save(path string, cfg Config) error {
 	}
 
 	raw := FileConfig{
-		ServerURL:  cfg.ServerURL,
-		Token:      cfg.Token,
-		MachineID:  cfg.MachineID,
-		IntervalMS: cfg.Interval.Milliseconds(),
-		Insecure:   cfg.Insecure,
-		LogLevel:   cfg.LogLevel,
+		ServerURL:        cfg.ServerURL,
+		Token:            cfg.Token,
+		MachineID:        cfg.MachineID,
+		IntervalMS:       cfg.Interval.Milliseconds(),
+		Insecure:         cfg.Insecure,
+		LogLevel:         cfg.LogLevel,
+		CloudProvisioned: cfg.CloudProvisioned,
+		Origin:           cfg.Origin,
 	}
 	content, err := json.MarshalIndent(raw, "", "  ")
 	if err != nil {
@@ -126,6 +134,12 @@ func Merge(fileCfg Config, flagsCfg Config) Config {
 	}
 	if flagsCfg.Insecure {
 		merged.Insecure = true
+	}
+	if flagsCfg.CloudProvisioned {
+		merged.CloudProvisioned = true
+	}
+	if flagsCfg.Origin != nil {
+		merged.Origin = flagsCfg.Origin
 	}
 	return merged
 }

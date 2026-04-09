@@ -303,12 +303,54 @@ type ollamaGenerateRequest struct {
 }
 
 type ollamaGenerateResponse struct {
-	TotalDuration      int64 `json:"total_duration"`
-	LoadDuration       int64 `json:"load_duration"`
-	PromptEvalCount    int64 `json:"prompt_eval_count"`
-	PromptEvalDuration int64 `json:"prompt_eval_duration"`
-	EvalCount          int64 `json:"eval_count"`
-	EvalDuration       int64 `json:"eval_duration"`
+	Response           string `json:"response"`
+	TotalDuration      int64  `json:"total_duration"`
+	LoadDuration       int64  `json:"load_duration"`
+	PromptEvalCount    int64  `json:"prompt_eval_count"`
+	PromptEvalDuration int64  `json:"prompt_eval_duration"`
+	EvalCount          int64  `json:"eval_count"`
+	EvalDuration       int64  `json:"eval_duration"`
+}
+
+func (d *ollamaDriver) CompletePrompt(
+	modelID string,
+	systemPrompt string,
+	prompt string,
+	maxTokens int,
+) (PromptCompletionResult, error) {
+	if strings.TrimSpace(modelID) == "" {
+		return PromptCompletionResult{}, fmt.Errorf("model ID is required")
+	}
+	if maxTokens <= 0 {
+		maxTokens = 128
+	}
+	if err := d.EnsureModelWithFlags(modelID, nil); err != nil {
+		return PromptCompletionResult{}, err
+	}
+	fullPrompt := prompt
+	if strings.TrimSpace(systemPrompt) != "" {
+		fullPrompt = "System: " + strings.TrimSpace(systemPrompt) + "\n\nUser: " + strings.TrimSpace(prompt)
+	}
+	resp, err := d.benchmarkOnce(modelID, fullPrompt, maxTokens)
+	if err != nil {
+		return PromptCompletionResult{}, err
+	}
+	latencyMs := float64(resp.TotalDuration) / 1_000_000.0
+	ttftMs := float64(resp.PromptEvalDuration) / 1_000_000.0
+	if ttftMs <= 0 {
+		ttftMs = latencyMs
+	}
+	tokensPerSec := 0.0
+	if resp.EvalDuration > 0 && resp.EvalCount > 0 {
+		tokensPerSec = float64(resp.EvalCount) / (float64(resp.EvalDuration) / 1_000_000_000.0)
+	}
+	return PromptCompletionResult{
+		Output:       strings.TrimSpace(resp.Response),
+		LatencyMs:    latencyMs,
+		TTFTMs:       ttftMs,
+		TokensPerSec: roundTo(tokensPerSec, 2),
+		OutputTokens: int(resp.EvalCount),
+	}, nil
 }
 
 func (d *ollamaDriver) BenchmarkModel(

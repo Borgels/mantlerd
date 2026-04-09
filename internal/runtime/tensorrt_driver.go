@@ -457,6 +457,83 @@ func (d *tensorrtDriver) benchmarkOnce(modelID string, prompt string, sampleOutp
 	}, nil
 }
 
+func (d *tensorrtDriver) CompletePrompt(
+	modelID string,
+	systemPrompt string,
+	prompt string,
+	maxTokens int,
+) (PromptCompletionResult, error) {
+	if strings.TrimSpace(modelID) == "" {
+		return PromptCompletionResult{}, fmt.Errorf("model ID is required")
+	}
+	if maxTokens <= 0 {
+		maxTokens = 128
+	}
+	if err := d.EnsureModelWithFlags(modelID, nil); err != nil {
+		return PromptCompletionResult{}, err
+	}
+	messages := []map[string]string{}
+	if strings.TrimSpace(systemPrompt) != "" {
+		messages = append(messages, map[string]string{"role": "system", "content": systemPrompt})
+	}
+	messages = append(messages, map[string]string{"role": "user", "content": prompt})
+	reqBody := map[string]any{
+		"model":      modelID,
+		"messages":   messages,
+		"max_tokens": maxTokens,
+		"stream":     false,
+	}
+	raw, err := json.Marshal(reqBody)
+	if err != nil {
+		return PromptCompletionResult{}, fmt.Errorf("encode tensorrt completion request: %w", err)
+	}
+	start := time.Now()
+	req, err := http.NewRequest(http.MethodPost, d.baseURL()+"/v1/chat/completions", bytes.NewReader(raw))
+	if err != nil {
+		return PromptCompletionResult{}, fmt.Errorf("create tensorrt completion request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := (&http.Client{Timeout: 120 * time.Second}).Do(req)
+	if err != nil {
+		return PromptCompletionResult{}, fmt.Errorf("tensorrt completion request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		return PromptCompletionResult{}, fmt.Errorf("tensorrt completion failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var parsed struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+		Usage struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return PromptCompletionResult{}, fmt.Errorf("decode tensorrt completion response: %w", err)
+	}
+	latencyMs := float64(time.Since(start).Milliseconds())
+	seconds := latencyMs / 1000.0
+	if seconds <= 0 {
+		seconds = 0.001
+	}
+	output := ""
+	if len(parsed.Choices) > 0 {
+		output = strings.TrimSpace(parsed.Choices[0].Message.Content)
+	}
+	return PromptCompletionResult{
+		Output:       output,
+		LatencyMs:    roundTo(latencyMs, 2),
+		TTFTMs:       roundTo(latencyMs, 2),
+		TokensPerSec: roundTo(float64(parsed.Usage.CompletionTokens)/seconds, 2),
+		OutputTokens: parsed.Usage.CompletionTokens,
+	}, nil
+}
+
 func (d *tensorrtDriver) RestartRuntime() error {
 	cfg, cfgErr := d.readConfig()
 	if cfgErr == nil {

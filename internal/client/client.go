@@ -175,13 +175,21 @@ func (c *Client) Recommend(ctx context.Context, q types.RecommendQuery) (*types.
 	return &envelope.Data, nil
 }
 
-func (c *Client) GetEvalPrompts(ctx context.Context, workload string, profile string) ([]agenteval.Prompt, string, error) {
+func (c *Client) GetEvalPrompts(
+	ctx context.Context,
+	workload string,
+	profile string,
+	benchmarkSuiteID string,
+) ([]agenteval.Prompt, string, error) {
 	params := url.Values{}
 	if strings.TrimSpace(workload) != "" {
 		params.Set("workload", strings.TrimSpace(workload))
 	}
 	if strings.TrimSpace(profile) != "" {
 		params.Set("profile", strings.TrimSpace(profile))
+	}
+	if strings.TrimSpace(benchmarkSuiteID) != "" {
+		params.Set("benchmarkSuiteId", strings.TrimSpace(benchmarkSuiteID))
 	}
 	urlWithQuery := c.baseURL + "/api/eval/prompts"
 	if encoded := params.Encode(); encoded != "" {
