@@ -78,7 +78,7 @@ func TestRunCheckInFollowUpDoesNotResendOutcomeEvents(t *testing.T) {
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 	})
 
-	runCheckIn(cfg, cl, runtimeManager, executor, outcomes)
+	runCheckIn(cfg, cl, runtimeManager, executor, outcomes, time.Now())
 
 	mu.Lock()
 	defer mu.Unlock()

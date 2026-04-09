@@ -33,13 +33,13 @@ const (
 )
 
 type InstalledModel struct {
-	ModelID      string             `json:"modelId"`
-	Runtime      RuntimeType        `json:"runtime,omitempty"`
-	Digest       string             `json:"digest,omitempty"`
-	UpdateAvailable *bool           `json:"updateAvailable,omitempty"`
-	Status       ModelInstallStatus `json:"status"`
-	FailReason   string             `json:"failReason,omitempty"`
-	Capabilities *ModelCapabilities `json:"capabilities,omitempty"`
+	ModelID         string             `json:"modelId"`
+	Runtime         RuntimeType        `json:"runtime,omitempty"`
+	Digest          string             `json:"digest,omitempty"`
+	UpdateAvailable *bool              `json:"updateAvailable,omitempty"`
+	Status          ModelInstallStatus `json:"status"`
+	FailReason      string             `json:"failReason,omitempty"`
+	Capabilities    *ModelCapabilities `json:"capabilities,omitempty"`
 }
 
 type GPUInfo struct {
@@ -107,11 +107,11 @@ type EvalSampleDetail struct {
 }
 
 type EvalRunSummary struct {
-	Workload string             `json:"workload"`
-	Profile  string             `json:"profile"`
-	Samples  []EvalSampleDetail `json:"samples"`
-	EvalSessionToken string     `json:"evalSessionToken,omitempty"`
-	ResourceUsage *struct {
+	Workload         string             `json:"workload"`
+	Profile          string             `json:"profile"`
+	Samples          []EvalSampleDetail `json:"samples"`
+	EvalSessionToken string             `json:"evalSessionToken,omitempty"`
+	ResourceUsage    *struct {
 		VRAMMB int `json:"vramMb,omitempty"`
 		RAMMB  int `json:"ramMb,omitempty"`
 	} `json:"resourceUsage,omitempty"`
@@ -120,53 +120,54 @@ type EvalRunSummary struct {
 }
 
 type CheckinRequest struct {
-	MachineID              string                        `json:"machineId"`
-	Hostname               string                        `json:"hostname,omitempty"`
-	Addresses              []string                      `json:"addresses,omitempty"`
-	OS                     string                        `json:"os,omitempty"`
-	CPUArch                string                        `json:"cpuArch,omitempty"`
-	GPUVendor              string                        `json:"gpuVendor,omitempty"`
-	HardwareSummary        string                        `json:"hardwareSummary,omitempty"`
-	RAMTotalMB             int                           `json:"ramTotalMb,omitempty"`
-	GPUs                   []GPUInfo                     `json:"gpus,omitempty"`
-	Interconnect           *InterconnectReport           `json:"interconnect,omitempty"`
-	AgentVersion           string                        `json:"agentVersion,omitempty"`
-	RuntimeStatus          RuntimeStatus                 `json:"runtimeStatus,omitempty"`
-	RuntimeStatuses        map[RuntimeType]RuntimeStatus `json:"runtimeStatuses,omitempty"`
-	RuntimeType            RuntimeType                   `json:"runtimeType,omitempty"`
-	InstalledRuntimeTypes  []RuntimeType                 `json:"installedRuntimeTypes,omitempty"`
-	RuntimeVersion         string                        `json:"runtimeVersion,omitempty"`
-	RuntimeVersions        map[RuntimeType]string        `json:"runtimeVersions,omitempty"`
+	MachineID              string                         `json:"machineId"`
+	Hostname               string                         `json:"hostname,omitempty"`
+	Addresses              []string                       `json:"addresses,omitempty"`
+	OS                     string                         `json:"os,omitempty"`
+	CPUArch                string                         `json:"cpuArch,omitempty"`
+	GPUVendor              string                         `json:"gpuVendor,omitempty"`
+	HardwareSummary        string                         `json:"hardwareSummary,omitempty"`
+	RAMTotalMB             int                            `json:"ramTotalMb,omitempty"`
+	GPUs                   []GPUInfo                      `json:"gpus,omitempty"`
+	Interconnect           *InterconnectReport            `json:"interconnect,omitempty"`
+	AgentVersion           string                         `json:"agentVersion,omitempty"`
+	RuntimeStatus          RuntimeStatus                  `json:"runtimeStatus,omitempty"`
+	RuntimeStatuses        map[RuntimeType]RuntimeStatus  `json:"runtimeStatuses,omitempty"`
+	RuntimeType            RuntimeType                    `json:"runtimeType,omitempty"`
+	InstalledRuntimeTypes  []RuntimeType                  `json:"installedRuntimeTypes,omitempty"`
+	RuntimeVersion         string                         `json:"runtimeVersion,omitempty"`
+	RuntimeVersions        map[RuntimeType]string         `json:"runtimeVersions,omitempty"`
 	RuntimeConfigs         map[RuntimeType]map[string]any `json:"runtimeConfigs,omitempty"`
-	InstalledModels        []InstalledModel              `json:"installedModels,omitempty"`
-	InstalledHarnesses     []InstalledHarness            `json:"installedHarnesses,omitempty"`
-	InstalledOrchestrators []InstalledOrchestrator       `json:"installedOrchestrators,omitempty"`
-	OutcomeEvents          []OutcomeEvent                `json:"outcomeEvents,omitempty"`
-	Uptime                 int64                         `json:"uptime,omitempty"`
-	LoadAvg                []float64                     `json:"loadAvg,omitempty"`
+	InstalledModels        []InstalledModel               `json:"installedModels,omitempty"`
+	InstalledHarnesses     []InstalledHarness             `json:"installedHarnesses,omitempty"`
+	InstalledOrchestrators []InstalledOrchestrator        `json:"installedOrchestrators,omitempty"`
+	OutcomeEvents          []OutcomeEvent                 `json:"outcomeEvents,omitempty"`
+	Uptime                 int64                          `json:"uptime,omitempty"`
+	LoadAvg                []float64                      `json:"loadAvg,omitempty"`
 }
 
 type OutcomeEvent struct {
-	PlanID            string `json:"planId,omitempty"`
-	TaskID            string `json:"taskId,omitempty"`
-	MantleFingerprint string `json:"mantleFingerprint,omitempty"`
-	BaseFingerprint   string `json:"baseFingerprint,omitempty"`
-	EventType         string `json:"eventType"`
-	EvidenceKind      string `json:"evidenceKind,omitempty"`
-	Workload          string `json:"workload,omitempty"`
-	GradedByServer    bool   `json:"gradedByServer,omitempty"`
-	EvalPromptID      string `json:"evalPromptId,omitempty"`
-	EvalOutput        string `json:"evalOutput,omitempty"`
-	EvalSessionToken  string `json:"evalSessionToken,omitempty"`
-	SessionIssuedAtMs int64  `json:"sessionIssuedAtMs,omitempty"`
-	RuntimeImage      string `json:"runtimeImage,omitempty"`
-	DurationMs        int64  `json:"durationMs,omitempty"`
+	PlanID            string             `json:"planId,omitempty"`
+	TaskID            string             `json:"taskId,omitempty"`
+	MantleFingerprint string             `json:"mantleFingerprint,omitempty"`
+	BaseFingerprint   string             `json:"baseFingerprint,omitempty"`
+	EventType         string             `json:"eventType"`
+	EvidenceKind      string             `json:"evidenceKind,omitempty"`
+	Workload          string             `json:"workload,omitempty"`
+	GradedByServer    bool               `json:"gradedByServer,omitempty"`
+	EvalPromptID      string             `json:"evalPromptId,omitempty"`
+	EvalOutput        string             `json:"evalOutput,omitempty"`
+	EvalSessionToken  string             `json:"evalSessionToken,omitempty"`
+	SessionIssuedAtMs int64              `json:"sessionIssuedAtMs,omitempty"`
+	RuntimeImage      string             `json:"runtimeImage,omitempty"`
+	DurationMs        int64              `json:"durationMs,omitempty"`
 	TokenUsage        *OutcomeTokenUsage `json:"tokenUsage,omitempty"`
 	QualityScore      *float64           `json:"qualityScore,omitempty"`
-	ExitCode          int    `json:"exitCode,omitempty"`
-	CrashSignature    string `json:"crashSignature,omitempty"`
-	Detail            string `json:"detail,omitempty"`
-	Timestamp         string `json:"timestamp"`
+	CostUSD           *float64           `json:"costUsd,omitempty"`
+	ExitCode          int                `json:"exitCode,omitempty"`
+	CrashSignature    string             `json:"crashSignature,omitempty"`
+	Detail            string             `json:"detail,omitempty"`
+	Timestamp         string             `json:"timestamp"`
 }
 
 type OutcomeTokenUsage struct {
@@ -232,15 +233,15 @@ type AgentCommand struct {
 }
 
 type CheckinResponse struct {
-	Ack           bool           `json:"ack"`
-	ServerTime    string         `json:"serverTime"`
-	DesiredConfig DesiredConfig  `json:"desiredConfig"`
+	Ack             bool               `json:"ack"`
+	ServerTime      string             `json:"serverTime"`
+	DesiredConfig   DesiredConfig      `json:"desiredConfig"`
 	Recommendations *RecommendResponse `json:"recommendations,omitempty"`
-	Commands      []AgentCommand `json:"commands"`
+	Commands        []AgentCommand     `json:"commands"`
 }
 
 type RecommendContext struct {
-	Machine      *struct {
+	Machine *struct {
 		ID   string `json:"id"`
 		Name string `json:"name"`
 	} `json:"machine,omitempty"`
@@ -271,9 +272,9 @@ type RecommendModelEntry struct {
 }
 
 type RecommendStackEntry struct {
-	MantleFingerprint string `json:"mantleFingerprint"`
+	MantleFingerprint string  `json:"mantleFingerprint"`
 	Score             float64 `json:"score,omitempty"`
-	VerifiedRuns      int    `json:"verifiedRuns,omitempty"`
+	VerifiedRuns      int     `json:"verifiedRuns,omitempty"`
 	ResolvedLayers    *struct {
 		Runtime      string `json:"runtime,omitempty"`
 		ModelID      string `json:"modelId,omitempty"`
@@ -283,12 +284,12 @@ type RecommendStackEntry struct {
 }
 
 type RecommendResponse struct {
-	Context       RecommendContext      `json:"context"`
-	Runtimes      []RecommendLayerEntry `json:"runtimes,omitempty"`
-	Models        []RecommendModelEntry `json:"models,omitempty"`
-	Harnesses     []RecommendLayerEntry `json:"harnesses,omitempty"`
-	Orchestrators []RecommendLayerEntry `json:"orchestrators,omitempty"`
-	Stacks        []RecommendStackEntry `json:"stacks,omitempty"`
+	Context           RecommendContext      `json:"context"`
+	Runtimes          []RecommendLayerEntry `json:"runtimes,omitempty"`
+	Models            []RecommendModelEntry `json:"models,omitempty"`
+	Harnesses         []RecommendLayerEntry `json:"harnesses,omitempty"`
+	Orchestrators     []RecommendLayerEntry `json:"orchestrators,omitempty"`
+	Stacks            []RecommendStackEntry `json:"stacks,omitempty"`
 	CloudAlternatives []struct {
 		Provider    string `json:"provider,omitempty"`
 		Model       string `json:"model,omitempty"`
@@ -299,16 +300,16 @@ type RecommendResponse struct {
 }
 
 type RecommendQuery struct {
-	MachineID    string `json:"machineId,omitempty"`
+	MachineID     string `json:"machineId,omitempty"`
 	HardwareClass string `json:"hardwareClass,omitempty"`
-	Runtime      string `json:"runtime,omitempty"`
-	ModelID      string `json:"modelId,omitempty"`
-	Backend      string `json:"backend,omitempty"`
-	Harness      string `json:"harness,omitempty"`
-	Orchestrator string `json:"orchestrator,omitempty"`
-	Role         string `json:"role,omitempty"`
-	Workload     string `json:"workload,omitempty"`
-	Limit        int    `json:"limit,omitempty"`
+	Runtime       string `json:"runtime,omitempty"`
+	ModelID       string `json:"modelId,omitempty"`
+	Backend       string `json:"backend,omitempty"`
+	Harness       string `json:"harness,omitempty"`
+	Orchestrator  string `json:"orchestrator,omitempty"`
+	Role          string `json:"role,omitempty"`
+	Workload      string `json:"workload,omitempty"`
+	Limit         int    `json:"limit,omitempty"`
 }
 
 type ModelFeatureFlags struct {

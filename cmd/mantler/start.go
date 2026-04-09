@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -55,7 +56,8 @@ func runStart(cmd *cobra.Command, args []string) {
 	defer cancel()
 
 	// Run initial check-in
-	runCheckIn(cfg, cl, runtimeManager, executor, outcomes)
+	startedAt := time.Now()
+	runCheckIn(cfg, cl, runtimeManager, executor, outcomes, startedAt)
 
 	// Start ticker for periodic check-ins
 	ticker := time.NewTicker(cfg.Interval)
@@ -67,7 +69,7 @@ func runStart(cmd *cobra.Command, args []string) {
 			log.Println("Shutting down agent...")
 			return
 		case <-ticker.C:
-			runCheckIn(cfg, cl, runtimeManager, executor, outcomes)
+			runCheckIn(cfg, cl, runtimeManager, executor, outcomes, startedAt)
 		}
 	}
 }
@@ -178,6 +180,7 @@ func runCheckIn(
 	runtimeManager *runtime.Manager,
 	executor *commands.Executor,
 	outcomes *outcomeBuffer,
+	startedAt time.Time,
 ) {
 	cachedDesired := loadCachedDesiredConfig()
 
@@ -224,6 +227,8 @@ func runCheckIn(
 		InstalledHarnesses:     toInstalledHarnesses(cachedDesired),
 		InstalledOrchestrators: toInstalledOrchestrators(cachedDesired),
 		OutcomeEvents:          pendingOutcomes,
+		Uptime:                 int64(time.Since(startedAt).Seconds()),
+		LoadAvg:                readLoadAvg(),
 	}
 
 	resp, err := client.Retry(context.Background(), 3, func() (types.CheckinResponse, error) {
@@ -284,6 +289,29 @@ func runCheckIn(
 			log.Printf("ack failed for %s: %v", command.ID, ackErr)
 		}
 	}
+}
+
+func readLoadAvg() []float64 {
+	raw, err := os.ReadFile("/proc/loadavg")
+	if err != nil {
+		return nil
+	}
+	fields := strings.Fields(strings.TrimSpace(string(raw)))
+	if len(fields) < 3 {
+		return nil
+	}
+	values := make([]float64, 0, 3)
+	for i := 0; i < 3; i++ {
+		parsed, parseErr := strconv.ParseFloat(fields[i], 64)
+		if parseErr != nil {
+			return nil
+		}
+		values = append(values, parsed)
+	}
+	if len(values) == 0 {
+		return nil
+	}
+	return values
 }
 
 func toProtocolGPUInfo(values []discovery.GPUInfo) []types.GPUInfo {
