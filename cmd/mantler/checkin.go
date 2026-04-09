@@ -51,7 +51,7 @@ func runCheckin(cmd *cobra.Command, args []string) {
 	}, outcomes.Add)
 
 	// Run check-in
-	runCheckIn(cfg, cl, runtimeManager, executor, outcomes)
+	runCheckIn(cfg, cl, runtimeManager, executor, outcomes, time.Now())
 
 	fmt.Println("Check-in completed successfully")
 }
