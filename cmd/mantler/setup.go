@@ -123,6 +123,8 @@ func runSetup(cmd *cobra.Command, args []string) {
 				workload,
 				0,
 				"",
+				"mantler-standard",
+				"",
 			); reportErr != nil {
 				fmt.Fprintf(os.Stderr, "Warning: failed to report eval outcomes: %v\n", reportErr)
 			} else {

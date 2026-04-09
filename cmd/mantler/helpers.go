@@ -186,6 +186,7 @@ func toRuntimeTypes(values []string) []types.RuntimeType {
 func toInstalledModels(runtimeManager *runtime.Manager) []types.InstalledModel {
 	result := make([]types.InstalledModel, 0)
 	seen := map[string]struct{}{}
+	statusTimestamp := time.Now().UTC().Format(time.RFC3339)
 	type installedModelsProvider interface {
 		InstalledModels() []types.InstalledModel
 	}
@@ -205,6 +206,9 @@ func toInstalledModels(runtimeManager *runtime.Manager) []types.InstalledModel {
 					continue
 				}
 				seen[key] = struct{}{}
+				if strings.TrimSpace(model.StatusTimestamp) == "" {
+					model.StatusTimestamp = statusTimestamp
+				}
 				result = append(result, model)
 			}
 			continue
@@ -220,9 +224,10 @@ func toInstalledModels(runtimeManager *runtime.Manager) []types.InstalledModel {
 			}
 			seen[key] = struct{}{}
 			result = append(result, types.InstalledModel{
-				ModelID: modelID,
-				Runtime: types.RuntimeType(runtimeName),
-				Status:  types.ModelReady,
+				ModelID:         modelID,
+				Runtime:         types.RuntimeType(runtimeName),
+				Status:          types.ModelStarting,
+				StatusTimestamp: statusTimestamp,
 			})
 		}
 	}
@@ -231,18 +236,20 @@ func toInstalledModels(runtimeManager *runtime.Manager) []types.InstalledModel {
 
 func toInstalledHarnesses(desired types.DesiredConfig) []types.InstalledHarness {
 	result := make([]types.InstalledHarness, 0, len(desired.Harnesses))
+	statusTimestamp := time.Now().UTC().Format(time.RFC3339)
 	for _, harness := range desired.Harnesses {
 		if strings.TrimSpace(harness.Type) == "" {
 			continue
 		}
 		item := types.InstalledHarness{
-			ID:             harness.ID,
-			Name:           harness.Name,
-			Type:           harness.Type,
-			Status:         "configuring",
-			ModelSelection: harness.ModelSelection,
-			ManagedModelID: harness.ManagedModelID,
-			Capabilities:   harness.Capabilities,
+			ID:              harness.ID,
+			Name:            harness.Name,
+			Type:            harness.Type,
+			Status:          "configuring",
+			StatusTimestamp: statusTimestamp,
+			ModelSelection:  harness.ModelSelection,
+			ManagedModelID:  harness.ManagedModelID,
+			Capabilities:    harness.Capabilities,
 		}
 
 		switch harness.Type {
@@ -447,16 +454,18 @@ func probeHarnessVersion(commandPath string) string {
 
 func toInstalledOrchestrators(desired types.DesiredConfig) []types.InstalledOrchestrator {
 	result := make([]types.InstalledOrchestrator, 0, len(desired.Orchestrators))
+	statusTimestamp := time.Now().UTC().Format(time.RFC3339)
 	for _, orchestrator := range desired.Orchestrators {
 		if strings.TrimSpace(orchestrator.Type) == "" {
 			continue
 		}
 		item := types.InstalledOrchestrator{
-			ID:           orchestrator.ID,
-			Name:         orchestrator.Name,
-			Type:         orchestrator.Type,
-			Status:       "configuring",
-			Capabilities: orchestrator.Capabilities,
+			ID:              orchestrator.ID,
+			Name:            orchestrator.Name,
+			Type:            orchestrator.Type,
+			Status:          "configuring",
+			StatusTimestamp: statusTimestamp,
+			Capabilities:    orchestrator.Capabilities,
 		}
 
 		switch orchestrator.Type {

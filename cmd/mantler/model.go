@@ -71,6 +71,9 @@ This command runs various benchmarks to measure model performance:
 - Total Latency
 - Prompt Tokens Per Second
 
+For workload quality evaluation (MMLU/GSM8K/GPQA and similar suites),
+use "mantler eval" instead.
+
 Benchmark profiles:
   quick    - Quick benchmark (few tokens, 1 run)
   standard - Standard benchmark (default)

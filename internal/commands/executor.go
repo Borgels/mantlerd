@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	stdruntime "runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -21,6 +22,7 @@ import (
 	"github.com/Borgels/mantlerd/internal/config"
 	agenteval "github.com/Borgels/mantlerd/internal/eval"
 	agentruntime "github.com/Borgels/mantlerd/internal/runtime"
+	agenttrainer "github.com/Borgels/mantlerd/internal/trainer"
 	"github.com/Borgels/mantlerd/internal/types"
 )
 
@@ -29,6 +31,7 @@ var ErrCommandCancelled = errors.New("command cancelled")
 
 type Executor struct {
 	runtimeManager *agentruntime.Manager
+	trainerManager *agenttrainer.Manager
 	cfg            config.Config
 	progress       func(payload types.AckRequest)
 	outcome        func(event types.OutcomeEvent)
@@ -51,12 +54,14 @@ const gooseInstallScriptURL = "https://github.com/block/goose/raw/main/download_
 
 func NewExecutor(
 	runtimeManager *agentruntime.Manager,
+	trainerManager *agenttrainer.Manager,
 	cfg config.Config,
 	progress func(payload types.AckRequest),
 	outcome func(event types.OutcomeEvent),
 ) *Executor {
 	return &Executor{
 		runtimeManager:  runtimeManager,
+		trainerManager:  trainerManager,
 		cfg:             cfg,
 		progress:        progress,
 		outcome:         outcome,
@@ -197,6 +202,46 @@ func (e *Executor) ExecuteWithContext(ctx context.Context, command types.AgentCo
 			})
 		}
 		return ExecutionResult{}, e.runtimeManager.InstallRuntime(runtimeName)
+	case "install_trainer":
+		if e.trainerManager == nil {
+			return ExecutionResult{}, fmt.Errorf("trainer manager unavailable")
+		}
+		trainerType := optionalStringParam(command.Params, "trainerType")
+		if trainerType == "" {
+			trainerType = optionalStringParam(command.Params, "type")
+		}
+		if trainerType == "" {
+			trainerType = "unsloth"
+		}
+		trainerType = strings.ToLower(strings.TrimSpace(trainerType))
+		version, err := e.trainerManager.Install(cmdCtx, trainerType)
+		if err != nil {
+			return ExecutionResult{}, err
+		}
+		return ExecutionResult{
+			Details: fmt.Sprintf("%s installed", trainerType),
+			ResultPayload: map[string]any{
+				"trainerType": trainerType,
+				"version":     version,
+			},
+		}, nil
+	case "uninstall_trainer":
+		if e.trainerManager == nil {
+			return ExecutionResult{}, fmt.Errorf("trainer manager unavailable")
+		}
+		trainerType := optionalStringParam(command.Params, "trainerType")
+		if trainerType == "" {
+			trainerType = optionalStringParam(command.Params, "type")
+		}
+		if trainerType == "" {
+			return ExecutionResult{}, fmt.Errorf("missing trainerType param")
+		}
+		if err := e.trainerManager.Uninstall(cmdCtx, trainerType); err != nil {
+			return ExecutionResult{}, err
+		}
+		return ExecutionResult{
+			Details: fmt.Sprintf("%s uninstalled", trainerType),
+		}, nil
 	case "pull_model":
 		modelID, err := stringParam(command.Params, "modelId")
 		if err != nil {
@@ -335,6 +380,119 @@ func (e *Executor) ExecuteWithContext(ctx context.Context, command types.AgentCo
 			Details:       string(details),
 			ResultPayload: summary,
 		}, nil
+	case "start_training":
+		if e.trainerManager == nil {
+			return ExecutionResult{}, fmt.Errorf("trainer manager unavailable")
+		}
+		trainerType := optionalStringParam(command.Params, "trainerType")
+		if trainerType == "" {
+			trainerType = "unsloth"
+		}
+		trainerType = strings.ToLower(strings.TrimSpace(trainerType))
+		request := agenttrainer.TrainingRequest{
+			CommandID:       command.ID,
+			TrainerID:       optionalStringParam(command.Params, "trainerId"),
+			TrainerType:     trainerType,
+			Method:          optionalStringParam(command.Params, "method"),
+			BaseModel:       optionalStringParam(command.Params, "baseModel"),
+			Dataset:         optionalStringParam(command.Params, "dataset"),
+			Hyperparameters: optionalMapParam(command.Params, "hyperparameters"),
+			ExportFormats:   optionalStringArrayParam(command.Params, "exportFormats"),
+			TargetRuntime:   optionalStringParam(command.Params, "targetRuntime"),
+		}
+		if request.TrainerID == "" {
+			request.TrainerID = "trainer-" + trainerType
+		}
+		result, err := e.trainerManager.StartTraining(cmdCtx, request, func(progress agenttrainer.TrainingProgress) {
+			if e.progress == nil {
+				return
+			}
+			progressPayload := map[string]any{"scope": "training"}
+			rawProgress, marshalErr := json.Marshal(progress)
+			if marshalErr != nil {
+				return
+			}
+			if unmarshalErr := json.Unmarshal(rawProgress, &progressPayload); unmarshalErr != nil {
+				return
+			}
+			raw, marshalErr := json.Marshal(progressPayload)
+			if marshalErr != nil {
+				return
+			}
+			e.progress(types.AckRequest{
+				CommandID: command.ID,
+				Status:    "in_progress",
+				Details:   string(raw),
+			})
+		})
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return ExecutionResult{}, ErrCommandCancelled
+			}
+			return ExecutionResult{}, err
+		}
+		return ExecutionResult{
+			Details:       result.Detail,
+			ResultPayload: result,
+		}, nil
+	case "stop_training":
+		if e.trainerManager == nil {
+			return ExecutionResult{}, fmt.Errorf("trainer manager unavailable")
+		}
+		targetCommandID := optionalStringParam(command.Params, "targetCommandId")
+		if targetCommandID == "" {
+			targetCommandID = optionalStringParam(command.Params, "commandId")
+		}
+		if targetCommandID == "" {
+			return ExecutionResult{}, fmt.Errorf("missing targetCommandId param")
+		}
+		saveCheckpoint := optionalBoolParam(command.Params, "saveCheckpoint", true)
+		if err := e.trainerManager.StopTraining(cmdCtx, targetCommandID, saveCheckpoint); err != nil {
+			return ExecutionResult{}, err
+		}
+		return ExecutionResult{
+			Details: fmt.Sprintf("training stopped for %s", targetCommandID),
+		}, nil
+	case "training_status":
+		if e.trainerManager == nil {
+			return ExecutionResult{}, fmt.Errorf("trainer manager unavailable")
+		}
+		targetCommandID := optionalStringParam(command.Params, "targetCommandId")
+		if targetCommandID == "" {
+			targetCommandID = optionalStringParam(command.Params, "commandId")
+		}
+		if targetCommandID == "" {
+			return ExecutionResult{}, fmt.Errorf("missing targetCommandId param")
+		}
+		progress, ok := e.trainerManager.GetJobStatus(targetCommandID)
+		if !ok {
+			return ExecutionResult{}, fmt.Errorf("training job not found: %s", targetCommandID)
+		}
+		return ExecutionResult{
+			Details: "training status",
+			ResultPayload: progress,
+		}, nil
+	case "export_checkpoint":
+		if e.trainerManager == nil {
+			return ExecutionResult{}, fmt.Errorf("trainer manager unavailable")
+		}
+		targetCommandID := optionalStringParam(command.Params, "trainingCommandId")
+		if targetCommandID == "" {
+			targetCommandID = optionalStringParam(command.Params, "commandId")
+		}
+		if targetCommandID == "" {
+			return ExecutionResult{}, fmt.Errorf("missing trainingCommandId param")
+		}
+		formats := optionalStringArrayParam(command.Params, "formats")
+		trainerType := optionalStringParam(command.Params, "trainerType")
+		result, err := e.trainerManager.ExportCheckpoint(cmdCtx, targetCommandID, trainerType, formats)
+		if err != nil {
+			return ExecutionResult{}, err
+		}
+		return ExecutionResult{
+			Details:       fmt.Sprintf("exported checkpoint for %s", targetCommandID),
+			ResultPayload: result,
+		}, nil
 	case "uninstall_runtime":
 		rawRuntime, ok := command.Params["runtime"]
 		if !ok {
@@ -378,6 +536,15 @@ func (e *Executor) ExecuteWithContext(ctx context.Context, command types.AgentCo
 			return ExecutionResult{Details: details}, err
 		}
 		return ExecutionResult{Details: details}, nil
+	case "self_shutdown":
+		delaySeconds := intParam(command.Params, "delaySeconds", 10)
+		halt := optionalBoolParam(command.Params, "haltMachine", true)
+		if err := scheduleSelfShutdown(delaySeconds, halt); err != nil {
+			return ExecutionResult{}, err
+		}
+		return ExecutionResult{
+			Details: fmt.Sprintf("self shutdown scheduled in %d seconds (haltMachine=%t)", delaySeconds, halt),
+		}, nil
 	case "run_harness_exec":
 		return e.runHarnessExec(command)
 	case "run_orchestrator_exec":
@@ -490,6 +657,54 @@ func optionalStringParam(params map[string]interface{}, key string) string {
 		return ""
 	}
 	return strings.TrimSpace(value)
+}
+
+func optionalStringArrayParam(params map[string]interface{}, key string) []string {
+	raw, ok := params[key]
+	if !ok {
+		return nil
+	}
+	items, ok := raw.([]interface{})
+	if !ok {
+		return nil
+	}
+	result := make([]string, 0, len(items))
+	for _, item := range items {
+		value, isString := item.(string)
+		if !isString {
+			continue
+		}
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			continue
+		}
+		result = append(result, trimmed)
+	}
+	return result
+}
+
+func optionalMapParam(params map[string]interface{}, key string) map[string]interface{} {
+	raw, ok := params[key]
+	if !ok {
+		return nil
+	}
+	value, ok := raw.(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	return value
+}
+
+func optionalBoolParam(params map[string]interface{}, key string, fallback bool) bool {
+	raw, ok := params[key]
+	if !ok {
+		return fallback
+	}
+	value, ok := raw.(bool)
+	if !ok {
+		return fallback
+	}
+	return value
 }
 
 func evalPromptsParam(params map[string]interface{}) ([]agenteval.Prompt, error) {
@@ -778,7 +993,18 @@ func readEnvFile(path string) map[string]string {
 			continue
 		}
 		key := strings.TrimSpace(parts[0])
-		val := strings.Trim(strings.TrimSpace(parts[1]), "\"")
+		val := strings.TrimSpace(parts[1])
+		if len(val) >= 2 {
+			if strings.HasPrefix(val, "\"") && strings.HasSuffix(val, "\"") {
+				if unquoted, err := strconv.Unquote(val); err == nil {
+					val = unquoted
+				} else {
+					val = strings.Trim(val, "\"")
+				}
+			} else if strings.HasPrefix(val, "'") && strings.HasSuffix(val, "'") {
+				val = val[1 : len(val)-1]
+			}
+		}
 		if key != "" {
 			values[key] = val
 		}
@@ -1062,7 +1288,17 @@ func persistVLLMEnvOverrides(mode string, image string) error {
 			if key == "" {
 				continue
 			}
-			val = strings.Trim(val, "\"")
+			if len(val) >= 2 {
+				if strings.HasPrefix(val, "\"") && strings.HasSuffix(val, "\"") {
+					if unquoted, unquoteErr := strconv.Unquote(val); unquoteErr == nil {
+						val = unquoted
+					} else {
+						val = strings.Trim(val, "\"")
+					}
+				} else if strings.HasPrefix(val, "'") && strings.HasSuffix(val, "'") {
+					val = val[1 : len(val)-1]
+				}
+			}
 			addKey(key, val)
 		}
 	}
@@ -1077,7 +1313,7 @@ func persistVLLMEnvOverrides(mode string, image string) error {
 	}
 	lines := make([]string, 0, len(order))
 	for _, key := range order {
-		lines = append(lines, fmt.Sprintf("%s=%s", key, values[key]))
+		lines = append(lines, fmt.Sprintf("%s=%q", key, values[key]))
 	}
 	payload := strings.Join(lines, "\n")
 	if payload != "" {
@@ -1144,6 +1380,31 @@ func isSignalTermination(err error) bool {
 
 func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
+}
+
+func scheduleSelfShutdown(delaySeconds int, haltMachine bool) error {
+	if delaySeconds < 1 {
+		delaySeconds = 1
+	}
+	command := fmt.Sprintf("sleep %d; ", delaySeconds)
+	if haltMachine {
+		command += "(sudo -n systemctl poweroff || sudo -n shutdown -h now || sudo -n halt || sudo -n poweroff || systemctl poweroff || shutdown -h now || halt || poweroff)"
+	} else {
+		command += "(sudo -n systemctl stop mantlerd || systemctl stop mantlerd || pkill -f \"mantler start\" || true)"
+	}
+	cmd := exec.Command("sh", "-c", command)
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "mantlerd: self_shutdown scheduled pid=%d delay=%ds haltMachine=%t\n", cmd.Process.Pid, delaySeconds, haltMachine)
+	go func() {
+		if err := cmd.Wait(); err != nil {
+			fmt.Fprintf(os.Stderr, "mantlerd: self_shutdown process pid=%d exited with error: %v\n", cmd.Process.Pid, err)
+			return
+		}
+		fmt.Fprintf(os.Stderr, "mantlerd: self_shutdown process pid=%d completed\n", cmd.Process.Pid)
+	}()
+	return nil
 }
 
 func desiredHarnessesParam(params map[string]interface{}) ([]types.DesiredHarness, error) {

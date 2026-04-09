@@ -14,14 +14,19 @@ import (
 )
 
 type Prompt struct {
-	ID               string `json:"id"`
-	Category         string `json:"category"`
-	Workload         string `json:"workload"`
-	Prompt           string `json:"prompt"`
-	SystemPrompt     string `json:"systemPrompt,omitempty"`
-	ExpectedBehavior string `json:"expectedBehavior,omitempty"`
-	MaxTokens        int    `json:"maxTokens,omitempty"`
-	ContextLength    string `json:"contextLength,omitempty"`
+	ID               string   `json:"id"`
+	Category         string   `json:"category"`
+	Workload         string   `json:"workload"`
+	Prompt           string   `json:"prompt"`
+	SystemPrompt     string   `json:"systemPrompt,omitempty"`
+	ExpectedBehavior string   `json:"expectedBehavior,omitempty"`
+	MaxTokens        int      `json:"maxTokens,omitempty"`
+	ContextLength    string   `json:"contextLength,omitempty"`
+	SuiteID          string   `json:"suiteId,omitempty"`
+	SuiteVersion     string   `json:"suiteVersion,omitempty"`
+	Choices          []string `json:"choices,omitempty"`
+	CorrectAnswer    string   `json:"correctAnswer,omitempty"`
+	Subject          string   `json:"subject,omitempty"`
 }
 
 type Progress struct {
@@ -89,7 +94,13 @@ func (r *Runner) Run(
 		default:
 		}
 
-		sample := r.evaluatePrompt(prompt, speedMetrics, speedErr)
+		completion, completionErr := r.manager.CompletePrompt(
+			modelID,
+			prompt.SystemPrompt,
+			prompt.Prompt,
+			prompt.MaxTokens,
+		)
+		sample := r.evaluatePrompt(prompt, speedMetrics, speedErr, completion, completionErr)
 		samples = append(samples, sample)
 		if onProgress != nil {
 			onProgress(Progress{
@@ -130,16 +141,30 @@ func (r *Runner) evaluatePrompt(
 	prompt Prompt,
 	speed runtime.BenchmarkResult,
 	speedErr error,
+	completion runtime.PromptCompletionResult,
+	completionErr error,
 ) types.EvalSampleDetail {
 	category := strings.TrimSpace(prompt.Category)
 	if category == "" {
 		category = "quality"
 	}
 
-	latency := float64(450)
-	ttft := float64(120)
-	tps := float64(35)
-	outputTokens := 128
+	latency := completion.LatencyMs
+	ttft := completion.TTFTMs
+	tps := completion.TokensPerSec
+	outputTokens := completion.OutputTokens
+	if latency <= 0 {
+		latency = float64(450)
+	}
+	if ttft <= 0 {
+		ttft = float64(120)
+	}
+	if tps <= 0 {
+		tps = float64(35)
+	}
+	if outputTokens <= 0 {
+		outputTokens = 128
+	}
 	if speed.TotalLatencyMs > 0 {
 		latency = speed.TotalLatencyMs
 	}
@@ -153,10 +178,26 @@ func (r *Runner) evaluatePrompt(
 		outputTokens = prompt.MaxTokens
 	}
 
+	output := strings.TrimSpace(completion.Output)
+	if output == "" && completionErr != nil {
+		output = completionErr.Error()
+	}
+	if output == "" {
+		output = "(empty model output)"
+	}
 	quality := seedScore(prompt.ID, 68, 94)
-	passed := true
-	notes := "heuristic eval sample"
-	output := fmt.Sprintf("Synthetic output for %s (%s).", prompt.ID, category)
+	if completionErr == nil {
+		if len(output) > 0 {
+			quality = 85
+		} else {
+			quality = 0
+		}
+	}
+	passed := completionErr == nil && len(strings.TrimSpace(output)) > 0
+	notes := "model output evaluated"
+	if completionErr != nil {
+		notes = "prompt completion failed: " + completionErr.Error()
+	}
 
 	switch category {
 	case "speed":

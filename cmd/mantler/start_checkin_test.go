@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,7 @@ import (
 	"github.com/Borgels/mantlerd/internal/commands"
 	"github.com/Borgels/mantlerd/internal/config"
 	"github.com/Borgels/mantlerd/internal/runtime"
+	"github.com/Borgels/mantlerd/internal/trainer"
 	"github.com/Borgels/mantlerd/internal/types"
 )
 
@@ -70,7 +72,8 @@ func TestRunCheckInFollowUpDoesNotResendOutcomeEvents(t *testing.T) {
 		Insecure:  true,
 	}
 	runtimeManager := runtime.NewManager()
-	executor := commands.NewExecutor(runtimeManager, cfg, nil, nil)
+	trainerManager := trainer.NewManager()
+	executor := commands.NewExecutor(runtimeManager, trainerManager, cfg, nil, nil)
 	outcomes := &outcomeBuffer{}
 	outcomes.Add(types.OutcomeEvent{
 		EventType: "task_success",
@@ -78,7 +81,7 @@ func TestRunCheckInFollowUpDoesNotResendOutcomeEvents(t *testing.T) {
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 	})
 
-	runCheckIn(cfg, cl, runtimeManager, executor, outcomes, time.Now())
+	runCheckIn(context.Background(), cfg, cl, runtimeManager, trainerManager, executor, outcomes, time.Now())
 
 	mu.Lock()
 	defer mu.Unlock()

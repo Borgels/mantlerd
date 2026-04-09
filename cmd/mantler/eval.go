@@ -20,21 +20,56 @@ import (
 var evalCmd = &cobra.Command{
 	Use:   "eval <model>",
 	Short: "Run workload-aware model evaluation",
-	Args:  cobra.ExactArgs(1),
-	Run:   runEval,
+	Long: `Run quality-focused benchmark suites against a model.
+
+This command executes benchmark prompts, summarizes pass/quality metrics,
+and optionally reports outcomes to the Mantler server.
+
+Use "mantler model benchmark" when you want throughput/latency measurements
+(TTFT, tokens/sec, latency) instead of workload quality evaluation.
+
+Examples:
+  mantler eval llama3.2
+  mantler eval llama3.2 --suite mmlu --profile standard
+  mantler eval llama3.2 --json --stealth
+  mantler eval --list-suites`,
+	Args: func(cmd *cobra.Command, args []string) error {
+		listSuites, _ := cmd.Flags().GetBool("list-suites")
+		if listSuites {
+			if len(args) > 0 {
+				return fmt.Errorf("unknown arguments for --list-suites: %s", strings.Join(args, " "))
+			}
+			return nil
+		}
+		return cobra.ExactArgs(1)(cmd, args)
+	},
+	Run: runEval,
 }
 
 var (
-	evalWorkload string
-	evalProfile  string
-	evalRuntime  string
-	evalJSON     bool
-	evalStealth  bool
+	evalWorkload       string
+	evalProfile        string
+	evalSuite          string
+	evalRuntime        string
+	evalJSON           bool
+	evalStealth        bool
+	evalRate           bool
+	evalListSuites     bool
+	evalNonInteractive bool
 )
 
 var allowedEvalWorkloads = map[string]struct{}{
 	"coding": {}, "chat": {}, "creative": {}, "reasoning": {}, "agents": {}, "vision": {},
 }
+
+var allowedEvalSuites = map[string]struct{}{
+	"mantler-standard": {},
+	"mmlu":             {},
+	"gsm8k":            {},
+	"gpqa":             {},
+}
+
+var evalSuiteOrder = []string{"mantler-standard", "mmlu", "gsm8k", "gpqa"}
 
 type evalReportingContext struct {
 	client    *client.Client
@@ -45,12 +80,24 @@ func init() {
 	rootCmd.AddCommand(evalCmd)
 	evalCmd.Flags().StringVar(&evalWorkload, "workload", "coding", "Workload (coding, chat, creative, reasoning, agents, vision)")
 	evalCmd.Flags().StringVar(&evalProfile, "profile", "quick", "Eval profile (quick, standard, deep)")
+	evalCmd.Flags().StringVar(&evalSuite, "suite", "mantler-standard", "Benchmark suite (mantler-standard, mmlu, gsm8k, gpqa)")
 	evalCmd.Flags().StringVar(&evalRuntime, "runtime", "", "Runtime hint (llamacpp, ollama, vllm, tensorrt)")
 	evalCmd.Flags().BoolVar(&evalJSON, "json", false, "Print raw JSON summary")
 	evalCmd.Flags().BoolVar(&evalStealth, "stealth", false, "Run local-only eval (skip prompt fetch and telemetry upload)")
+	evalCmd.Flags().BoolVar(&evalRate, "rate", false, "Prompt for an optional 1-5 user rating after the run")
+	evalCmd.Flags().BoolVar(&evalListSuites, "list-suites", false, "List supported benchmark suites and exit")
+	evalCmd.Flags().BoolVarP(&evalNonInteractive, "non-interactive", "y", false, "Skip interactive prompts (useful in CI)")
 }
 
 func runEval(cmd *cobra.Command, args []string) {
+	if evalListSuites {
+		fmt.Println("Supported benchmark suites:")
+		for _, suite := range evalSuiteOrder {
+			fmt.Printf("  - %s\n", suite)
+		}
+		return
+	}
+
 	modelID := strings.TrimSpace(args[0])
 	if modelID == "" {
 		fmt.Fprintln(os.Stderr, "Model ID is required.")
@@ -72,6 +119,15 @@ func runEval(cmd *cobra.Command, args []string) {
 		fmt.Fprintln(os.Stderr, "Invalid profile. Use quick, standard, or deep.")
 		os.Exit(1)
 	}
+	suiteID := strings.TrimSpace(evalSuite)
+	if suiteID == "" {
+		suiteID = "mantler-standard"
+	}
+	if _, ok := allowedEvalSuites[suiteID]; !ok {
+		fmt.Fprintf(os.Stderr, "Invalid suite: %s\n", suiteID)
+		fmt.Fprintf(os.Stderr, "Valid suites: %s\n", strings.Join(evalSuiteOrder, ", "))
+		os.Exit(1)
+	}
 
 	var reportingCtx *evalReportingContext
 	if !evalStealth {
@@ -88,7 +144,7 @@ func runEval(cmd *cobra.Command, args []string) {
 	runtimeHint := strings.TrimSpace(evalRuntime)
 	if reportingCtx != nil {
 		promptCtx, promptCancel := context.WithTimeout(context.Background(), 15*time.Second)
-		serverPrompts, sessionToken, promptErr := reportingCtx.client.GetEvalPrompts(promptCtx, workload, profile)
+		serverPrompts, sessionToken, promptErr := reportingCtx.client.GetEvalPrompts(promptCtx, workload, profile, suiteID)
 		promptCancel()
 		if promptErr == nil && len(serverPrompts) > 0 {
 			prompts = serverPrompts
@@ -103,7 +159,7 @@ func runEval(cmd *cobra.Command, args []string) {
 	runner := agenteval.NewRunner(manager)
 	effectiveRuntime := resolveEvalRuntime(manager, modelID, runtimeHint)
 
-	fmt.Printf("Evaluating %s for %s (%s, %d prompts)\n", modelID, workload, profile, len(prompts))
+	fmt.Printf("Evaluating %s for %s (%s, suite %s, %d prompts)\n", modelID, workload, profile, suiteID, len(prompts))
 	summary, err := runner.Run(context.Background(), modelID, workload, profile, prompts, nil)
 	if evalSessionToken != "" {
 		summary.EvalSessionToken = evalSessionToken
@@ -116,13 +172,15 @@ func runEval(cmd *cobra.Command, args []string) {
 	rating := 0
 	if !evalJSON {
 		printEvalSummary(summary)
-		reader := bufio.NewReader(os.Stdin)
-		fmt.Print("Rate this model (1-5, or skip): ")
-		answer, _ := reader.ReadString('\n')
-		answer = strings.TrimSpace(answer)
-		switch answer {
-		case "1", "2", "3", "4", "5":
-			rating = int(answer[0] - '0')
+		if evalRate && !evalNonInteractive {
+			reader := bufio.NewReader(os.Stdin)
+			fmt.Print("Rate this model (1-5, or skip): ")
+			answer, _ := reader.ReadString('\n')
+			answer = strings.TrimSpace(answer)
+			switch answer {
+			case "1", "2", "3", "4", "5":
+				rating = int(answer[0] - '0')
+			}
 		}
 	}
 
@@ -136,6 +194,10 @@ func runEval(cmd *cobra.Command, args []string) {
 	}
 
 	if reportingCtx != nil {
+		suiteVersion := ""
+		if len(prompts) > 0 {
+			suiteVersion = strings.TrimSpace(prompts[0].SuiteVersion)
+		}
 		err = reportEvalSummary(
 			reportingCtx.client,
 			reportingCtx.machineID,
@@ -145,6 +207,8 @@ func runEval(cmd *cobra.Command, args []string) {
 			workload,
 			rating,
 			evalSessionToken,
+			suiteID,
+			suiteVersion,
 		)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to report eval outcomes to server: %v\n", err)
@@ -204,6 +268,8 @@ func reportEvalSummary(
 	workload string,
 	rating int,
 	evalSessionToken string,
+	benchmarkSuiteID string,
+	benchmarkSuiteVersion string,
 ) error {
 	baseFingerprint := buildBaseFingerprint(machineID, modelID, runtimeName, "")
 	events := make([]types.OutcomeEvent, 0, len(summary.Samples)+1)
@@ -214,14 +280,16 @@ func reportEvalSummary(
 		}
 		score := sample.QualityScore
 		events = append(events, types.OutcomeEvent{
-			BaseFingerprint:  baseFingerprint,
-			EventType:        eventType,
-			EvidenceKind:     "benchmark",
-			Workload:         workload,
-			EvalPromptID:     sample.PromptID,
-			EvalOutput:       sample.Output,
-			EvalSessionToken: strings.TrimSpace(evalSessionToken),
-			DurationMs:       int64(sample.LatencyMs),
+			BaseFingerprint:       baseFingerprint,
+			EventType:             eventType,
+			EvidenceKind:          "benchmark",
+			Workload:              workload,
+			BenchmarkSuiteID:      strings.TrimSpace(benchmarkSuiteID),
+			BenchmarkSuiteVersion: strings.TrimSpace(benchmarkSuiteVersion),
+			EvalPromptID:          sample.PromptID,
+			EvalOutput:            sample.Output,
+			EvalSessionToken:      strings.TrimSpace(evalSessionToken),
+			DurationMs:            int64(sample.LatencyMs),
 			TokenUsage: &types.OutcomeTokenUsage{
 				PromptTokens:     0,
 				CompletionTokens: sample.OutputTokens,
@@ -235,14 +303,16 @@ func reportEvalSummary(
 	if rating > 0 {
 		score := float64(rating * 20)
 		events = append(events, types.OutcomeEvent{
-			BaseFingerprint:  baseFingerprint,
-			EventType:        "task_success",
-			EvidenceKind:     "benchmark",
-			Workload:         workload,
-			EvalSessionToken: strings.TrimSpace(evalSessionToken),
-			QualityScore:     &score,
-			Detail:           fmt.Sprintf("User preference rating: %d/5", rating),
-			Timestamp:        time.Now().UTC().Format(time.RFC3339),
+			BaseFingerprint:       baseFingerprint,
+			EventType:             "task_success",
+			EvidenceKind:          "benchmark",
+			Workload:              workload,
+			BenchmarkSuiteID:      strings.TrimSpace(benchmarkSuiteID),
+			BenchmarkSuiteVersion: strings.TrimSpace(benchmarkSuiteVersion),
+			EvalSessionToken:      strings.TrimSpace(evalSessionToken),
+			QualityScore:          &score,
+			Detail:                fmt.Sprintf("User preference rating: %d/5", rating),
+			Timestamp:             time.Now().UTC().Format(time.RFC3339),
 		})
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)

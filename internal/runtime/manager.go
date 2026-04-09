@@ -500,6 +500,23 @@ func (m *Manager) BenchmarkModel(
 	return driver.BenchmarkModel(modelID, samplePromptTokens, sampleOutputTokens, concurrency, runs, onProgress)
 }
 
+func (m *Manager) CompletePrompt(
+	modelID string,
+	systemPrompt string,
+	prompt string,
+	maxTokens int,
+) (PromptCompletionResult, error) {
+	driver, err := m.preferredDriverForModel(modelID)
+	if err != nil {
+		return PromptCompletionResult{}, err
+	}
+	completionDriver, ok := driver.(PromptCompletionDriver)
+	if !ok {
+		return PromptCompletionResult{}, fmt.Errorf("runtime %s does not support prompt completion", driver.Name())
+	}
+	return completionDriver.CompletePrompt(modelID, systemPrompt, prompt, maxTokens)
+}
+
 func (m *Manager) RestartRuntime() error {
 	var lastErr error
 	restarted := false

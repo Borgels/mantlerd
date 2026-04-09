@@ -23,6 +23,7 @@ import (
 const (
 	vllmConfigPath            = "/etc/mantler/vllm.json"
 	vllmEnvPath               = "/etc/mantler/vllm.env"
+	vllmDockerEnvPath         = "/etc/mantler/vllm-docker.env"
 	vllmUnitPath              = "/etc/systemd/system/vllm.service"
 	vllmVenvPath              = "/opt/mantler/vllm-venv"
 	vllmPythonPath            = "/opt/mantler/vllm-venv/bin/python3"
@@ -283,7 +284,19 @@ func (d *vllmDriver) StopModel(modelID string) error {
 }
 
 func (d *vllmDriver) EnsureModelWithFlags(modelID string, flags *types.ModelFeatureFlags) error {
-	return d.StartModelWithFlags(modelID, flags)
+	trimmedModel := strings.TrimSpace(modelID)
+	if trimmedModel == "" {
+		return fmt.Errorf("model ID is required")
+	}
+	remoteModels, err := d.fetchRemoteModels()
+	if err == nil {
+		for _, remoteModel := range remoteModels {
+			if strings.EqualFold(strings.TrimSpace(remoteModel), trimmedModel) {
+				return nil
+			}
+		}
+	}
+	return d.StartModelWithFlags(trimmedModel, flags)
 }
 
 func (d *vllmDriver) ListModels() []string {
@@ -311,6 +324,7 @@ func (d *vllmDriver) ListModels() []string {
 func (d *vllmDriver) InstalledModels() []types.InstalledModel {
 	models := make([]types.InstalledModel, 0)
 	seen := map[string]struct{}{}
+	indexByModelID := map[string]int{}
 	addModel := func(modelID string, status types.ModelInstallStatus, failReason string) {
 		trimmed := strings.TrimSpace(modelID)
 		if trimmed == "" {
@@ -320,6 +334,7 @@ func (d *vllmDriver) InstalledModels() []types.InstalledModel {
 			return
 		}
 		seen[trimmed] = struct{}{}
+		indexByModelID[trimmed] = len(models)
 		models = append(models, types.InstalledModel{
 			ModelID:    trimmed,
 			Runtime:    types.RuntimeVLLM,
@@ -337,7 +352,16 @@ func (d *vllmDriver) InstalledModels() []types.InstalledModel {
 	remoteModels, err := d.fetchRemoteModels()
 	if err == nil {
 		for _, modelID := range remoteModels {
-			addModel(modelID, types.ModelReady, "")
+			trimmed := strings.TrimSpace(modelID)
+			if trimmed == "" {
+				continue
+			}
+			if idx, ok := indexByModelID[trimmed]; ok {
+				models[idx].Status = types.ModelReady
+				models[idx].FailReason = ""
+				continue
+			}
+			addModel(trimmed, types.ModelReady, "")
 		}
 		if configuredModel != "" {
 			if _, ok := seen[configuredModel]; !ok {
@@ -530,6 +554,88 @@ func (d *vllmDriver) benchmarkOnce(modelID string, prompt string, sampleOutputTo
 	}, nil
 }
 
+func (d *vllmDriver) CompletePrompt(
+	modelID string,
+	systemPrompt string,
+	prompt string,
+	maxTokens int,
+) (PromptCompletionResult, error) {
+	if strings.TrimSpace(modelID) == "" {
+		return PromptCompletionResult{}, fmt.Errorf("model ID is required")
+	}
+	if maxTokens <= 0 {
+		maxTokens = 128
+	}
+	if err := d.EnsureModelWithFlags(modelID, nil); err != nil {
+		return PromptCompletionResult{}, err
+	}
+
+	messages := []map[string]string{}
+	if strings.TrimSpace(systemPrompt) != "" {
+		messages = append(messages, map[string]string{"role": "system", "content": systemPrompt})
+	}
+	messages = append(messages, map[string]string{"role": "user", "content": prompt})
+
+	reqBody := map[string]any{
+		"model":      modelID,
+		"messages":   messages,
+		"max_tokens": maxTokens,
+		"stream":     false,
+	}
+	raw, err := json.Marshal(reqBody)
+	if err != nil {
+		return PromptCompletionResult{}, fmt.Errorf("encode vllm completion request: %w", err)
+	}
+
+	start := time.Now()
+	req, err := http.NewRequest(http.MethodPost, d.baseURL()+"/v1/chat/completions", bytes.NewReader(raw))
+	if err != nil {
+		return PromptCompletionResult{}, fmt.Errorf("create vllm completion request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := (&http.Client{Timeout: 120 * time.Second}).Do(req)
+	if err != nil {
+		return PromptCompletionResult{}, fmt.Errorf("vllm completion request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		return PromptCompletionResult{}, fmt.Errorf("vllm completion failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	var parsed struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+		Usage struct {
+			CompletionTokens int `json:"completion_tokens"`
+			PromptTokens     int `json:"prompt_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return PromptCompletionResult{}, fmt.Errorf("decode vllm completion response: %w", err)
+	}
+	elapsedMs := float64(time.Since(start).Milliseconds())
+	output := ""
+	if len(parsed.Choices) > 0 {
+		output = strings.TrimSpace(parsed.Choices[0].Message.Content)
+	}
+	outputTokens := parsed.Usage.CompletionTokens
+	tokensPerSec := 0.0
+	if elapsedMs > 0 && outputTokens > 0 {
+		tokensPerSec = float64(outputTokens) / (elapsedMs / 1000.0)
+	}
+	return PromptCompletionResult{
+		Output:       output,
+		LatencyMs:    elapsedMs,
+		TTFTMs:       elapsedMs,
+		TokensPerSec: roundTo(tokensPerSec, 2),
+		OutputTokens: outputTokens,
+	}, nil
+}
+
 func (d *vllmDriver) RestartRuntime() error {
 	cfg, cfgErr := d.readConfig()
 	if cfgErr == nil {
@@ -620,7 +726,8 @@ Type=simple
 EnvironmentFile=-` + vllmEnvPath + `
 ExecStartPre=-/bin/sh -c 'DOCKER_BIN="$(command -v docker)"; if [ -n "$DOCKER_BIN" ]; then "$DOCKER_BIN" rm -f ` + vllmContainerName + ` >/dev/null 2>&1 || true; fi'
 ExecStartPre=-/bin/sh -c 'mkdir -p /opt/mantler/vllm-app'
-ExecStart=/bin/sh -c 'DOCKER_BIN="$(command -v docker)"; [ -n "$DOCKER_BIN" ] || exit 1; exec "$DOCKER_BIN" run --rm --name ` + vllmContainerName + ` --gpus all --ipc=host --network host -e HF_TOKEN="${HF_TOKEN:-}" -e HUGGING_FACE_HUB_TOKEN="${HUGGING_FACE_HUB_TOKEN:-}" -e NVIDIA_VISIBLE_DEVICES=all -e NVIDIA_DRIVER_CAPABILITIES=compute,utility -v /root/.cache/huggingface:/root/.cache/huggingface -v /opt/mantler/vllm-app:/app "${VLLM_CONTAINER_IMAGE:-` + vllmDefaultContainerImage + `}" vllm serve "${VLLM_MODEL}" --host 0.0.0.0 --port "${VLLM_PORT:-8000}" --gpu-memory-utilization "${VLLM_GPU_MEMORY_UTILIZATION:-0.9}" ${VLLM_EXTRA_ARGS:-}'
+ExecStartPre=-/bin/sh -c 'mkdir -p ` + filepath.Dir(vllmDockerEnvPath) + ` && touch ` + vllmDockerEnvPath + `'
+ExecStart=/bin/sh -c 'DOCKER_BIN="$(command -v docker)"; [ -n "$DOCKER_BIN" ] || exit 1; GPU_FLAGS="--gpus all"; if ! "$DOCKER_BIN" info --format "{{json .Runtimes}}" 2>/dev/null | tr -d " " | tr -d "\n" | grep -q "\"nvidia\":"; then if [ -f /etc/cdi/nvidia.yaml ] || [ -f /var/run/cdi/nvidia.yaml ] || [ -f /etc/cdi/nvidia.json ] || [ -f /var/run/cdi/nvidia.json ]; then GPU_FLAGS="--device nvidia.com/gpu=all"; fi; fi; exec "$DOCKER_BIN" run --rm --name ` + vllmContainerName + ` $$GPU_FLAGS --ipc=host --network host --env-file ` + vllmDockerEnvPath + ` -e HF_TOKEN="${HF_TOKEN:-}" -e HUGGING_FACE_HUB_TOKEN="${HUGGING_FACE_HUB_TOKEN:-}" -e NVIDIA_VISIBLE_DEVICES=all -e NVIDIA_DRIVER_CAPABILITIES=compute,utility -v /root/.cache/huggingface:/root/.cache/huggingface -v /opt/mantler/vllm-app:/app --entrypoint python3 "${VLLM_CONTAINER_IMAGE:-` + vllmDefaultContainerImage + `}" -m vllm.entrypoints.openai.api_server --model "${VLLM_MODEL}" --host 0.0.0.0 --port "${VLLM_PORT:-8000}" --gpu-memory-utilization "${VLLM_GPU_MEMORY_UTILIZATION:-0.9}" ${VLLM_EXTRA_ARGS:-}'
 ExecStop=-/bin/sh -c 'DOCKER_BIN="$(command -v docker)"; if [ -n "$DOCKER_BIN" ]; then "$DOCKER_BIN" stop ` + vllmContainerName + ` >/dev/null 2>&1 || true; fi'
 Restart=always
 RestartSec=5
@@ -729,26 +836,33 @@ func (d *vllmDriver) startOrRestartService(modelID string, port int, force bool)
 		}
 	}
 	runtimeMode := d.runtimeMode()
-	envContent := fmt.Sprintf("VLLM_MODEL=%q\nVLLM_PORT=%d\nVLLM_GPU_MEMORY_UTILIZATION=0.9\nVLLM_TRUST_REMOTE_CODE=%s\nVLLM_EXTRA_ARGS=%q\nVLLM_RUNTIME_MODE=%q\n",
-		safeModelID,
-		port,
-		trustRemoteCode,
-		extraArgs,
-		runtimeMode,
-	)
+	values := d.readEnvConfigMap()
+	values["VLLM_MODEL"] = safeModelID
+	values["VLLM_PORT"] = strconv.Itoa(port)
+	values["VLLM_GPU_MEMORY_UTILIZATION"] = "0.9"
+	values["VLLM_TRUST_REMOTE_CODE"] = trustRemoteCode
+	values["VLLM_EXTRA_ARGS"] = extraArgs
+	values["VLLM_RUNTIME_MODE"] = runtimeMode
 	if hfToken != "" {
-		envContent += fmt.Sprintf("HF_TOKEN=%q\n", hfToken)
+		values["HF_TOKEN"] = hfToken
 	}
 	if hfHubToken != "" {
-		envContent += fmt.Sprintf("HUGGING_FACE_HUB_TOKEN=%q\n", hfHubToken)
+		values["HUGGING_FACE_HUB_TOKEN"] = hfHubToken
 	}
 	if d.shouldUseContainer() {
-		envContent += fmt.Sprintf("VLLM_CONTAINER_IMAGE=%q\n", containerImage)
+		values["VLLM_CONTAINER_IMAGE"] = containerImage
+		delete(values, "VLLM_LD_LIBRARY_PATH")
 	} else {
-		envContent += fmt.Sprintf("VLLM_LD_LIBRARY_PATH=%q\n", libraryPath)
+		values["VLLM_LD_LIBRARY_PATH"] = libraryPath
+		delete(values, "VLLM_CONTAINER_IMAGE")
 	}
-	if err := os.WriteFile(vllmEnvPath, []byte(envContent), 0o600); err != nil {
+	if err := d.writeEnvConfigMap(values); err != nil {
 		return fmt.Errorf("write vllm env config: %w", err)
+	}
+	if d.shouldUseContainer() {
+		if err := d.writeDockerEnvConfig(values); err != nil {
+			return fmt.Errorf("write vllm docker env config: %w", err)
+		}
 	}
 	if err := runCommand("systemctl", "enable", "vllm"); err != nil {
 		return err
@@ -1192,14 +1306,100 @@ func (d *vllmDriver) readEnvConfigMap() map[string]string {
 			continue
 		}
 		if len(val) >= 2 {
-			if (strings.HasPrefix(val, "\"") && strings.HasSuffix(val, "\"")) ||
-				(strings.HasPrefix(val, "'") && strings.HasSuffix(val, "'")) {
+			if strings.HasPrefix(val, "\"") && strings.HasSuffix(val, "\"") {
+				if unquoted, err := strconv.Unquote(val); err == nil {
+					val = unquoted
+				} else {
+					val = val[1 : len(val)-1]
+				}
+			} else if strings.HasPrefix(val, "'") && strings.HasSuffix(val, "'") {
 				val = val[1 : len(val)-1]
 			}
 		}
 		values[key] = val
 	}
 	return values
+}
+
+func (d *vllmDriver) writeEnvConfigMap(values map[string]string) error {
+	lines := make([]string, 0, len(values))
+	seen := map[string]struct{}{}
+	order := []string{
+		"VLLM_MODEL",
+		"VLLM_PORT",
+		"VLLM_GPU_MEMORY_UTILIZATION",
+		"VLLM_TRUST_REMOTE_CODE",
+		"VLLM_EXTRA_ARGS",
+		"VLLM_RUNTIME_MODE",
+		"HF_TOKEN",
+		"HUGGING_FACE_HUB_TOKEN",
+		"VLLM_CONTAINER_IMAGE",
+		"VLLM_LD_LIBRARY_PATH",
+	}
+	for _, key := range order {
+		value, ok := values[key]
+		if !ok {
+			continue
+		}
+		lines = append(lines, fmt.Sprintf("%s=%q", key, value))
+		seen[key] = struct{}{}
+	}
+	extraKeys := make([]string, 0, len(values))
+	for key := range values {
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		extraKeys = append(extraKeys, key)
+	}
+	sort.Strings(extraKeys)
+	for _, key := range extraKeys {
+		lines = append(lines, fmt.Sprintf("%s=%q", key, values[key]))
+	}
+	payload := strings.Join(lines, "\n")
+	if payload != "" {
+		payload += "\n"
+	}
+	return os.WriteFile(vllmEnvPath, []byte(payload), 0o600)
+}
+
+func (d *vllmDriver) writeDockerEnvConfig(values map[string]string) error {
+	if err := os.MkdirAll(filepath.Dir(vllmDockerEnvPath), 0o755); err != nil {
+		return err
+	}
+	excluded := map[string]struct{}{
+		"VLLM_MODEL":                  {},
+		"VLLM_PORT":                   {},
+		"VLLM_GPU_MEMORY_UTILIZATION": {},
+		"VLLM_EXTRA_ARGS":             {},
+		"VLLM_RUNTIME_MODE":           {},
+		"VLLM_CONTAINER_IMAGE":        {},
+		"VLLM_LD_LIBRARY_PATH":        {},
+		"VLLM_TRUST_REMOTE_CODE":      {},
+	}
+	keys := make([]string, 0, len(values))
+	for key, value := range values {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		if _, skip := excluded[key]; skip {
+			continue
+		}
+		if strings.TrimSpace(value) == "" {
+			continue
+		}
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	lines := make([]string, 0, len(keys))
+	for _, key := range keys {
+		lines = append(lines, fmt.Sprintf("%s=%s", key, values[key]))
+	}
+	payload := strings.Join(lines, "\n")
+	if payload != "" {
+		payload += "\n"
+	}
+	return os.WriteFile(vllmDockerEnvPath, []byte(payload), 0o600)
 }
 
 func (d *vllmDriver) hasLibcudart() bool {
@@ -1397,7 +1597,21 @@ func (d *vllmDriver) downloadModelSnapshotCtx(ctx context.Context, modelID strin
 				return err
 			}
 		}
-		cmd := exec.CommandContext(ctx, "docker", "run", "--rm", "--network", "host", "-v", "/root/.cache/huggingface:/root/.cache/huggingface", image, "python3", "-c", script)
+		cmd := exec.CommandContext(
+			ctx,
+			"docker",
+			"run",
+			"--rm",
+			"--network",
+			"host",
+			"--entrypoint",
+			"python3",
+			"-v",
+			"/root/.cache/huggingface:/root/.cache/huggingface",
+			image,
+			"-c",
+			script,
+		)
 		if output, err := cmd.CombinedOutput(); err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()

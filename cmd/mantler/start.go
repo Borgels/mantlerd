@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"os"
 	"os/signal"
@@ -16,6 +17,7 @@ import (
 	"github.com/Borgels/mantlerd/internal/config"
 	"github.com/Borgels/mantlerd/internal/discovery"
 	"github.com/Borgels/mantlerd/internal/runtime"
+	"github.com/Borgels/mantlerd/internal/trainer"
 	"github.com/Borgels/mantlerd/internal/types"
 	"github.com/spf13/cobra"
 )
@@ -46,8 +48,9 @@ func runStart(cmd *cobra.Command, args []string) {
 
 	// Create runtime manager and executor
 	runtimeManager := runtime.NewManager()
+	trainerManager := trainer.NewManager()
 	runtimeManager.SetOutcomeReporter(outcomes.Add)
-	executor := commands.NewExecutor(runtimeManager, cfg, func(payload types.AckRequest) {
+	executor := commands.NewExecutor(runtimeManager, trainerManager, cfg, func(payload types.AckRequest) {
 		sendInProgressAck(cl, payload)
 	}, outcomes.Add)
 
@@ -57,19 +60,18 @@ func runStart(cmd *cobra.Command, args []string) {
 
 	// Run initial check-in
 	startedAt := time.Now()
-	runCheckIn(cfg, cl, runtimeManager, executor, outcomes, startedAt)
-
-	// Start ticker for periodic check-ins
-	ticker := time.NewTicker(cfg.Interval)
-	defer ticker.Stop()
+	activeOperations := runCheckIn(ctx, cfg, cl, runtimeManager, trainerManager, executor, outcomes, startedAt)
+	timer := time.NewTimer(nextCheckinInterval(cfg.Interval, activeOperations))
+	defer timer.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			log.Println("Shutting down agent...")
 			return
-		case <-ticker.C:
-			runCheckIn(cfg, cl, runtimeManager, executor, outcomes, startedAt)
+		case <-timer.C:
+			activeOperations = runCheckIn(ctx, cfg, cl, runtimeManager, trainerManager, executor, outcomes, startedAt)
+			timer.Reset(nextCheckinInterval(cfg.Interval, activeOperations))
 		}
 	}
 }
@@ -110,6 +112,9 @@ func loadConfig(cmd *cobra.Command) config.Config {
 	}
 	if cmd.Flags().Changed("log-level") {
 		flagsCfg.LogLevel = logLevel
+	}
+	if cmd.Flags().Changed("cloud-provisioned") {
+		flagsCfg.CloudProvisioned = cloudProvisioned
 	}
 
 	cfg := config.Merge(fileCfg, flagsCfg)
@@ -175,13 +180,15 @@ func (b *outcomeBuffer) DropPrefix(count int) {
 }
 
 func runCheckIn(
+	ctx context.Context,
 	cfg config.Config,
 	cl *client.Client,
 	runtimeManager *runtime.Manager,
+	trainerManager *trainer.Manager,
 	executor *commands.Executor,
 	outcomes *outcomeBuffer,
 	startedAt time.Time,
-) {
+) bool {
 	cachedDesired := loadCachedDesiredConfig()
 
 	report := discovery.Collect()
@@ -189,11 +196,13 @@ func runCheckIn(
 	installedRuntimeTypes := toRuntimeTypes(installedRuntimeNames)
 	readyRuntimeNames := runtimeManager.ReadyRuntimes()
 	runtimeStatuses := buildRuntimeStatuses(installedRuntimeNames, readyRuntimeNames)
+	installedModels := toInstalledModels(runtimeManager)
+	hasActiveWork := hasActiveOperations(runtimeStatuses, installedModels, trainerManager.HasActiveJobs())
 	runtimeStatus := types.RuntimeNotInstalled
 	runtimeType := types.RuntimeType("")
 	runtimeVersion := ""
 	if len(installedRuntimeNames) > 0 {
-		runtimeStatus = types.RuntimeFailed
+		runtimeStatus = types.RuntimeInstalling
 		runtimeType = types.RuntimeType(installedRuntimeNames[0])
 		runtimeVersion = runtimeManager.RuntimeVersion(installedRuntimeNames[0])
 	}
@@ -216,6 +225,7 @@ func runCheckIn(
 		GPUs:                   toProtocolGPUInfo(report.GPUs),
 		Interconnect:           report.Interconnect,
 		AgentVersion:           agentVersion,
+		AgentHealth:            computeAgentHealth(installedModels),
 		RuntimeStatus:          runtimeStatus,
 		RuntimeStatuses:        runtimeStatuses,
 		RuntimeType:            runtimeType,
@@ -223,21 +233,25 @@ func runCheckIn(
 		RuntimeVersions:        runtimeManager.RuntimeVersions(),
 		RuntimeConfigs:         runtimeManager.RuntimeConfigs(),
 		InstalledRuntimeTypes:  installedRuntimeTypes,
-		InstalledModels:        toInstalledModels(runtimeManager),
+		InstalledTrainers:      trainerManager.InstalledTrainers(),
+		InstalledModels:        installedModels,
 		InstalledHarnesses:     toInstalledHarnesses(cachedDesired),
 		InstalledOrchestrators: toInstalledOrchestrators(cachedDesired),
 		OutcomeEvents:          pendingOutcomes,
 		Uptime:                 int64(time.Since(startedAt).Seconds()),
 		LoadAvg:                readLoadAvg(),
 	}
+	if origin := configOrigin(cfg); origin != nil {
+		payload.Origin = origin
+	}
 
-	resp, err := client.Retry(context.Background(), 3, func() (types.CheckinResponse, error) {
-		return cl.Checkin(context.Background(), payload)
+	resp, err := client.Retry(ctx, 3, func() (types.CheckinResponse, error) {
+		return cl.Checkin(ctx, payload)
 	})
 	if err != nil {
 		log.Printf("checkin error: %v", err)
 		enforceDesiredConfig(runtimeManager, cachedDesired)
-		return
+		return hasActiveWork
 	}
 	if len(pendingOutcomes) > 0 {
 		outcomes.DropPrefix(len(pendingOutcomes))
@@ -268,7 +282,7 @@ func runCheckIn(
 
 	// Execute commands
 	for _, command := range resp.Commands {
-		result, err := executor.Execute(command)
+		result, err := executor.ExecuteWithContext(ctx, command)
 		status := "success"
 		if err != nil {
 			status = "failed"
@@ -289,6 +303,7 @@ func runCheckIn(
 			log.Printf("ack failed for %s: %v", command.ID, ackErr)
 		}
 	}
+	return hasActiveWork || len(resp.Commands) > 0
 }
 
 func readLoadAvg() []float64 {
@@ -312,6 +327,31 @@ func readLoadAvg() []float64 {
 		return nil
 	}
 	return values
+}
+
+func configOrigin(cfg config.Config) *types.MachineOrigin {
+	if cfg.Origin == nil && !cfg.CloudProvisioned {
+		return nil
+	}
+	if cfg.Origin == nil && cfg.CloudProvisioned {
+		return &types.MachineOrigin{Kind: "cloud_compute"}
+	}
+	raw, err := json.Marshal(cfg.Origin)
+	if err != nil {
+		return &types.MachineOrigin{Kind: "cloud_compute"}
+	}
+	var origin types.MachineOrigin
+	if err := json.Unmarshal(raw, &origin); err != nil {
+		return &types.MachineOrigin{Kind: "cloud_compute"}
+	}
+	if strings.TrimSpace(origin.Kind) == "" {
+		if cfg.CloudProvisioned {
+			origin.Kind = "cloud_compute"
+		} else {
+			origin.Kind = "local"
+		}
+	}
+	return &origin
 }
 
 func toProtocolGPUInfo(values []discovery.GPUInfo) []types.GPUInfo {
@@ -343,7 +383,7 @@ func toProtocolGPUInfo(values []discovery.GPUInfo) []types.GPUInfo {
 func buildRuntimeStatuses(installedRuntimeNames []string, readyRuntimeNames []string) map[types.RuntimeType]types.RuntimeStatus {
 	statuses := make(map[types.RuntimeType]types.RuntimeStatus, len(installedRuntimeNames))
 	for _, runtimeName := range installedRuntimeNames {
-		statuses[types.RuntimeType(runtimeName)] = types.RuntimeFailed
+		statuses[types.RuntimeType(runtimeName)] = types.RuntimeInstalling
 	}
 	for _, runtimeName := range readyRuntimeNames {
 		statuses[types.RuntimeType(runtimeName)] = types.RuntimeReady
@@ -363,4 +403,45 @@ func sendInProgressAck(cl *client.Client, payload types.AckRequest) {
 	if err != nil {
 		log.Printf("progress ack failed for %s: %v", payload.CommandID, err)
 	}
+}
+
+func computeAgentHealth(models []types.InstalledModel) types.AgentHealth {
+	for _, model := range models {
+		switch model.Status {
+		case types.ModelDownloading, types.ModelDownloaded, types.ModelInstalling, types.ModelBuilding, types.ModelBuilt, types.ModelStarting, types.ModelStopping:
+			return types.AgentBusy
+		case types.ModelFailed:
+			return types.AgentDegraded
+		}
+	}
+	return types.AgentHealthy
+}
+
+func hasActiveOperations(runtimeStatuses map[types.RuntimeType]types.RuntimeStatus, models []types.InstalledModel, hasActiveTraining bool) bool {
+	if hasActiveTraining {
+		return true
+	}
+	for _, runtimeStatus := range runtimeStatuses {
+		if runtimeStatus == types.RuntimeInstalling {
+			return true
+		}
+	}
+	for _, model := range models {
+		switch model.Status {
+		case types.ModelDownloading, types.ModelDownloaded, types.ModelInstalling, types.ModelBuilding, types.ModelBuilt, types.ModelStarting, types.ModelStopping:
+			return true
+		}
+	}
+	return false
+}
+
+func nextCheckinInterval(idleInterval time.Duration, active bool) time.Duration {
+	if !active {
+		return idleInterval
+	}
+	const activeInterval = 15 * time.Second
+	if idleInterval <= activeInterval {
+		return idleInterval
+	}
+	return activeInterval
 }

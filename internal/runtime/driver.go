@@ -31,6 +31,20 @@ type Driver interface {
 	RestartRuntime() error
 }
 
+type PromptCompletionResult struct {
+	Output       string
+	LatencyMs    float64
+	TTFTMs       float64
+	TokensPerSec float64
+	OutputTokens int
+}
+
+// PromptCompletionDriver optionally supports real prompt execution for eval/benchmark runs.
+type PromptCompletionDriver interface {
+	Driver
+	CompletePrompt(modelID string, systemPrompt string, prompt string, maxTokens int) (PromptCompletionResult, error)
+}
+
 // CancellableDriver extends Driver with context-aware preparation for cancellation support.
 type CancellableDriver interface {
 	Driver
