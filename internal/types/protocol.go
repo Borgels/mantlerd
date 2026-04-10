@@ -412,6 +412,7 @@ type DesiredHarness struct {
 	ManagedModelID string                 `json:"managedModelId,omitempty"`
 	Description    string                 `json:"description,omitempty"`
 	Capabilities   *HarnessCapabilities   `json:"capabilities,omitempty"`
+	CredentialRefs []string               `json:"credentialRefs,omitempty"`
 }
 
 type DesiredOrchestrator struct {
