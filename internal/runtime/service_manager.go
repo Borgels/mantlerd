@@ -1,7 +1,5 @@
 package runtime
 
-import "runtime"
-
 // ServiceManager abstracts service lifecycle operations across OSes.
 type ServiceManager interface {
 	Install(name string, execStart string, env map[string]string) error
@@ -11,11 +9,4 @@ type ServiceManager interface {
 	IsActive(name string) (bool, error)
 	Uninstall(name string) error
 	Logs(name string, lines int) (string, error)
-}
-
-func NewServiceManager() ServiceManager {
-	if runtime.GOOS == "darwin" {
-		return &launchdServiceManager{}
-	}
-	return &systemdServiceManager{}
 }

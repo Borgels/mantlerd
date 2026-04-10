@@ -164,6 +164,9 @@ func isLikelyQsfpInterface(name string) bool {
 
 func readInterfaceSpeed(interfaceName string) string {
 	if runtime.GOOS == "darwin" {
+		if execCommandFn == nil {
+			return ""
+		}
 		output, err := execCommandFn("ifconfig", interfaceName).Output()
 		if err != nil {
 			return ""
