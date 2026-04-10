@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"log"
 	"os"
+	"os/exec"
 	"os/signal"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -408,6 +410,29 @@ func runCheckIn(
 }
 
 func readLoadAvg() []float64 {
+	if runtime.GOOS == "darwin" {
+		out, err := execCommandOutput("sysctl", "-n", "vm.loadavg")
+		if err != nil {
+			return nil
+		}
+		trimmed := strings.TrimSpace(out)
+		trimmed = strings.TrimPrefix(trimmed, "{")
+		trimmed = strings.TrimSuffix(trimmed, "}")
+		fields := strings.Fields(trimmed)
+		if len(fields) < 3 {
+			return nil
+		}
+		values := make([]float64, 0, 3)
+		for i := 0; i < 3; i++ {
+			parsed, parseErr := strconv.ParseFloat(fields[i], 64)
+			if parseErr != nil {
+				return nil
+			}
+			values = append(values, parsed)
+		}
+		return values
+	}
+
 	raw, err := os.ReadFile("/proc/loadavg")
 	if err != nil {
 		return nil
@@ -428,6 +453,14 @@ func readLoadAvg() []float64 {
 		return nil
 	}
 	return values
+}
+
+func execCommandOutput(name string, args ...string) (string, error) {
+	output, err := exec.Command(name, args...).Output()
+	if err != nil {
+		return "", err
+	}
+	return string(output), nil
 }
 
 func configOrigin(cfg config.Config) *types.MachineOrigin {

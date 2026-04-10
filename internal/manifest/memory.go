@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -148,6 +149,10 @@ func QueryGPUUtilization() (totalMB int, usedMB int, err error) {
 }
 
 func querySystemMemoryUtilization() (totalMB int, usedMB int, err error) {
+	if runtime.GOOS == "darwin" {
+		return querySystemMemoryUtilizationDarwin()
+	}
+
 	file, openErr := os.Open("/proc/meminfo")
 	if openErr != nil {
 		return 0, 0, fmt.Errorf("open /proc/meminfo: %w", openErr)
@@ -187,6 +192,65 @@ func querySystemMemoryUtilization() (totalMB int, usedMB int, err error) {
 	}
 	availableMB := availableKiB / 1024
 	usedMB = totalMB - availableMB
+	if usedMB < 0 {
+		usedMB = 0
+	}
+	return totalMB, usedMB, nil
+}
+
+func querySystemMemoryUtilizationDarwin() (totalMB int, usedMB int, err error) {
+	memOut, memErr := exec.Command("sysctl", "-n", "hw.memsize").Output()
+	if memErr != nil {
+		return 0, 0, fmt.Errorf("query hw.memsize: %w", memErr)
+	}
+	memBytes, parseErr := strconv.ParseInt(strings.TrimSpace(string(memOut)), 10, 64)
+	if parseErr != nil || memBytes <= 0 {
+		return 0, 0, fmt.Errorf("parse hw.memsize: %w", parseErr)
+	}
+	totalMB = int(memBytes / (1024 * 1024))
+	if totalMB <= 0 {
+		return 0, 0, fmt.Errorf("hw.memsize unavailable")
+	}
+
+	pageOut, pageErr := exec.Command("sysctl", "-n", "hw.pagesize").Output()
+	if pageErr != nil {
+		return totalMB, 0, nil
+	}
+	pageSizeBytes, parsePageErr := strconv.ParseInt(strings.TrimSpace(string(pageOut)), 10, 64)
+	if parsePageErr != nil || pageSizeBytes <= 0 {
+		return totalMB, 0, nil
+	}
+
+	vmOut, vmErr := exec.Command("vm_stat").Output()
+	if vmErr != nil {
+		return totalMB, 0, nil
+	}
+
+	freePages := int64(0)
+	scanner := bufio.NewScanner(strings.NewReader(string(vmOut)))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		lower := strings.ToLower(line)
+		if !strings.HasPrefix(lower, "pages free") && !strings.HasPrefix(lower, "pages speculative") {
+			continue
+		}
+		parts := strings.Fields(line)
+		if len(parts) == 0 {
+			continue
+		}
+		value := strings.TrimSuffix(parts[len(parts)-1], ".")
+		parsed, parseErr := strconv.ParseInt(value, 10, 64)
+		if parseErr != nil || parsed < 0 {
+			continue
+		}
+		freePages += parsed
+	}
+
+	freeMB := int((freePages * pageSizeBytes) / (1024 * 1024))
+	usedMB = totalMB - freeMB
 	if usedMB < 0 {
 		usedMB = 0
 	}

@@ -1412,10 +1412,18 @@ func scheduleSelfShutdown(delaySeconds int, haltMachine bool) error {
 		delaySeconds = 1
 	}
 	command := fmt.Sprintf("sleep %d; ", delaySeconds)
-	if haltMachine {
-		command += "(sudo -n systemctl poweroff || sudo -n shutdown -h now || sudo -n halt || sudo -n poweroff || systemctl poweroff || shutdown -h now || halt || poweroff)"
+	if stdruntime.GOOS == "darwin" {
+		if haltMachine {
+			command += "(sudo -n shutdown -h now || shutdown -h now || sudo -n halt || halt)"
+		} else {
+			command += "(pkill -f \"mantler start\" || true)"
+		}
 	} else {
-		command += "(sudo -n systemctl stop mantlerd || systemctl stop mantlerd || pkill -f \"mantler start\" || true)"
+		if haltMachine {
+			command += "(sudo -n systemctl poweroff || sudo -n shutdown -h now || sudo -n halt || sudo -n poweroff || systemctl poweroff || shutdown -h now || halt || poweroff)"
+		} else {
+			command += "(sudo -n systemctl stop mantlerd || systemctl stop mantlerd || pkill -f \"mantler start\" || true)"
+		}
 	}
 	cmd := exec.Command("sh", "-c", command)
 	if err := cmd.Start(); err != nil {

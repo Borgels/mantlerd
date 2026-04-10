@@ -2,6 +2,7 @@ package discovery
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
@@ -37,6 +38,11 @@ type GPUInfo struct {
 
 // DetectUnifiedMemory checks for unified CPU/GPU memory architecture (e.g., DGX Spark / Grace-Blackwell).
 func DetectUnifiedMemory() *bool {
+	if runtime.GOOS == "darwin" {
+		unified := runtime.GOARCH == "arm64"
+		return &unified
+	}
+
 	// Method 1: nvidia-smi memory query returns "[N/A]" on unified memory systems
 	out, err := exec.Command("nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader").Output()
 	if err == nil && strings.Contains(string(out), "[N/A]") {
@@ -151,6 +157,22 @@ func collectAddresses() []string {
 }
 
 func readRAMMiB() int {
+	if runtime.GOOS == "darwin" {
+		out, err := exec.Command("sysctl", "-n", "hw.memsize").Output()
+		if err != nil {
+			return 0
+		}
+		raw := strings.TrimSpace(string(out))
+		if raw == "" {
+			return 0
+		}
+		bytes, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || bytes <= 0 {
+			return 0
+		}
+		return int(bytes / (1024 * 1024))
+	}
+
 	file, err := os.Open("/proc/meminfo")
 	if err != nil {
 		return 0
@@ -208,6 +230,10 @@ func architectureFromComputeCapability(name string, computeCapability string) st
 }
 
 func readGPUInfo() (string, []GPUInfo) {
+	if runtime.GOOS == "darwin" {
+		return readAppleGPUInfo()
+	}
+
 	cmd := exec.Command(
 		"nvidia-smi",
 		"--query-gpu=name,memory.total,memory.used,compute_cap",
@@ -284,4 +310,92 @@ func readGPUInfo() (string, []GPUInfo) {
 		return "NVIDIA GPU (details unavailable)", nil
 	}
 	return "No GPU detected", nil
+}
+
+func readAppleGPUInfo() (string, []GPUInfo) {
+	cmd := exec.Command("system_profiler", "SPDisplaysDataType", "-json")
+	out, err := cmd.Output()
+	if err != nil {
+		return "Apple GPU (details unavailable)", nil
+	}
+
+	var payload map[string][]map[string]interface{}
+	if err := json.Unmarshal(out, &payload); err != nil {
+		return "Apple GPU (details unavailable)", nil
+	}
+
+	devices := payload["SPDisplaysDataType"]
+	if len(devices) == 0 {
+		return "Apple GPU (details unavailable)", nil
+	}
+
+	gpus := make([]GPUInfo, 0, len(devices))
+	labels := make([]string, 0, len(devices))
+	for _, device := range devices {
+		name := firstNonEmptyString(device["sppci_model"], device["_name"], device["spdisplays_device-id"])
+		if strings.TrimSpace(name) == "" {
+			continue
+		}
+		totalMB := parseAppleVRAMMB(device)
+		unifiedMemory := DetectUnifiedMemory()
+		gpus = append(gpus, GPUInfo{
+			Name:              strings.TrimSpace(name),
+			MemoryTotalMB:     totalMB,
+			MemoryUsedMB:      0,
+			MemoryFreeMB:      0,
+			Architecture:      "Apple Silicon",
+			ComputeCapability: "",
+			UnifiedMemory:     unifiedMemory,
+		})
+
+		label := strings.TrimSpace(name)
+		if totalMB > 0 {
+			label = fmt.Sprintf("%s, %d MiB", label, totalMB)
+		}
+		labels = append(labels, label)
+	}
+
+	if len(gpus) == 0 {
+		return "Apple GPU (details unavailable)", nil
+	}
+	return strings.Join(labels, " | "), gpus
+}
+
+func firstNonEmptyString(values ...interface{}) string {
+	for _, value := range values {
+		if text, ok := value.(string); ok && strings.TrimSpace(text) != "" {
+			return strings.TrimSpace(text)
+		}
+	}
+	return ""
+}
+
+func parseAppleVRAMMB(device map[string]interface{}) int {
+	raw := firstNonEmptyString(device["spdisplays_vram_shared"], device["spdisplays_vram"])
+	if raw == "" {
+		return 0
+	}
+	cleaned := strings.ToLower(strings.TrimSpace(raw))
+	cleaned = strings.ReplaceAll(cleaned, "unified", "")
+	cleaned = strings.ReplaceAll(cleaned, ",", "")
+	fields := strings.Fields(cleaned)
+	if len(fields) == 0 {
+		return 0
+	}
+	value, err := strconv.ParseFloat(fields[0], 64)
+	if err != nil || value <= 0 {
+		return 0
+	}
+	unit := "mb"
+	if len(fields) > 1 {
+		unit = fields[1]
+	}
+	switch unit {
+	case "gb", "gib":
+		return int(value * 1024)
+	case "mb", "mib":
+		return int(value)
+	default:
+		return int(value)
+	}
 }

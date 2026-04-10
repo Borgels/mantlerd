@@ -10,6 +10,7 @@ const (
 	FamilyLlamaCPP Family = "llama.cpp"
 	FamilyTensorRT Family = "tensorrt"
 	FamilyQuantCPP Family = "quant.cpp"
+	FamilyMLX      Family = "mlx"
 )
 
 type RuntimeSpec struct {
@@ -61,6 +62,14 @@ var runtimeCatalog = []RuntimeSpec{
 		Description:     "Minimal quant.cpp runtime with KV cache compression",
 		BackendVariants: []string{"cpu"},
 		CreateDriver:    newQuantCppDriver,
+	},
+	{
+		Name:            "mlxserver",
+		DisplayName:     "MLX Server",
+		Family:          FamilyMLX,
+		Description:     "Apple Silicon runtime via MLX server",
+		BackendVariants: []string{"metal"},
+		CreateDriver:    newMLXDriver,
 	},
 }
 

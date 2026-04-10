@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -43,13 +44,20 @@ type ollamaTagsResponse struct {
 func (d *ollamaDriver) Name() string { return "ollama" }
 
 func (d *ollamaDriver) Install() error {
+	if runtime.GOOS != "linux" {
+		return fmt.Errorf("automatic ollama install is only supported on linux; install ollama manually on %s", runtime.GOOS)
+	}
 	return runCommand("sh", "-c", "curl -fsSL https://ollama.com/install.sh | sh")
 }
 
 func (d *ollamaDriver) Uninstall() error {
-	_ = runCommand("systemctl", "stop", "ollama")
-	_ = runCommand("systemctl", "disable", "ollama")
+	if runtime.GOOS != "linux" {
+		return fmt.Errorf("automatic ollama uninstall is only supported on linux; uninstall ollama manually on %s", runtime.GOOS)
+	}
+	manager := NewServiceManager()
+	_ = manager.Stop("ollama")
 	_ = os.Remove("/etc/systemd/system/ollama.service")
+	_ = runCommand("systemctl", "disable", "ollama")
 	_ = runCommand("systemctl", "daemon-reload")
 	for _, bin := range []string{"/usr/local/bin/ollama", "/usr/bin/ollama"} {
 		_ = os.Remove(bin)
@@ -582,14 +590,28 @@ func (d *ollamaDriver) RemoveModel(modelID string) error {
 }
 
 func (d *ollamaDriver) RestartRuntime() error {
-	if err := runCommand("systemctl", "restart", "ollama"); err == nil {
+	if runtime.GOOS == "darwin" {
+		// Ollama on macOS is managed as an app/launchd service.
+		if d.IsReady() {
+			return nil
+		}
+		return fmt.Errorf("ollama is not reachable; start the Ollama app and retry")
+	}
+	if err := NewServiceManager().Restart("ollama"); err == nil {
 		return nil
 	}
-	return runCommand("systemctl", "restart", "mantler-runtime")
+	return NewServiceManager().Restart("mantler-runtime")
 }
 
 func (d *ollamaDriver) modelFlagsPath() string {
-	// Service-safe path: avoid relying on $HOME when systemd hardening
+	if runtime.GOOS == "darwin" {
+		home, err := os.UserHomeDir()
+		if err != nil || strings.TrimSpace(home) == "" {
+			return filepath.Join(".", ".mantler", "model-flags.json")
+		}
+		return filepath.Join(home, ".mantler", "model-flags.json")
+	}
+	// Service-safe linux path: avoid relying on $HOME when systemd hardening
 	// restricts /root access (e.g. ProtectHome=true).
 	return filepath.Join("/etc", "mantler", "model-flags.json")
 }
