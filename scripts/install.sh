@@ -305,7 +305,7 @@ curl --fail --show-error --location --retry 5 --retry-delay 1 --retry-connrefuse
 SHA_EXPECTED="$(awk '{print $1}' "$SHA_TMP" | head -n 1)"
 [ -n "$SHA_EXPECTED" ] || fatal "Checksum file is empty or invalid"
 
-SHA_ACTUAL="$($SHA256_CMD "$BIN_TMP" | awk '{print $NF}')"
+SHA_ACTUAL="$($SHA256_CMD "$BIN_TMP" | awk '{print $1}')"
 [ "$SHA_EXPECTED" = "$SHA_ACTUAL" ] || fatal "Checksum mismatch for downloaded binary"
 
 log "Installing binary to ${INSTALL_DIR}/${BINARY_NAME}"
