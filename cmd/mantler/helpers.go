@@ -272,13 +272,26 @@ func toInstalledHarnesses(desired types.DesiredConfig) []types.InstalledHarness 
 				continue
 			}
 
-			item.Status = "ready"
 			item.ExecutablePath = path
 			item.Version = probeHarnessVersion(path)
-			if item.Version != "" {
-				item.Detail = "Detected " + item.Version
+			authConfigured := codexAuthConfigured(len(harness.CredentialRefs) > 0)
+			if authConfigured {
+				item.Status = "ready"
+				if item.Version != "" {
+					item.Detail = "Detected " + item.Version
+				} else {
+					item.Detail = "Detected executable at " + path
+				}
 			} else {
-				item.Detail = "Detected executable at " + path
+				item.Status = "offline"
+				if item.Version != "" {
+					item.Detail = fmt.Sprintf(
+						"Detected %s, but authentication is not configured (set an API credential or run ChatGPT login).",
+						item.Version,
+					)
+				} else {
+					item.Detail = "Codex CLI is installed, but authentication is not configured (set an API credential or run ChatGPT login)."
+				}
 			}
 			result = append(result, item)
 		case "goose":
@@ -450,6 +463,22 @@ func probeHarnessVersion(commandPath string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(output))
+}
+
+func codexAuthConfigured(hasCredentialRefs bool) bool {
+	if hasCredentialRefs {
+		return true
+	}
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return false
+	}
+	authPath := filepath.Join(homeDir, ".codex", "auth.json")
+	content, err := os.ReadFile(authPath)
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(content)) != ""
 }
 
 func toInstalledOrchestrators(desired types.DesiredConfig) []types.InstalledOrchestrator {

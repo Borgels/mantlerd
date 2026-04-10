@@ -50,9 +50,15 @@ func runCheckin(cmd *cobra.Command, args []string) {
 	executor := commands.NewExecutor(runtimeManager, trainerManager, cfg, func(payload types.AckRequest) {
 		sendInProgressAck(cl, payload)
 	}, outcomes.Add)
+	dispatcher := newCommandDispatcher(context.Background(), executor, cl, defaultLightCommandConcurrency)
 
 	// Run check-in
-	runCheckIn(context.Background(), cfg, cl, runtimeManager, trainerManager, executor, outcomes, time.Now())
+	runCheckIn(context.Background(), cfg, cl, runtimeManager, trainerManager, executor, outcomes, dispatcher, time.Now())
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer waitCancel()
+	if !dispatcher.WaitForIdle(waitCtx) {
+		log.Fatalf("timed out waiting for command completion")
+	}
 
 	fmt.Println("Check-in completed successfully")
 }

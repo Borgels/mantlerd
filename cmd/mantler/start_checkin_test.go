@@ -74,6 +74,7 @@ func TestRunCheckInFollowUpDoesNotResendOutcomeEvents(t *testing.T) {
 	runtimeManager := runtime.NewManager()
 	trainerManager := trainer.NewManager()
 	executor := commands.NewExecutor(runtimeManager, trainerManager, cfg, nil, nil)
+	dispatcher := newCommandDispatcher(context.Background(), executor, cl, defaultLightCommandConcurrency)
 	outcomes := &outcomeBuffer{}
 	outcomes.Add(types.OutcomeEvent{
 		EventType: "task_success",
@@ -81,7 +82,12 @@ func TestRunCheckInFollowUpDoesNotResendOutcomeEvents(t *testing.T) {
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 	})
 
-	runCheckIn(context.Background(), cfg, cl, runtimeManager, trainerManager, executor, outcomes, time.Now())
+	runCheckIn(context.Background(), cfg, cl, runtimeManager, trainerManager, executor, outcomes, dispatcher, time.Now())
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer waitCancel()
+	if !dispatcher.WaitForIdle(waitCtx) {
+		t.Fatal("timed out waiting for command completion")
+	}
 
 	mu.Lock()
 	defer mu.Unlock()

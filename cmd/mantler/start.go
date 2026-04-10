@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -20,6 +21,11 @@ import (
 	"github.com/Borgels/mantlerd/internal/trainer"
 	"github.com/Borgels/mantlerd/internal/types"
 	"github.com/spf13/cobra"
+)
+
+const (
+	defaultLightCommandConcurrency = 8
+	heavyCommandQueueSize          = 64
 )
 
 var startCmd = &cobra.Command{
@@ -57,10 +63,11 @@ func runStart(cmd *cobra.Command, args []string) {
 	// Set up signal handling
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+	dispatcher := newCommandDispatcher(ctx, executor, cl, defaultLightCommandConcurrency)
 
 	// Run initial check-in
 	startedAt := time.Now()
-	activeOperations := runCheckIn(ctx, cfg, cl, runtimeManager, trainerManager, executor, outcomes, startedAt)
+	activeOperations := runCheckIn(ctx, cfg, cl, runtimeManager, trainerManager, executor, outcomes, dispatcher, startedAt)
 	timer := time.NewTimer(nextCheckinInterval(cfg.Interval, activeOperations))
 	defer timer.Stop()
 
@@ -70,7 +77,7 @@ func runStart(cmd *cobra.Command, args []string) {
 			log.Println("Shutting down agent...")
 			return
 		case <-timer.C:
-			activeOperations = runCheckIn(ctx, cfg, cl, runtimeManager, trainerManager, executor, outcomes, startedAt)
+			activeOperations = runCheckIn(ctx, cfg, cl, runtimeManager, trainerManager, executor, outcomes, dispatcher, startedAt)
 			timer.Reset(nextCheckinInterval(cfg.Interval, activeOperations))
 		}
 	}
@@ -143,6 +150,118 @@ type outcomeBuffer struct {
 	events []types.OutcomeEvent
 }
 
+type commandDispatcher struct {
+	ctx            context.Context
+	executor       *commands.Executor
+	client         *client.Client
+	heavyQueue     chan types.AgentCommand
+	lightSemaphore chan struct{}
+	activeCount    atomic.Int64
+}
+
+func newCommandDispatcher(
+	ctx context.Context,
+	executor *commands.Executor,
+	cl *client.Client,
+	lightConcurrency int,
+) *commandDispatcher {
+	if lightConcurrency < 1 {
+		lightConcurrency = 1
+	}
+	dispatcher := &commandDispatcher{
+		ctx:            ctx,
+		executor:       executor,
+		client:         cl,
+		heavyQueue:     make(chan types.AgentCommand, heavyCommandQueueSize),
+		lightSemaphore: make(chan struct{}, lightConcurrency),
+	}
+	go dispatcher.runHeavyWorker()
+	return dispatcher
+}
+
+func (d *commandDispatcher) runHeavyWorker() {
+	for {
+		select {
+		case <-d.ctx.Done():
+			return
+		case command := <-d.heavyQueue:
+			d.execute(command)
+		}
+	}
+}
+
+func (d *commandDispatcher) EnqueueBatch(commandsBatch []types.AgentCommand) {
+	for _, command := range commandsBatch {
+		d.enqueue(command)
+	}
+}
+
+func (d *commandDispatcher) enqueue(command types.AgentCommand) {
+	d.activeCount.Add(1)
+	if commands.CommandLane(command.Type) == commands.CommandLaneHeavy {
+		select {
+		case d.heavyQueue <- command:
+			return
+		case <-d.ctx.Done():
+			d.activeCount.Add(-1)
+			return
+		}
+	}
+	go d.runLight(command)
+}
+
+func (d *commandDispatcher) runLight(command types.AgentCommand) {
+	select {
+	case d.lightSemaphore <- struct{}{}:
+	case <-d.ctx.Done():
+		d.activeCount.Add(-1)
+		return
+	}
+	defer func() { <-d.lightSemaphore }()
+	d.execute(command)
+}
+
+func (d *commandDispatcher) execute(command types.AgentCommand) {
+	defer d.activeCount.Add(-1)
+	result, err := d.executor.ExecuteWithContext(d.ctx, command)
+	status := "success"
+	if err != nil {
+		status = "failed"
+		if strings.TrimSpace(result.Details) == "" {
+			result.Details = err.Error()
+		}
+		log.Printf("command %s (%s) failed: %v", command.ID, command.Type, err)
+	} else {
+		log.Printf("command %s (%s) completed", command.ID, command.Type)
+	}
+	ackErr := ackCommandWithRetry(d.client, types.AckRequest{
+		CommandID:     command.ID,
+		Status:        status,
+		Details:       result.Details,
+		ResultPayload: result.ResultPayload,
+	})
+	if ackErr != nil {
+		log.Printf("ack failed for %s: %v", command.ID, ackErr)
+	}
+}
+
+func (d *commandDispatcher) HasActiveWork() bool {
+	return d.activeCount.Load() > 0
+}
+
+func (d *commandDispatcher) WaitForIdle(ctx context.Context) bool {
+	for {
+		if !d.HasActiveWork() {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+}
+
 func (b *outcomeBuffer) Add(event types.OutcomeEvent) {
 	if strings.TrimSpace(event.EventType) == "" {
 		return
@@ -187,6 +306,7 @@ func runCheckIn(
 	trainerManager *trainer.Manager,
 	executor *commands.Executor,
 	outcomes *outcomeBuffer,
+	dispatcher *commandDispatcher,
 	startedAt time.Time,
 ) bool {
 	cachedDesired := loadCachedDesiredConfig()
@@ -280,30 +400,11 @@ func runCheckIn(
 		log.Printf("Recommended stack available. Run 'mantler recommend' for details or 'mantler setup --recommended' to install.")
 	}
 
-	// Execute commands
-	for _, command := range resp.Commands {
-		result, err := executor.ExecuteWithContext(ctx, command)
-		status := "success"
-		if err != nil {
-			status = "failed"
-			if strings.TrimSpace(result.Details) == "" {
-				result.Details = err.Error()
-			}
-			log.Printf("command %s (%s) failed: %v", command.ID, command.Type, err)
-		} else {
-			log.Printf("command %s (%s) completed", command.ID, command.Type)
-		}
-		ackErr := ackCommandWithRetry(cl, types.AckRequest{
-			CommandID:     command.ID,
-			Status:        status,
-			Details:       result.Details,
-			ResultPayload: result.ResultPayload,
-		})
-		if ackErr != nil {
-			log.Printf("ack failed for %s: %v", command.ID, ackErr)
-		}
+	// Execute commands asynchronously across heavy/light lanes.
+	if dispatcher != nil && len(resp.Commands) > 0 {
+		dispatcher.EnqueueBatch(resp.Commands)
 	}
-	return hasActiveWork || len(resp.Commands) > 0
+	return hasActiveWork || (dispatcher != nil && dispatcher.HasActiveWork())
 }
 
 func readLoadAvg() []float64 {

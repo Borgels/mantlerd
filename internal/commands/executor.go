@@ -50,6 +50,29 @@ type ExecutionResult struct {
 	ResultPayload interface{}
 }
 
+const (
+	CommandLaneHeavy = "heavy"
+	CommandLaneLight = "light"
+)
+
+// CommandLane classifies a command type into execution lanes.
+// Unknown command types default to heavy for safety.
+func CommandLane(commandType string) string {
+	switch commandType {
+	case "cancel_command",
+		"health_check",
+		"training_status",
+		"model_eval",
+		"sync_harnesses",
+		"harness_login",
+		"run_harness_exec",
+		"run_orchestrator_exec":
+		return CommandLaneLight
+	default:
+		return CommandLaneHeavy
+	}
+}
+
 const gooseInstallScriptURL = "https://github.com/block/goose/raw/main/download_cli.sh"
 
 func NewExecutor(
@@ -469,7 +492,7 @@ func (e *Executor) ExecuteWithContext(ctx context.Context, command types.AgentCo
 			return ExecutionResult{}, fmt.Errorf("training job not found: %s", targetCommandID)
 		}
 		return ExecutionResult{
-			Details: "training status",
+			Details:       "training status",
 			ResultPayload: progress,
 		}, nil
 	case "export_checkpoint":
@@ -547,6 +570,8 @@ func (e *Executor) ExecuteWithContext(ctx context.Context, command types.AgentCo
 		}, nil
 	case "run_harness_exec":
 		return e.runHarnessExec(command)
+	case "harness_login":
+		return e.runHarnessLogin(command)
 	case "run_orchestrator_exec":
 		return e.runOrchestratorExec(command)
 	case "sync_harnesses":
@@ -1460,13 +1485,26 @@ func probeInstalledHarnesses(desired []types.DesiredHarness) []types.InstalledHa
 			}
 			item.Transport.Command = path
 
-			item.Status = "ready"
 			item.ExecutablePath = path
 			item.Version = probeHarnessVersion(path)
-			if item.Version != "" {
-				item.Detail = "Detected " + item.Version
+			authConfigured := codexAuthConfigured(len(harness.CredentialRefs) > 0)
+			if authConfigured {
+				item.Status = "ready"
+				if item.Version != "" {
+					item.Detail = "Detected " + item.Version
+				} else {
+					item.Detail = "Detected executable at " + path
+				}
 			} else {
-				item.Detail = "Detected executable at " + path
+				item.Status = "offline"
+				if item.Version != "" {
+					item.Detail = fmt.Sprintf(
+						"Detected %s, but authentication is not configured (set an API credential or run ChatGPT login).",
+						item.Version,
+					)
+				} else {
+					item.Detail = "Codex CLI is installed, but authentication is not configured (set an API credential or run ChatGPT login)."
+				}
 			}
 			result = append(result, item)
 		case "goose":
@@ -1728,4 +1766,20 @@ func probeHarnessVersion(commandName string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(output))
+}
+
+func codexAuthConfigured(hasCredentialRefs bool) bool {
+	if hasCredentialRefs {
+		return true
+	}
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return false
+	}
+	authPath := filepath.Join(homeDir, ".codex", "auth.json")
+	content, err := os.ReadFile(authPath)
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(content)) != ""
 }
