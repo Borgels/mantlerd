@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -201,7 +202,7 @@ func runDoctor(cmd *cobra.Command, args []string) {
 		fmt.Println("✗")
 		fmt.Println("  No runtimes installed")
 		fmt.Println("  Install a runtime: mantler runtime install <runtime>")
-		fmt.Println("  Supported: ollama, llamacpp, vllm, tensorrt")
+		fmt.Println("  Supported: ollama, llamacpp, vllm, tensorrt, quantcpp, mlxserver")
 		allPassed = false
 	} else {
 		fmt.Println("✓")
@@ -216,10 +217,9 @@ func runDoctor(cmd *cobra.Command, args []string) {
 
 	// Check 6: System permissions
 	fmt.Print("✓ Checking permissions... ")
-	configDir := "/etc/mantler"
-	if os.Geteuid() != 0 {
-		home, _ := os.UserHomeDir()
-		configDir = home + "/.mantler"
+	configDir := filepath.Dir(configPath)
+	if strings.TrimSpace(configDir) == "" || configDir == "." {
+		configDir = filepath.Dir(config.DefaultConfigPath())
 	}
 
 	// Check if config directory is writable

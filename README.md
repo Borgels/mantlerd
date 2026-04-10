@@ -35,6 +35,31 @@ curl -sSL https://raw.githubusercontent.com/Borgels/mantlerd/master/scripts/inst
   --insecure
 ```
 
+## Installation (macOS)
+
+Use the same release installer script (no `sudo` required for service setup):
+
+```bash
+curl -sSL https://raw.githubusercontent.com/Borgels/mantlerd/master/scripts/install.sh | \
+  sh -s -- \
+  --token YOUR_MACHINE_TOKEN \
+  --machine MACHINE_ID \
+  --server http://control.local:3400
+```
+
+On macOS, the installer:
+
+- Installs `/usr/local/bin/mantlerd` (and `/usr/local/bin/mantler` symlink)
+- Writes config to `~/.mantler/agent.json`
+- Installs a user launchd agent at `~/Library/LaunchAgents/com.mantler.mantlerd.plist`
+- Starts the daemon via launchd
+
+Check status with:
+
+```bash
+launchctl print "gui/$(id -u)/com.mantler.mantlerd"
+```
+
 ### What the installer sets up
 
 - Installs `/usr/local/bin/mantlerd`

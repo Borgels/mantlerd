@@ -3,6 +3,7 @@ package runtime
 import (
 	"fmt"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 )
@@ -33,11 +34,11 @@ func serviceLikelyOutOfMemory(serviceName string, cause error) bool {
 	if serviceName == "" {
 		return false
 	}
-	out, err := exec.Command("journalctl", "-u", serviceName, "-n", "120", "--no-pager").CombinedOutput()
-	if err != nil && len(out) == 0 {
+	out, err := NewServiceManager().Logs(serviceName, 120)
+	if err != nil && strings.TrimSpace(out) == "" {
 		return false
 	}
-	return containsOOMSignal(string(out))
+	return containsOOMSignal(out)
 }
 
 func containsOOMSignal(value string) bool {
@@ -67,21 +68,36 @@ func containsOOMSignal(value string) bool {
 }
 
 func isSystemdServiceActive(serviceName string) (bool, error) {
-	cmd := exec.Command("systemctl", "is-active", serviceName)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		state := strings.TrimSpace(string(output))
-		if state == "inactive" || state == "failed" || state == "deactivating" {
-			return false, nil
-		}
-		return false, fmt.Errorf("systemctl is-active %s failed: %w (%s)", serviceName, err, state)
-	}
-	return strings.TrimSpace(string(output)) == "active", nil
+	return NewServiceManager().IsActive(serviceName)
 }
 
 func isServiceListeningOnNonLoopback(port int) (bool, error) {
 	if port <= 0 {
 		return false, fmt.Errorf("invalid port: %d", port)
+	}
+	if runtime.GOOS == "darwin" {
+		cmd := exec.Command("lsof", "-nP", "-iTCP:"+strconv.Itoa(port), "-sTCP:LISTEN")
+		output, err := cmd.CombinedOutput()
+		if err != nil && len(strings.TrimSpace(string(output))) == 0 {
+			return false, nil
+		}
+		lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if line == "" || strings.HasPrefix(strings.ToUpper(line), "COMMAND ") {
+				continue
+			}
+			if strings.Contains(line, "127.0.0.1:"+strconv.Itoa(port)) ||
+				strings.Contains(line, "localhost:"+strconv.Itoa(port)) ||
+				strings.Contains(line, "[::1]:"+strconv.Itoa(port)) {
+				continue
+			}
+			if strings.Contains(line, ":"+strconv.Itoa(port)+" ") ||
+				strings.HasSuffix(line, ":"+strconv.Itoa(port)) {
+				return true, nil
+			}
+		}
+		return false, nil
 	}
 	cmd := exec.Command("sh", "-c", "ss -ltnH '( sport = :"+strconv.Itoa(port)+" )' || true")
 	output, err := cmd.CombinedOutput()

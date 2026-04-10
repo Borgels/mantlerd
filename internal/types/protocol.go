@@ -16,6 +16,7 @@ const (
 	RuntimeOllama   RuntimeType = "ollama"
 	RuntimeLlamaCpp RuntimeType = "llamacpp"
 	RuntimeTensorRT RuntimeType = "tensorrt"
+	RuntimeMLX      RuntimeType = "mlxserver"
 )
 
 type TrainerType string

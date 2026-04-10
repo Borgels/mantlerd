@@ -33,6 +33,10 @@ VLLM_EXTRA_ARGS="${MANTLER_VLLM_EXTRA_ARGS:-${CLAWCONTROL_VLLM_EXTRA_ARGS:-}}"
 VLLM_HF_TOKEN="${MANTLER_HF_TOKEN:-${CLAWCONTROL_HF_TOKEN:-${HF_TOKEN:-}}}"
 VLLM_HF_HUB_TOKEN="${MANTLER_HUGGING_FACE_HUB_TOKEN:-${CLAWCONTROL_HUGGING_FACE_HUB_TOKEN:-${HUGGING_FACE_HUB_TOKEN:-}}}"
 SELF_UPDATE_MODE="${MANTLERD_SELF_UPDATE:-${CLAWCONTROL_AGENT_SELF_UPDATE:-false}}"
+LAUNCHD_LABEL="com.mantler.mantlerd"
+LAUNCHD_PLIST=""
+LAUNCHD_STDOUT_PATH=""
+LAUNCHD_STDERR_PATH=""
 
 TOKEN=""
 MACHINE_ID=""
@@ -88,6 +92,10 @@ require_cmd() {
   command -v "$1" >/dev/null 2>&1 || fatal "Required command not found: $1"
 }
 
+escape_json() {
+  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
 wait_for_service() {
   service="$1"
   retries="${2:-12}"
@@ -95,6 +103,20 @@ wait_for_service() {
   while [ "$i" -lt "$retries" ]; do
     state="$($SUDO systemctl is-active "$service" 2>/dev/null || true)"
     if [ "$state" = "active" ]; then
+      return 0
+    fi
+    sleep 1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+wait_for_launchd_service() {
+  label="$1"
+  retries="${2:-12}"
+  i=0
+  while [ "$i" -lt "$retries" ]; do
+    if launchctl print "gui/$(id -u)/${label}" >/dev/null 2>&1; then
       return 0
     fi
     sleep 1
@@ -231,7 +253,13 @@ else
 fi
 
 OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
-[ "$OS" = "linux" ] || fatal "This installer currently supports Linux only"
+case "$OS" in
+  linux|darwin)
+    ;;
+  *)
+    fatal "Unsupported OS: $OS (supported: linux, darwin)"
+    ;;
+esac
 
 ARCH="$(uname -m)"
 case "$ARCH" in
@@ -241,6 +269,16 @@ case "$ARCH" in
     fatal "Unsupported architecture: $ARCH"
     ;;
 esac
+
+if [ "$OS" = "darwin" ]; then
+  CONFIG_DIR="${HOME}/.mantler"
+  CONFIG_PATH="${CONFIG_DIR}/agent.json"
+  VLLM_CONFIG_PATH="${CONFIG_DIR}/vllm.json"
+  VLLM_ENV_PATH="${CONFIG_DIR}/vllm.env"
+  LAUNCHD_PLIST="${HOME}/Library/LaunchAgents/${LAUNCHD_LABEL}.plist"
+  LAUNCHD_STDOUT_PATH="${CONFIG_DIR}/mantlerd.log"
+  LAUNCHD_STDERR_PATH="${CONFIG_DIR}/mantlerd.err.log"
+fi
 
 ASSET_NAME="${BINARY_NAME}-${OS}-${ARCH}"
 if [ "$VERSION" = "latest" ]; then
@@ -267,7 +305,7 @@ curl --fail --show-error --location --retry 5 --retry-delay 1 --retry-connrefuse
 SHA_EXPECTED="$(awk '{print $1}' "$SHA_TMP" | head -n 1)"
 [ -n "$SHA_EXPECTED" ] || fatal "Checksum file is empty or invalid"
 
-SHA_ACTUAL="$($SHA256_CMD "$BIN_TMP" | awk '{print $1}')"
+SHA_ACTUAL="$($SHA256_CMD "$BIN_TMP" | awk '{print $NF}')"
 [ "$SHA_EXPECTED" = "$SHA_ACTUAL" ] || fatal "Checksum mismatch for downloaded binary"
 
 log "Installing binary to ${INSTALL_DIR}/${BINARY_NAME}"
@@ -285,24 +323,44 @@ else
 fi
 
 log "Writing config to ${CONFIG_PATH}"
-$SUDO install -d -m 0755 "$CONFIG_DIR"
-$SUDO sh -c "cat > \"$CONFIG_PATH\" <<EOF
+SERVER_URL_ESCAPED="$(escape_json "$SERVER_URL")"
+TOKEN_ESCAPED="$(escape_json "$TOKEN")"
+MACHINE_ID_ESCAPED="$(escape_json "$MACHINE_ID")"
+LOG_LEVEL_ESCAPED="$(escape_json "$LOG_LEVEL")"
+if [ "$OS" = "darwin" ]; then
+  install -d -m 0755 "$CONFIG_DIR"
+  cat > "$CONFIG_PATH" <<EOF
 {
-  \"serverUrl\": \"${SERVER_URL}\",
-  \"token\": \"${TOKEN}\",
-  \"machineId\": \"${MACHINE_ID}\",
+  "serverUrl": "${SERVER_URL_ESCAPED}",
+  "token": "${TOKEN_ESCAPED}",
+  "machineId": "${MACHINE_ID_ESCAPED}",
+  "intervalMs": ${INTERVAL_MS},
+  "insecure": ${INSECURE},
+  "logLevel": "${LOG_LEVEL_ESCAPED}"
+}
+EOF
+  chmod 600 "$CONFIG_PATH"
+else
+  $SUDO install -d -m 0755 "$CONFIG_DIR"
+  $SUDO sh -c "cat > \"$CONFIG_PATH\" <<EOF
+{
+  \"serverUrl\": \"${SERVER_URL_ESCAPED}\",
+  \"token\": \"${TOKEN_ESCAPED}\",
+  \"machineId\": \"${MACHINE_ID_ESCAPED}\",
   \"intervalMs\": ${INTERVAL_MS},
   \"insecure\": ${INSECURE},
-  \"logLevel\": \"${LOG_LEVEL}\"
+  \"logLevel\": \"${LOG_LEVEL_ESCAPED}\"
 }
 EOF"
-$SUDO chmod 600 "$CONFIG_PATH"
-$SUDO install -d -m 0755 "${CONFIG_DIR}/.config"
-$SUDO install -d -m 0755 "${CONFIG_DIR}/.config/mantlerd"
+  $SUDO chmod 600 "$CONFIG_PATH"
+  $SUDO install -d -m 0755 "${CONFIG_DIR}/.config"
+  $SUDO install -d -m 0755 "${CONFIG_DIR}/.config/mantlerd"
+fi
 
-if command -v systemctl >/dev/null 2>&1; then
-  log "Installing systemd unit ${SYSTEMD_UNIT_PATH}"
-  $SUDO sh -c "cat > \"$SYSTEMD_UNIT_PATH\" <<EOF
+if [ "$OS" = "linux" ]; then
+  if command -v systemctl >/dev/null 2>&1; then
+    log "Installing systemd unit ${SYSTEMD_UNIT_PATH}"
+    $SUDO sh -c "cat > \"$SYSTEMD_UNIT_PATH\" <<EOF
 [Unit]
 Description=Mantler daemon
 After=network-online.target
@@ -326,56 +384,56 @@ LimitNOFILE=65536
 WantedBy=multi-user.target
 EOF"
 
-  $SUDO systemctl daemon-reload
-  $SUDO systemctl enable "$SERVICE_NAME" >/dev/null
-  if [ "$SELF_UPDATE_MODE" = "true" ]; then
-    log "Self-update mode detected. Triggering non-blocking service restart."
-    $SUDO systemctl --no-block restart "$SERVICE_NAME"
-    log "Self-update restart triggered; installer exiting without in-process health wait."
-    exit 0
-  fi
+    $SUDO systemctl daemon-reload
+    $SUDO systemctl enable "$SERVICE_NAME" >/dev/null
+    if [ "$SELF_UPDATE_MODE" = "true" ]; then
+      log "Self-update mode detected. Triggering non-blocking service restart."
+      $SUDO systemctl --no-block restart "$SERVICE_NAME"
+      log "Self-update restart triggered; installer exiting without in-process health wait."
+      exit 0
+    fi
 
-  $SUDO systemctl restart "$SERVICE_NAME"
+    $SUDO systemctl restart "$SERVICE_NAME"
 
-  if [ "$OLLAMA_CONFIGURE_REMOTE" = "true" ]; then
-    log "Configuring ollama systemd override (OLLAMA_HOST=${OLLAMA_HOST})"
-    $SUDO install -d -m 0755 "$OLLAMA_OVERRIDE_DIR"
-    $SUDO sh -c "cat > \"$OLLAMA_OVERRIDE_PATH\" <<EOF
+    if [ "$OLLAMA_CONFIGURE_REMOTE" = "true" ]; then
+      log "Configuring ollama systemd override (OLLAMA_HOST=${OLLAMA_HOST})"
+      $SUDO install -d -m 0755 "$OLLAMA_OVERRIDE_DIR"
+      $SUDO sh -c "cat > \"$OLLAMA_OVERRIDE_PATH\" <<EOF
 [Service]
 Environment=\"OLLAMA_HOST=${OLLAMA_HOST}\"
 EOF"
-    $SUDO chmod 0644 "$OLLAMA_OVERRIDE_PATH"
-    $SUDO systemctl daemon-reload
-    if $SUDO systemctl status ollama >/dev/null 2>&1; then
-      $SUDO systemctl restart ollama
-      log "Restarted ollama service with remote bind override."
+      $SUDO chmod 0644 "$OLLAMA_OVERRIDE_PATH"
+      $SUDO systemctl daemon-reload
+      if $SUDO systemctl status ollama >/dev/null 2>&1; then
+        $SUDO systemctl restart ollama
+        log "Restarted ollama service with remote bind override."
+      else
+        log "ollama service not detected yet. Override was written and will apply once installed."
+      fi
     else
-      log "ollama service not detected yet. Override was written and will apply once installed."
-    fi
-  else
-    log "Skipping ollama remote bind override (MANTLER_OLLAMA_CONFIGURE_REMOTE=${OLLAMA_CONFIGURE_REMOTE})."
-  fi
-
-  if [ "$VLLM_CONFIGURE" = "true" ]; then
-    log "Preparing vLLM service template and config"
-    if command -v nvidia-smi >/dev/null 2>&1; then
-      log "nvidia-smi detected; GPU runtime appears available for vLLM."
-    else
-      log "vLLM preflight warning: nvidia-smi not found. vLLM may fail without NVIDIA drivers/CUDA."
+      log "Skipping ollama remote bind override (MANTLER_OLLAMA_CONFIGURE_REMOTE=${OLLAMA_CONFIGURE_REMOTE})."
     fi
 
-    $SUDO install -d -m 0755 "$CONFIG_DIR"
-    if [ ! -f "$VLLM_CONFIG_PATH" ]; then
-      $SUDO sh -c "cat > \"$VLLM_CONFIG_PATH\" <<EOF
+    if [ "$VLLM_CONFIGURE" = "true" ]; then
+      log "Preparing vLLM service template and config"
+      if command -v nvidia-smi >/dev/null 2>&1; then
+        log "nvidia-smi detected; GPU runtime appears available for vLLM."
+      else
+        log "vLLM preflight warning: nvidia-smi not found. vLLM may fail without NVIDIA drivers/CUDA."
+      fi
+
+      $SUDO install -d -m 0755 "$CONFIG_DIR"
+      if [ ! -f "$VLLM_CONFIG_PATH" ]; then
+        $SUDO sh -c "cat > \"$VLLM_CONFIG_PATH\" <<EOF
 {
   \"model\": \"\",
   \"port\": ${VLLM_PORT}
 }
 EOF"
-      $SUDO chmod 600 "$VLLM_CONFIG_PATH"
-    fi
+        $SUDO chmod 600 "$VLLM_CONFIG_PATH"
+      fi
 
-    $SUDO sh -c "cat > \"$VLLM_ENV_PATH\" <<EOF
+      $SUDO sh -c "cat > \"$VLLM_ENV_PATH\" <<EOF
 VLLM_MODEL=
 VLLM_PORT=${VLLM_PORT}
 VLLM_GPU_MEMORY_UTILIZATION=${VLLM_GPU_MEMORY_UTILIZATION}
@@ -384,17 +442,17 @@ VLLM_TRUST_REMOTE_CODE=${VLLM_TRUST_REMOTE_CODE}
 VLLM_EXTRA_ARGS="${VLLM_EXTRA_ARGS}"
 VLLM_RUNTIME_MODE=${VLLM_RUNTIME_MODE}
 EOF"
-    if [ -n "$VLLM_HF_TOKEN" ]; then
-      VLLM_ESCAPED_HF_TOKEN="$(printf '%s' "$VLLM_HF_TOKEN" | sed 's/\\/\\\\/g; s/"/\\"/g')"
-      $SUDO sh -c "printf '%s\n' \"HF_TOKEN=\\\"${VLLM_ESCAPED_HF_TOKEN}\\\"\" >> \"$VLLM_ENV_PATH\""
-    fi
-    if [ -n "$VLLM_HF_HUB_TOKEN" ]; then
-      VLLM_ESCAPED_HF_HUB_TOKEN="$(printf '%s' "$VLLM_HF_HUB_TOKEN" | sed 's/\\/\\\\/g; s/"/\\"/g')"
-      $SUDO sh -c "printf '%s\n' \"HUGGING_FACE_HUB_TOKEN=\\\"${VLLM_ESCAPED_HF_HUB_TOKEN}\\\"\" >> \"$VLLM_ENV_PATH\""
-    fi
-    $SUDO chmod 600 "$VLLM_ENV_PATH"
+      if [ -n "$VLLM_HF_TOKEN" ]; then
+        VLLM_ESCAPED_HF_TOKEN="$(printf '%s' "$VLLM_HF_TOKEN" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+        $SUDO sh -c "printf '%s\n' \"HF_TOKEN=\\\"${VLLM_ESCAPED_HF_TOKEN}\\\"\" >> \"$VLLM_ENV_PATH\""
+      fi
+      if [ -n "$VLLM_HF_HUB_TOKEN" ]; then
+        VLLM_ESCAPED_HF_HUB_TOKEN="$(printf '%s' "$VLLM_HF_HUB_TOKEN" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+        $SUDO sh -c "printf '%s\n' \"HUGGING_FACE_HUB_TOKEN=\\\"${VLLM_ESCAPED_HF_HUB_TOKEN}\\\"\" >> \"$VLLM_ENV_PATH\""
+      fi
+      $SUDO chmod 600 "$VLLM_ENV_PATH"
 
-    $SUDO sh -c "cat > \"$VLLM_UNIT_PATH\" <<EOF
+      $SUDO sh -c "cat > \"$VLLM_UNIT_PATH\" <<EOF
 [Unit]
 Description=vLLM OpenAI API Server
 After=network-online.target
@@ -411,78 +469,130 @@ User=root
 [Install]
 WantedBy=multi-user.target
 EOF"
-    $SUDO chmod 0644 "$VLLM_UNIT_PATH"
-    $SUDO systemctl daemon-reload
-    $SUDO systemctl enable vllm >/dev/null || true
+      $SUDO chmod 0644 "$VLLM_UNIT_PATH"
+      $SUDO systemctl daemon-reload
+      $SUDO systemctl enable vllm >/dev/null || true
 
-    VLLM_EFFECTIVE_MODE="$VLLM_RUNTIME_MODE"
-    if [ "$VLLM_EFFECTIVE_MODE" = "auto" ]; then
-      if command -v docker >/dev/null 2>&1; then
-        VLLM_EFFECTIVE_MODE="container"
-      else
-        VLLM_EFFECTIVE_MODE="native"
-      fi
-    fi
-
-    if [ "$VLLM_PREINSTALL" = "true" ] && [ "$VLLM_EFFECTIVE_MODE" != "container" ]; then
-      log "Preinstalling vLLM in dedicated virtualenv (${VLLM_VENV_PATH})"
-      if ! command -v python3 >/dev/null 2>&1; then
-        log "vLLM preinstall warning: python3 not found. Runtime install command will retry later."
-      else
-        $SUDO install -d -m 0755 "$VLLM_VENV_PATH"
-        if ! $SUDO python3 -m venv "$VLLM_VENV_PATH"; then
-          log "vLLM preinstall warning: python3 venv creation failed. Trying to install python3-venv."
-          if command -v apt-get >/dev/null 2>&1; then
-            $SUDO sh -c "DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y python3-venv python3-pip" || true
-            $SUDO python3 -m venv "$VLLM_VENV_PATH" || true
-          fi
-        fi
-        if [ -x "$VLLM_PYTHON" ]; then
-          $SUDO "$VLLM_PYTHON" -m pip install --upgrade pip || true
-          if ! $SUDO "$VLLM_PYTHON" -m pip install --upgrade vllm; then
-            log "vLLM preinstall warning: pip install vllm failed. Agent self-heal/runtime install will retry."
-          else
-            if ! $SUDO "$VLLM_PYTHON" -c 'import ctypes; ctypes.CDLL("libcudart.so.12")' >/dev/null 2>&1; then
-              log "vLLM preinstall: libcudart.so.12 missing; trying nvidia-cuda-runtime-cu12 wheel."
-              $SUDO "$VLLM_PYTHON" -m pip install --upgrade nvidia-cuda-runtime-cu12 || true
-            fi
-            VLLM_LIB_PATHS="$($SUDO "$VLLM_PYTHON" -c 'import glob, os, site; paths=[]; [paths.append(p) for b in site.getsitepackages() for pat in ("nvidia/*/lib","torch/lib") for p in glob.glob(os.path.join(b, pat)) if os.path.isdir(p)]; seen=set(); ordered=[]; [ordered.append(p) for p in paths if not (p in seen or seen.add(p))]; print(":".join(ordered))' 2>/dev/null || true)"
-            if [ -n "$VLLM_LIB_PATHS" ]; then
-              $SUDO sh -c "awk 'BEGIN{written=0} /^VLLM_LD_LIBRARY_PATH=/{print \"VLLM_LD_LIBRARY_PATH=${VLLM_LIB_PATHS}\"; written=1; next} {print} END{if(!written) print \"VLLM_LD_LIBRARY_PATH=${VLLM_LIB_PATHS}\"}' \"$VLLM_ENV_PATH\" > \"$VLLM_ENV_PATH.tmp\" && mv \"$VLLM_ENV_PATH.tmp\" \"$VLLM_ENV_PATH\""
-              $SUDO chmod 600 "$VLLM_ENV_PATH"
-            fi
-            if [ "${VLLM_TRUST_REMOTE_CODE}" = "true" ]; then
-              $SUDO sh -c "awk 'BEGIN{written=0} /^VLLM_TRUST_REMOTE_CODE=/{print \"VLLM_TRUST_REMOTE_CODE=true\"; written=1; next} {print} END{if(!written) print \"VLLM_TRUST_REMOTE_CODE=true\"}' \"$VLLM_ENV_PATH\" > \"$VLLM_ENV_PATH.tmp\" && mv \"$VLLM_ENV_PATH.tmp\" \"$VLLM_ENV_PATH\""
-              $SUDO chmod 600 "$VLLM_ENV_PATH"
-            fi
-            log "vLLM preinstall complete."
-          fi
+      VLLM_EFFECTIVE_MODE="$VLLM_RUNTIME_MODE"
+      if [ "$VLLM_EFFECTIVE_MODE" = "auto" ]; then
+        if command -v docker >/dev/null 2>&1; then
+          VLLM_EFFECTIVE_MODE="container"
         else
-          log "vLLM preinstall warning: virtualenv python missing at ${VLLM_PYTHON}."
+          VLLM_EFFECTIVE_MODE="native"
         fi
       fi
+
+      if [ "$VLLM_PREINSTALL" = "true" ] && [ "$VLLM_EFFECTIVE_MODE" != "container" ]; then
+        log "Preinstalling vLLM in dedicated virtualenv (${VLLM_VENV_PATH})"
+        if ! command -v python3 >/dev/null 2>&1; then
+          log "vLLM preinstall warning: python3 not found. Runtime install command will retry later."
+        else
+          $SUDO install -d -m 0755 "$VLLM_VENV_PATH"
+          if ! $SUDO python3 -m venv "$VLLM_VENV_PATH"; then
+            log "vLLM preinstall warning: python3 venv creation failed. Trying to install python3-venv."
+            if command -v apt-get >/dev/null 2>&1; then
+              $SUDO sh -c "DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y python3-venv python3-pip" || true
+              $SUDO python3 -m venv "$VLLM_VENV_PATH" || true
+            fi
+          fi
+          if [ -x "$VLLM_PYTHON" ]; then
+            $SUDO "$VLLM_PYTHON" -m pip install --upgrade pip || true
+            if ! $SUDO "$VLLM_PYTHON" -m pip install --upgrade vllm; then
+              log "vLLM preinstall warning: pip install vllm failed. Agent self-heal/runtime install will retry."
+            else
+              if ! $SUDO "$VLLM_PYTHON" -c 'import ctypes; ctypes.CDLL("libcudart.so.12")' >/dev/null 2>&1; then
+                log "vLLM preinstall: libcudart.so.12 missing; trying nvidia-cuda-runtime-cu12 wheel."
+                $SUDO "$VLLM_PYTHON" -m pip install --upgrade nvidia-cuda-runtime-cu12 || true
+              fi
+              VLLM_LIB_PATHS="$($SUDO "$VLLM_PYTHON" -c 'import glob, os, site; paths=[]; [paths.append(p) for b in site.getsitepackages() for pat in ("nvidia/*/lib","torch/lib") for p in glob.glob(os.path.join(b, pat)) if os.path.isdir(p)]; seen=set(); ordered=[]; [ordered.append(p) for p in paths if not (p in seen or seen.add(p))]; print(":".join(ordered))' 2>/dev/null || true)"
+              if [ -n "$VLLM_LIB_PATHS" ]; then
+                $SUDO sh -c "awk 'BEGIN{written=0} /^VLLM_LD_LIBRARY_PATH=/{print \"VLLM_LD_LIBRARY_PATH=${VLLM_LIB_PATHS}\"; written=1; next} {print} END{if(!written) print \"VLLM_LD_LIBRARY_PATH=${VLLM_LIB_PATHS}\"}' \"$VLLM_ENV_PATH\" > \"$VLLM_ENV_PATH.tmp\" && mv \"$VLLM_ENV_PATH.tmp\" \"$VLLM_ENV_PATH\""
+                $SUDO chmod 600 "$VLLM_ENV_PATH"
+              fi
+              if [ "${VLLM_TRUST_REMOTE_CODE}" = "true" ]; then
+                $SUDO sh -c "awk 'BEGIN{written=0} /^VLLM_TRUST_REMOTE_CODE=/{print \"VLLM_TRUST_REMOTE_CODE=true\"; written=1; next} {print} END{if(!written) print \"VLLM_TRUST_REMOTE_CODE=true\"}' \"$VLLM_ENV_PATH\" > \"$VLLM_ENV_PATH.tmp\" && mv \"$VLLM_ENV_PATH.tmp\" \"$VLLM_ENV_PATH\""
+                $SUDO chmod 600 "$VLLM_ENV_PATH"
+              fi
+              log "vLLM preinstall complete."
+            fi
+          else
+            log "vLLM preinstall warning: virtualenv python missing at ${VLLM_PYTHON}."
+          fi
+        fi
+      else
+        log "Skipping vLLM package preinstall (MANTLER_VLLM_PREINSTALL=${VLLM_PREINSTALL}, mode=${VLLM_EFFECTIVE_MODE})."
+      fi
+
+      log "vLLM service template installed. It will be started when a model is configured."
     else
-      log "Skipping vLLM package preinstall (MANTLER_VLLM_PREINSTALL=${VLLM_PREINSTALL}, mode=${VLLM_EFFECTIVE_MODE})."
+      log "Skipping vLLM template install (MANTLER_VLLM_CONFIGURE=${VLLM_CONFIGURE})."
     fi
 
-    log "vLLM service template installed. It will be started when a model is configured."
-  else
-    log "Skipping vLLM template install (MANTLER_VLLM_CONFIGURE=${VLLM_CONFIGURE})."
-  fi
-
-  if wait_for_service "$SERVICE_NAME" 15; then
-    log "Service ${SERVICE_NAME} is active."
-    $SUDO systemctl --no-pager --full status "$SERVICE_NAME" | sed -n '1,8p'
-    log "Install complete. Service ${SERVICE_NAME} is enabled and restarted."
-  else
-    log "Service ${SERVICE_NAME} failed to become active. Showing diagnostics:"
-    $SUDO systemctl --no-pager --full status "$SERVICE_NAME" || true
-    if command -v journalctl >/dev/null 2>&1; then
-      $SUDO journalctl -u "$SERVICE_NAME" -n 40 --no-pager || true
+    if wait_for_service "$SERVICE_NAME" 15; then
+      log "Service ${SERVICE_NAME} is active."
+      $SUDO systemctl --no-pager --full status "$SERVICE_NAME" | sed -n '1,8p'
+      log "Install complete. Service ${SERVICE_NAME} is enabled and restarted."
+    else
+      log "Service ${SERVICE_NAME} failed to become active. Showing diagnostics:"
+      $SUDO systemctl --no-pager --full status "$SERVICE_NAME" || true
+      if command -v journalctl >/dev/null 2>&1; then
+        $SUDO journalctl -u "$SERVICE_NAME" -n 40 --no-pager || true
+      fi
+      fatal "Agent service is not healthy. Check server URL/reachability and token."
     fi
-    fatal "Agent service is not healthy. Check server URL/reachability and token."
+  else
+    log "systemd not detected. Start manually:"
+    log "${INSTALL_DIR}/${BINARY_NAME} --config ${CONFIG_PATH}"
   fi
 else
-  log "systemd not detected. Start manually:"
-  log "${INSTALL_DIR}/${BINARY_NAME} --config ${CONFIG_PATH}"
+  require_cmd launchctl
+  install -d -m 0755 "${HOME}/Library/LaunchAgents"
+  log "Installing launchd plist ${LAUNCHD_PLIST}"
+  cat > "$LAUNCHD_PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>${LAUNCHD_LABEL}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${INSTALL_DIR}/${BINARY_NAME}</string>
+    <string>start</string>
+    <string>--config</string>
+    <string>${CONFIG_PATH}</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>${LAUNCHD_STDOUT_PATH}</string>
+  <key>StandardErrorPath</key>
+  <string>${LAUNCHD_STDERR_PATH}</string>
+</dict>
+</plist>
+EOF
+  chmod 0644 "$LAUNCHD_PLIST"
+
+  launchctl bootout "gui/$(id -u)" "$LAUNCHD_PLIST" 2>/dev/null || true
+  launchctl bootstrap "gui/$(id -u)" "$LAUNCHD_PLIST"
+  launchctl enable "gui/$(id -u)/${LAUNCHD_LABEL}" >/dev/null 2>&1 || true
+
+  if [ "$SELF_UPDATE_MODE" = "true" ]; then
+    log "Self-update mode detected. Triggering launchd kickstart."
+    launchctl kickstart -k "gui/$(id -u)/${LAUNCHD_LABEL}" || true
+    log "Self-update restart triggered; installer exiting without in-process health wait."
+    exit 0
+  fi
+
+  launchctl kickstart -k "gui/$(id -u)/${LAUNCHD_LABEL}" || true
+  if wait_for_launchd_service "$LAUNCHD_LABEL" 15; then
+    log "Service ${LAUNCHD_LABEL} is active."
+    log "Install complete. launchd agent ${LAUNCHD_LABEL} is loaded."
+  else
+    log "launchd service ${LAUNCHD_LABEL} failed to become active."
+    launchctl print "gui/$(id -u)/${LAUNCHD_LABEL}" || true
+    fatal "Agent service is not healthy. Check server URL/reachability and token."
+  fi
 fi

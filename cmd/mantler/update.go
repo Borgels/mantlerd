@@ -192,7 +192,11 @@ func runUpdateApply(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("Updated successfully to %s.\n", targetVersion)
 	fmt.Printf("Binary path: %s\n", targetPath)
-	fmt.Println("If running as a systemd service, restart it: sudo systemctl restart mantlerd")
+	if runtime.GOOS == "darwin" {
+		fmt.Println("If running via launchd, restart it: launchctl kickstart -k \"gui/$(id -u)/com.mantler.mantlerd\"")
+	} else {
+		fmt.Println("If running as a systemd service, restart it: sudo systemctl restart mantlerd")
+	}
 	return nil
 }
 

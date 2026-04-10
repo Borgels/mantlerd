@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -162,6 +163,35 @@ func isLikelyQsfpInterface(name string) bool {
 }
 
 func readInterfaceSpeed(interfaceName string) string {
+	if runtime.GOOS == "darwin" {
+		output, err := execCommandFn("ifconfig", interfaceName).Output()
+		if err != nil {
+			return ""
+		}
+		scanner := bufio.NewScanner(bytes.NewReader(output))
+		for scanner.Scan() {
+			line := strings.ToLower(strings.TrimSpace(scanner.Text()))
+			if !strings.HasPrefix(line, "media:") {
+				continue
+			}
+			switch {
+			case strings.Contains(line, "100g"):
+				return "100Gb/s"
+			case strings.Contains(line, "40g"):
+				return "40Gb/s"
+			case strings.Contains(line, "25g"):
+				return "25Gb/s"
+			case strings.Contains(line, "10g"):
+				return "10Gb/s"
+			case strings.Contains(line, "1000base"):
+				return "1Gb/s"
+			case strings.Contains(line, "100base"):
+				return "100Mb/s"
+			}
+		}
+		return ""
+	}
+
 	path := filepath.Join("/sys/class/net", interfaceName, "speed")
 	data, err := readFileFn(path)
 	if err != nil {
@@ -198,11 +228,55 @@ func findPeerAddress(interfaceName string, subnet *net.IPNet, localAddress strin
 }
 
 func parseARPTable(interfaceName string, subnet *net.IPNet, localAddress string) []string {
+	if runtime.GOOS == "darwin" {
+		output, err := execCommandFn("arp", "-an", "-i", interfaceName).Output()
+		if err != nil {
+			return nil
+		}
+		return parseDarwinARPEntries(output, subnet, localAddress)
+	}
+
 	data, err := readFileFn("/proc/net/arp")
 	if err != nil {
 		return nil
 	}
 	return parseARPEntries(data, interfaceName, subnet, localAddress)
+}
+
+func parseDarwinARPEntries(data []byte, subnet *net.IPNet, localAddress string) []string {
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	candidates := []string{}
+	seen := map[string]struct{}{}
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		// Example: ? (192.168.1.12) at aa:bb:... on en0 ifscope [ethernet]
+		start := strings.Index(line, "(")
+		end := strings.Index(line, ")")
+		if start < 0 || end <= start+1 {
+			continue
+		}
+		ip := strings.TrimSpace(line[start+1 : end])
+		if ip == "" || ip == localAddress {
+			continue
+		}
+		parsed := net.ParseIP(ip)
+		if parsed == nil || parsed.To4() == nil {
+			continue
+		}
+		if subnet != nil && !subnet.Contains(parsed) {
+			continue
+		}
+		if _, exists := seen[ip]; exists {
+			continue
+		}
+		seen[ip] = struct{}{}
+		candidates = append(candidates, ip)
+	}
+	slices.Sort(candidates)
+	return candidates
 }
 
 func parseARPEntries(data []byte, interfaceName string, subnet *net.IPNet, localAddress string) []string {
@@ -246,6 +320,10 @@ func parseARPEntries(data []byte, interfaceName string, subnet *net.IPNet, local
 }
 
 func parseIPNeigh(interfaceName string, subnet *net.IPNet, localAddress string) []string {
+	if runtime.GOOS != "linux" {
+		return nil
+	}
+
 	output, err := execCommandFn("ip", "neigh", "show", "dev", interfaceName).Output()
 	if err != nil {
 		return nil
@@ -284,6 +362,10 @@ func parseIPNeigh(interfaceName string, subnet *net.IPNet, localAddress string) 
 }
 
 func collectRdmaDevices() []types.RdmaDevice {
+	if runtime.GOOS != "linux" {
+		return nil
+	}
+
 	output, err := execCommandFn("ibdev2netdev").Output()
 	if err != nil {
 		return nil
@@ -404,6 +486,27 @@ func addFromKnownHosts(peerSet map[string]struct{}, out map[string]struct{}) {
 }
 
 func addFromAvahi(peerSet map[string]struct{}, out map[string]struct{}) {
+	if runtime.GOOS == "darwin" {
+		for ip := range peerSet {
+			raw, err := execCommandFn("dscacheutil", "-q", "host", "-a", "ip_address", ip).Output()
+			if err != nil {
+				continue
+			}
+			lines := strings.Split(string(raw), "\n")
+			for _, line := range lines {
+				line = strings.TrimSpace(line)
+				if !strings.HasPrefix(strings.ToLower(line), "name:") {
+					continue
+				}
+				host := strings.TrimSpace(strings.TrimPrefix(line, "name:"))
+				if host != "" {
+					out[host] = struct{}{}
+				}
+			}
+		}
+		return
+	}
+
 	for ip := range peerSet {
 		cmd := execCommandFn("avahi-resolve", "--address", ip)
 		raw, err := cmd.Output()
