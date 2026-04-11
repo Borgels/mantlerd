@@ -6,7 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -70,17 +73,34 @@ func runExplore(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("error creating API client: %w", err)
 	}
+	capabilities := probeExploreCapabilities()
 	runtimeConstraint := strings.TrimSpace(exploreRuntime)
-	for recommendationAttempt := 0; recommendationAttempt < 2; recommendationAttempt++ {
+	excludedFingerprints := map[string]struct{}{}
+	forceOllama := false
+	for recommendationAttempt := 0; recommendationAttempt < 3; recommendationAttempt++ {
+		queryRuntime := runtimeConstraint
+		if forceOllama {
+			queryRuntime = "ollama"
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 		exploreResp, exploreErr := cl.Explore(ctx, types.ExploreQuery{
-			Runtime:     runtimeConstraint,
-			ModelID:     strings.TrimSpace(exploreModel),
-			Workload:    workload,
-			MaxAttempts: 5,
+			Runtime:             queryRuntime,
+			ModelID:             strings.TrimSpace(exploreModel),
+			Workload:            workload,
+			MaxAttempts:         5,
+			Capabilities:        &capabilities,
+			ExcludeFingerprints: mapKeys(excludedFingerprints),
 		})
 		cancel()
 		if exploreErr != nil {
+			if shouldForceOllamaFromExploreError(exploreErr) && !forceOllama {
+				forceOllama = true
+				runtimeConstraint = "ollama"
+				if !exploreJSON {
+					fmt.Fprintf(os.Stderr, "Warning: explore candidate search failed (%v), forcing ollama fallback\n", exploreErr)
+				}
+				continue
+			}
 			return fmt.Errorf("explore request failed: %w", exploreErr)
 		}
 
@@ -88,6 +108,24 @@ func runExplore(cmd *cobra.Command, args []string) error {
 		modelID := strings.TrimSpace(exploreResp.Selection.ModelID)
 		if runtimeName == "" || modelID == "" {
 			return fmt.Errorf("explore recommendation is missing runtime/model data")
+		}
+		if isInvalidRuntimeModelCombination(runtimeName, modelID) {
+			recordFailedFingerprint(exploreResp, excludedFingerprints)
+			if recommendationAttempt == 0 && !forceOllama {
+				if !exploreJSON {
+					fmt.Fprintf(os.Stderr, "Warning: recommended stack %s + %s is not locally pullable, requesting next candidate\n", runtimeName, modelID)
+				}
+				continue
+			}
+			if !forceOllama {
+				forceOllama = true
+				runtimeConstraint = "ollama"
+				if !exploreJSON {
+					fmt.Fprintf(os.Stderr, "Warning: recommended stack %s + %s is not locally pullable, forcing ollama fallback\n", runtimeName, modelID)
+				}
+				continue
+			}
+			return fmt.Errorf("explore recommendation selected an invalid runtime/model combination: %s + %s", runtimeName, modelID)
 		}
 		if !exploreJSON {
 			fmt.Printf("Recommended stack: %s + %s\n", runtimeName, modelID)
@@ -118,12 +156,22 @@ func runExplore(cmd *cobra.Command, args []string) error {
 
 		manager := runtime.NewManager()
 		if err := manager.EnsureRuntime(runtimeName); err != nil {
-			if recommendationAttempt == 0 && shouldFallbackToOllama(runtimeName, err) {
-				if !exploreJSON {
-					fmt.Fprintf(os.Stderr, "Warning: runtime %s failed preflight (%v), retrying explore with ollama fallback\n", runtimeName, err)
+			if shouldFallbackToOllama(runtimeName, err) {
+				recordFailedFingerprint(exploreResp, excludedFingerprints)
+				if recommendationAttempt == 0 && !forceOllama {
+					if !exploreJSON {
+						fmt.Fprintf(os.Stderr, "Warning: runtime %s failed preflight (%v), requesting next explore candidate\n", runtimeName, err)
+					}
+					continue
 				}
-				runtimeConstraint = "ollama"
-				continue
+				if !forceOllama {
+					forceOllama = true
+					runtimeConstraint = "ollama"
+					if !exploreJSON {
+						fmt.Fprintf(os.Stderr, "Warning: runtime %s failed preflight (%v), forcing ollama fallback\n", runtimeName, err)
+					}
+					continue
+				}
 			}
 			return fmt.Errorf("failed to ensure runtime %s: %w", runtimeName, err)
 		}
@@ -135,25 +183,83 @@ func runExplore(cmd *cobra.Command, args []string) error {
 		}
 		if err := manager.PrepareModelWithRuntime(modelID, runtimeName, nil); err != nil {
 			restoreRuntimePlan()
-			if recommendationAttempt == 0 && shouldFallbackToOllama(runtimeName, err) {
-				if !exploreJSON {
-					fmt.Fprintf(os.Stderr, "Warning: prepare failed on %s (%v), retrying explore with ollama fallback\n", runtimeName, err)
+			if shouldFallbackToOllama(runtimeName, err) {
+				recordFailedFingerprint(exploreResp, excludedFingerprints)
+				if recommendationAttempt == 0 && !forceOllama {
+					if !exploreJSON {
+						fmt.Fprintf(os.Stderr, "Warning: prepare failed on %s (%v), requesting next explore candidate\n", runtimeName, err)
+					}
+					continue
 				}
-				runtimeConstraint = "ollama"
-				continue
+				if !forceOllama {
+					forceOllama = true
+					runtimeConstraint = "ollama"
+					if !exploreJSON {
+						fmt.Fprintf(os.Stderr, "Warning: prepare failed on %s (%v), forcing ollama fallback\n", runtimeName, err)
+					}
+					continue
+				}
 			}
 			return fmt.Errorf("failed to prepare model %s on %s: %w", modelID, runtimeName, err)
 		}
+		if strings.EqualFold(strings.TrimSpace(exploreResp.Plan.RuntimePlan.InstallMode), "download_only") {
+			restoreRuntimePlan()
+			if !exploreJSON {
+				fmt.Println("Runtime plan installMode=download_only; model prepared and execution skipped.")
+			}
+			if exploreJSON {
+				output := exploreOutput{
+					Recommendation: exploreResp,
+				}
+				encoded, marshalErr := json.MarshalIndent(output, "", "  ")
+				if marshalErr != nil {
+					return fmt.Errorf("marshal json output: %w", marshalErr)
+				}
+				fmt.Println(string(encoded))
+			}
+			return nil
+		}
 		if err := manager.StartModelWithRuntime(modelID, runtimeName, nil); err != nil {
 			restoreRuntimePlan()
-			if recommendationAttempt == 0 && shouldFallbackToOllama(runtimeName, err) {
-				if !exploreJSON {
-					fmt.Fprintf(os.Stderr, "Warning: start failed on %s (%v), retrying explore with ollama fallback\n", runtimeName, err)
+			if shouldFallbackToOllama(runtimeName, err) {
+				recordFailedFingerprint(exploreResp, excludedFingerprints)
+				if recommendationAttempt == 0 && !forceOllama {
+					if !exploreJSON {
+						fmt.Fprintf(os.Stderr, "Warning: start failed on %s (%v), requesting next explore candidate\n", runtimeName, err)
+					}
+					continue
 				}
-				runtimeConstraint = "ollama"
-				continue
+				if !forceOllama {
+					forceOllama = true
+					runtimeConstraint = "ollama"
+					if !exploreJSON {
+						fmt.Fprintf(os.Stderr, "Warning: start failed on %s (%v), forcing ollama fallback\n", runtimeName, err)
+					}
+					continue
+				}
 			}
 			return fmt.Errorf("failed to start model %s on %s: %w", modelID, runtimeName, err)
+		}
+		if err := waitForExploreHealthChecks(runtimeName, exploreResp.Plan.RuntimePlan.HealthChecks, 30*time.Second); err != nil {
+			restoreRuntimePlan()
+			if shouldFallbackToOllama(runtimeName, err) {
+				recordFailedFingerprint(exploreResp, excludedFingerprints)
+				if recommendationAttempt == 0 && !forceOllama {
+					if !exploreJSON {
+						fmt.Fprintf(os.Stderr, "Warning: health checks failed on %s (%v), requesting next explore candidate\n", runtimeName, err)
+					}
+					continue
+				}
+				if !forceOllama {
+					forceOllama = true
+					runtimeConstraint = "ollama"
+					if !exploreJSON {
+						fmt.Fprintf(os.Stderr, "Warning: health checks failed on %s (%v), forcing ollama fallback\n", runtimeName, err)
+					}
+					continue
+				}
+			}
+			return fmt.Errorf("health checks failed for %s on %s: %w", modelID, runtimeName, err)
 		}
 		defer restoreRuntimePlan()
 		defer func() {
@@ -165,6 +271,16 @@ func runExplore(cmd *cobra.Command, args []string) error {
 		}()
 
 		prompts := localEvalPrompts(workload, "quick")
+		evalSessionToken := ""
+		promptCtx, promptCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		serverPrompts, sessionToken, promptErr := cl.GetEvalPrompts(promptCtx, workload, "quick", "mantler-standard")
+		promptCancel()
+		if promptErr == nil && len(serverPrompts) > 0 {
+			prompts = serverPrompts
+			evalSessionToken = strings.TrimSpace(sessionToken)
+		} else if !exploreJSON {
+			fmt.Fprintf(os.Stderr, "Warning: failed to fetch server eval prompts/session; using local prompts (%v)\n", promptErr)
+		}
 		if !exploreEval && len(prompts) > 1 {
 			prompts = prompts[:1]
 		}
@@ -174,6 +290,9 @@ func runExplore(cmd *cobra.Command, args []string) error {
 		summary, err := runner.Run(evalCtx, modelID, workload, "quick", prompts, nil)
 		if err != nil {
 			return fmt.Errorf("eval run failed: %w", err)
+		}
+		if evalSessionToken != "" {
+			summary.EvalSessionToken = evalSessionToken
 		}
 		if !exploreJSON {
 			printEvalSummary(summary)
@@ -323,17 +442,11 @@ func buildLocalFallbackScore(exploreResp *types.ExploreResponse, summary types.E
 
 func applyExploreRuntimePlan(runtimeName string, plan types.ExplorePlan) (func(), error) {
 	runtimeName = strings.ToLower(strings.TrimSpace(runtimeName))
-	if runtimeName != "vllm" && runtimeName != "tensorrt" {
-		return func() {}, nil
-	}
-
 	overrideImage := strings.TrimSpace(plan.RuntimePlan.Image)
 	filteredArgs := filterRuntimePlanArgs(runtimeName, plan.RuntimePlan.Args)
 	overrideArgs := strings.TrimSpace(strings.Join(filteredArgs, " "))
 	filteredEnv := filterRuntimePlanEnv(runtimeName, plan.RuntimePlan.Env)
-	if overrideImage == "" && overrideArgs == "" && len(filteredEnv) == 0 {
-		return func() {}, nil
-	}
+	var restoreFns []func()
 
 	envPath := ""
 	imageKey := ""
@@ -347,48 +460,95 @@ func applyExploreRuntimePlan(runtimeName string, plan types.ExplorePlan) (func()
 		envPath = "/etc/mantler/tensorrt.env"
 		imageKey = "TENSORRT_CONTAINER_IMAGE"
 		argsKey = "TENSORRT_EXTRA_ARGS"
+	case "ollama":
+		envPath = "/etc/mantler/ollama.env"
+		argsKey = "OLLAMA_EXTRA_ARGS"
 	}
 
-	existed := true
-	originalRaw, readErr := os.ReadFile(envPath)
-	if readErr != nil {
-		if !errors.Is(readErr, os.ErrNotExist) {
-			return func() {}, readErr
+	if envPath != "" {
+		existed := true
+		originalRaw, readErr := os.ReadFile(envPath)
+		if readErr != nil {
+			if !errors.Is(readErr, os.ErrNotExist) {
+				return func() {}, readErr
+			}
+			existed = false
+			originalRaw = []byte{}
 		}
-		existed = false
-		originalRaw = []byte{}
-	}
-
-	values := parseEnvContent(string(originalRaw))
-	if overrideImage != "" {
-		values[imageKey] = overrideImage
-	}
-	if overrideArgs != "" {
-		values[argsKey] = overrideArgs
-	}
-	for key, value := range filteredEnv {
-		trimmedKey := strings.TrimSpace(key)
-		if trimmedKey == "" {
-			continue
+		values := parseEnvContent(string(originalRaw))
+		if overrideImage != "" && imageKey != "" {
+			values[imageKey] = overrideImage
 		}
-		values[trimmedKey] = strings.TrimSpace(value)
+		if overrideArgs != "" && argsKey != "" {
+			values[argsKey] = overrideArgs
+		}
+		for key, value := range filteredEnv {
+			trimmedKey := strings.TrimSpace(key)
+			if trimmedKey == "" {
+				continue
+			}
+			values[trimmedKey] = strings.TrimSpace(value)
+		}
+		if len(values) > 0 {
+			if err := os.MkdirAll(filepath.Dir(envPath), 0o755); err != nil {
+				return func() {}, err
+			}
+			if err := os.WriteFile(envPath, []byte(renderEnvContent(values)), 0o600); err != nil {
+				return func() {}, err
+			}
+			restoreFns = append(restoreFns, func() {
+				if existed {
+					_ = os.WriteFile(envPath, originalRaw, 0o600)
+					return
+				}
+				_ = os.Remove(envPath)
+			})
+		}
 	}
 
-	if err := os.MkdirAll(filepath.Dir(envPath), 0o755); err != nil {
+	if fileRestore, err := applyRuntimePlanFiles(plan.RuntimePlan.Files); err != nil {
 		return func() {}, err
-	}
-	if err := os.WriteFile(envPath, []byte(renderEnvContent(values)), 0o600); err != nil {
-		return func() {}, err
+	} else if fileRestore != nil {
+		restoreFns = append(restoreFns, fileRestore)
 	}
 
-	restore := func() {
-		if existed {
-			_ = os.WriteFile(envPath, originalRaw, 0o600)
-			return
-		}
-		_ = os.Remove(envPath)
+	if len(restoreFns) == 0 {
+		return func() {}, nil
 	}
-	return restore, nil
+	needsOllamaRestart := runtimeName == "ollama" &&
+		(overrideImage != "" || overrideArgs != "" || len(filteredEnv) > 0 || len(plan.RuntimePlan.Files) > 0)
+	if needsOllamaRestart {
+		if err := restartOllamaService(); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to restart ollama after applying runtime plan: %v\n", err)
+		}
+	}
+	return func() {
+		for i := len(restoreFns) - 1; i >= 0; i-- {
+			restoreFns[i]()
+		}
+		if needsOllamaRestart {
+			if err := restartOllamaService(); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to restart ollama after restoring runtime plan: %v\n", err)
+			}
+		}
+	}, nil
+}
+
+func restartOllamaService() error {
+	if _, err := exec.LookPath("systemctl"); err != nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "systemctl", "restart", "ollama")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		output := strings.TrimSpace(string(out))
+		if output == "" {
+			return err
+		}
+		return fmt.Errorf("%w: %s", err, output)
+	}
+	return nil
 }
 
 func parseEnvContent(raw string) map[string]string {
@@ -429,6 +589,156 @@ func renderEnvContent(values map[string]string) string {
 	return strings.Join(lines, "\n") + "\n"
 }
 
+func applyRuntimePlanFiles(files []types.RuntimePlanFile) (func(), error) {
+	restoreFns := make([]func(), 0)
+	for _, file := range files {
+		source := strings.TrimSpace(file.Source)
+		destination := strings.TrimSpace(file.Destination)
+		if destination == "" {
+			continue
+		}
+		content := []byte(file.Content)
+		if len(content) == 0 && source != "" {
+			sourceFile, err := os.Open(source)
+			if err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					continue
+				}
+				return nil, err
+			}
+			content, err = io.ReadAll(sourceFile)
+			_ = sourceFile.Close()
+			if err != nil {
+				return nil, err
+			}
+		}
+		if len(content) == 0 {
+			continue
+		}
+
+		destExists := true
+		original, readErr := os.ReadFile(destination)
+		if readErr != nil {
+			if !errors.Is(readErr, os.ErrNotExist) {
+				return nil, readErr
+			}
+			destExists = false
+			original = nil
+		}
+		if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(destination, content, 0o600); err != nil {
+			return nil, err
+		}
+		restoreFns = append(restoreFns, func() {
+			if destExists {
+				_ = os.WriteFile(destination, original, 0o600)
+				return
+			}
+			_ = os.Remove(destination)
+		})
+	}
+	if len(restoreFns) == 0 {
+		return nil, nil
+	}
+	return func() {
+		for i := len(restoreFns) - 1; i >= 0; i-- {
+			restoreFns[i]()
+		}
+	}, nil
+}
+
+func waitForExploreHealthChecks(runtimeName string, checks []string, timeout time.Duration) error {
+	trimmedChecks := make([]string, 0, len(checks))
+	for _, entry := range checks {
+		trimmed := strings.TrimSpace(entry)
+		if trimmed == "" {
+			continue
+		}
+		trimmedChecks = append(trimmedChecks, trimmed)
+	}
+	if len(trimmedChecks) == 0 {
+		return nil
+	}
+	baseURL := runtimeHealthBaseURL(runtimeName)
+	client := &http.Client{Timeout: 4 * time.Second}
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		allHealthy := true
+		for _, check := range trimmedChecks {
+			target := check
+			if strings.EqualFold(strings.TrimSpace(runtimeName), "ollama") && strings.TrimSpace(target) == "/health" {
+				target = "/api/tags"
+			}
+			if !strings.HasPrefix(target, "http://") && !strings.HasPrefix(target, "https://") {
+				target = strings.TrimRight(baseURL, "/") + "/" + strings.TrimLeft(target, "/")
+			}
+			req, err := http.NewRequest(http.MethodGet, target, nil)
+			if err != nil {
+				lastErr = err
+				allHealthy = false
+				continue
+			}
+			resp, err := client.Do(req)
+			if err != nil {
+				lastErr = err
+				allHealthy = false
+				continue
+			}
+			_ = resp.Body.Close()
+			if resp.StatusCode < 200 || resp.StatusCode >= 400 {
+				lastErr = fmt.Errorf("health check %s returned status %d", target, resp.StatusCode)
+				allHealthy = false
+			}
+		}
+		if allHealthy {
+			return nil
+		}
+		time.Sleep(2 * time.Second)
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("timed out waiting for health checks")
+	}
+	return lastErr
+}
+
+func isInvalidRuntimeModelCombination(runtimeName string, modelID string) bool {
+	runtimeName = strings.ToLower(strings.TrimSpace(runtimeName))
+	modelID = strings.TrimSpace(modelID)
+	if runtimeName == "ollama" {
+		return false
+	}
+	return strings.Contains(modelID, "/") && strings.Contains(modelID, ":")
+}
+
+func shouldForceOllamaFromExploreError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "cuda backend requires an available gpu") ||
+		strings.Contains(message, "no compatible recommendation candidates") ||
+		strings.Contains(message, "unable to resolve a fully compatible explore candidate")
+}
+
+func runtimeHealthBaseURL(runtimeName string) string {
+	switch strings.ToLower(strings.TrimSpace(runtimeName)) {
+	case "ollama":
+		base := strings.TrimSpace(os.Getenv("OLLAMA_HOST"))
+		if base == "" {
+			return "http://127.0.0.1:11434"
+		}
+		if strings.HasPrefix(base, "http://") || strings.HasPrefix(base, "https://") {
+			return strings.TrimRight(base, "/")
+		}
+		return "http://" + strings.TrimRight(base, "/")
+	default:
+		return "http://127.0.0.1:8000"
+	}
+}
+
 func shouldFallbackToOllama(runtimeName string, err error) bool {
 	if strings.EqualFold(strings.TrimSpace(runtimeName), "ollama") {
 		return false
@@ -445,10 +755,60 @@ func shouldFallbackToOllama(runtimeName string, err error) bool {
 	return true
 }
 
+func probeExploreCapabilities() types.ExploreCapabilities {
+	caps := types.ExploreCapabilities{
+		Docker:          false,
+		HFToken:         false,
+		GPUDriverLoaded: false,
+	}
+	dockerCtx, dockerCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer dockerCancel()
+	if err := exec.CommandContext(dockerCtx, "docker", "info").Run(); err == nil {
+		caps.Docker = true
+	}
+	hfToken := strings.TrimSpace(os.Getenv("HF_TOKEN"))
+	hfHubToken := strings.TrimSpace(os.Getenv("HUGGING_FACE_HUB_TOKEN"))
+	caps.HFToken = hfToken != "" || hfHubToken != ""
+	nvidiaCtx, nvidiaCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer nvidiaCancel()
+	if err := exec.CommandContext(nvidiaCtx, "nvidia-smi", "-L").Run(); err == nil {
+		caps.GPUDriverLoaded = true
+	}
+	return caps
+}
+
+func mapKeys(values map[string]struct{}) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		trimmed := strings.TrimSpace(key)
+		if trimmed == "" {
+			continue
+		}
+		keys = append(keys, trimmed)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func recordFailedFingerprint(resp *types.ExploreResponse, target map[string]struct{}) {
+	if resp == nil {
+		return
+	}
+	fp := strings.TrimSpace(resp.Plan.BaseFingerprint)
+	if fp == "" {
+		fp = strings.TrimSpace(resp.Plan.MantleFingerprint)
+	}
+	if fp == "" {
+		return
+	}
+	target[fp] = struct{}{}
+}
+
 func filterRuntimePlanArgs(runtimeName string, args []string) []string {
 	allowedPrefixes := map[string][]string{
 		"vllm": {"--model", "--tensor-parallel-size", "--max-model-len", "--gpu-memory-utilization", "--dtype"},
 		"tensorrt": {"--model", "--max_batch_size", "--max_input_len", "--max_output_len", "--max_beam_width"},
+		"ollama": {"--num-gpu", "--num-ctx", "--temperature", "--top-p"},
 	}
 	prefixes := allowedPrefixes[runtimeName]
 	if len(prefixes) == 0 {
@@ -477,6 +837,7 @@ func filterRuntimePlanEnv(runtimeName string, env map[string]string) map[string]
 	allowedPrefixes := map[string][]string{
 		"vllm": {"VLLM_", "HF_", "HUGGINGFACE_", "NVIDIA_", "CUDA_"},
 		"tensorrt": {"TENSORRT_", "HF_", "HUGGINGFACE_", "NVIDIA_", "CUDA_"},
+		"ollama": {"OLLAMA_", "HF_", "HUGGINGFACE_"},
 	}
 	prefixes := allowedPrefixes[runtimeName]
 	if len(prefixes) == 0 {
