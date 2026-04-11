@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"net/http"
 	"net/url"
@@ -51,7 +52,6 @@ func New(serverURL, token string, insecure bool) (*Client, error) {
 		baseURL: strings.TrimRight(serverURL, "/"),
 		token:   token,
 		httpClient: &http.Client{
-			Timeout:   15 * time.Second,
 			Transport: transport,
 		},
 	}, nil
@@ -173,6 +173,103 @@ func (c *Client) Recommend(ctx context.Context, q types.RecommendQuery) (*types.
 		return nil, fmt.Errorf("decode recommendations response: %w", err)
 	}
 	return &envelope.Data, nil
+}
+
+func (c *Client) Explore(ctx context.Context, q types.ExploreQuery) (*types.ExploreResponse, error) {
+	reqBody, err := json.Marshal(q)
+	if err != nil {
+		return nil, fmt.Errorf("marshal explore payload: %w", err)
+	}
+	req, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodPost,
+		c.baseURL+"/api/agent/explore",
+		bytes.NewReader(reqBody),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create explore request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("explore request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode == http.StatusNotFound && strings.Contains(strings.ToLower(string(body)), "<!doctype html>") {
+			return nil, fmt.Errorf(
+				"explore failed (404): /api/agent/explore is not available on %s; deploy backend routes first",
+				c.baseURL,
+			)
+		}
+		return nil, fmt.Errorf("explore failed (%d): %s", resp.StatusCode, compactHTTPErrorBody(body))
+	}
+
+	var envelope struct {
+		Data types.ExploreResponse `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		return nil, fmt.Errorf("decode explore response: %w", err)
+	}
+	return &envelope.Data, nil
+}
+
+func compactHTTPErrorBody(body []byte) string {
+	raw := strings.TrimSpace(string(body))
+	if raw == "" {
+		return "<empty response body>"
+	}
+	if strings.Contains(strings.ToLower(raw), "<html") {
+		return "HTML error page returned"
+	}
+	unescaped := html.UnescapeString(raw)
+	if len(unescaped) > 500 {
+		return strings.TrimSpace(unescaped[:500]) + "..."
+	}
+	return unescaped
+}
+
+func (c *Client) GetScore(ctx context.Context, fingerprint string) (*types.ScoreResponse, error) {
+	target := strings.TrimSpace(fingerprint)
+	if target == "" {
+		return nil, fmt.Errorf("fingerprint is required")
+	}
+	req, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodGet,
+		c.baseURL+"/api/agent/score/"+url.PathEscape(target),
+		nil,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create score request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("score request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("score request failed (%d): %s", resp.StatusCode, string(body))
+	}
+
+	var envelope struct {
+		Data struct {
+			Score *types.ScoreResponse `json:"score"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		return nil, fmt.Errorf("decode score response: %w", err)
+	}
+	if envelope.Data.Score == nil {
+		return nil, fmt.Errorf("score not found for fingerprint %s", target)
+	}
+	return envelope.Data.Score, nil
 }
 
 func (c *Client) GetEvalPrompts(
