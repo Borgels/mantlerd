@@ -4,8 +4,12 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -66,7 +70,7 @@ func runExplore(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("error creating API client: %w", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 	exploreResp, err := cl.Explore(ctx, types.ExploreQuery{
 		Runtime:     strings.TrimSpace(exploreRuntime),
@@ -91,6 +95,12 @@ func runExplore(cmd *cobra.Command, args []string) error {
 			len(exploreResp.Plan.Compatibility.Blockers),
 			len(exploreResp.Plan.Compatibility.Warnings),
 		)
+		if image := strings.TrimSpace(exploreResp.Plan.RuntimePlan.Image); image != "" {
+			fmt.Printf("Runtime plan image: %s\n", image)
+		}
+		if len(exploreResp.Plan.RuntimePlan.Args) > 0 {
+			fmt.Printf("Runtime plan args: %s\n", strings.Join(exploreResp.Plan.RuntimePlan.Args, " "))
+		}
 	}
 
 	if !exploreYes && !exploreJSON {
@@ -108,6 +118,13 @@ func runExplore(cmd *cobra.Command, args []string) error {
 	if err := manager.EnsureRuntime(runtimeName); err != nil {
 		return fmt.Errorf("failed to ensure runtime %s: %w", runtimeName, err)
 	}
+	restoreRuntimePlan := func() {}
+	if restore, applyErr := applyExploreRuntimePlan(runtimeName, exploreResp.Plan); applyErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to apply runtime plan overrides: %v\n", applyErr)
+	} else {
+		restoreRuntimePlan = restore
+	}
+	defer restoreRuntimePlan()
 	if err := manager.PrepareModelWithRuntime(modelID, runtimeName, nil); err != nil {
 		return fmt.Errorf("failed to prepare model %s on %s: %w", modelID, runtimeName, err)
 	}
@@ -157,21 +174,31 @@ func runExplore(cmd *cobra.Command, args []string) error {
 	}
 
 	var score *types.ScoreResponse
-	targetFingerprint := strings.TrimSpace(exploreResp.Plan.MantleFingerprint)
-	if targetFingerprint != "" {
-		scoreCtx, scoreCancel := context.WithTimeout(context.Background(), 15*time.Second)
-		score, err = cl.GetScore(scoreCtx, targetFingerprint)
-		scoreCancel()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to fetch score for %s: %v\n", targetFingerprint, err)
-		} else if !exploreJSON {
-			fmt.Printf(
-				"Score: overall=%.2f confidence=%s evidence=%d\n",
-				score.Overall,
-				score.ConfidenceTier,
-				score.EvidenceSignals,
-			)
+	targetFingerprints := []string{
+		strings.TrimSpace(exploreResp.Plan.MantleFingerprint),
+		strings.TrimSpace(exploreResp.Plan.BaseFingerprint),
+	}
+	scoreErr := error(nil)
+	for _, targetFingerprint := range targetFingerprints {
+		if targetFingerprint == "" {
+			continue
 		}
+		score, scoreErr = waitForScore(cl, targetFingerprint, 4*time.Minute)
+		if scoreErr == nil {
+			break
+		}
+	}
+	if scoreErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to fetch score: %v\n", scoreErr)
+		score = buildLocalFallbackScore(exploreResp, summary)
+	}
+	if score != nil && !exploreJSON {
+		fmt.Printf(
+			"Score: overall=%.2f confidence=%s evidence=%d\n",
+			score.Overall,
+			score.ConfidenceTier,
+			score.EvidenceSignals,
+		)
 	}
 
 	if exploreJSON {
@@ -190,4 +217,161 @@ func runExplore(cmd *cobra.Command, args []string) error {
 
 	fmt.Println("Explore flow complete.")
 	return nil
+}
+
+func waitForScore(cl *client.Client, fingerprint string, timeout time.Duration) (*types.ScoreResponse, error) {
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for {
+		scoreCtx, scoreCancel := context.WithTimeout(context.Background(), 20*time.Second)
+		score, err := cl.GetScore(scoreCtx, fingerprint)
+		scoreCancel()
+		if err == nil {
+			return score, nil
+		}
+		lastErr = err
+		if !strings.Contains(strings.ToLower(err.Error()), "score not found") {
+			return nil, err
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(3 * time.Second)
+	}
+	if lastErr == nil {
+		lastErr = errors.New("score not found")
+	}
+	return nil, lastErr
+}
+
+func buildLocalFallbackScore(exploreResp *types.ExploreResponse, summary types.EvalRunSummary) *types.ScoreResponse {
+	if exploreResp == nil {
+		return nil
+	}
+	totalQuality := 0.0
+	for _, sample := range summary.Samples {
+		totalQuality += sample.QualityScore
+	}
+	overall := 0.0
+	if len(summary.Samples) > 0 {
+		overall = totalQuality / float64(len(summary.Samples))
+	}
+	fingerprint := strings.TrimSpace(exploreResp.Plan.BaseFingerprint)
+	if fingerprint == "" {
+		fingerprint = strings.TrimSpace(exploreResp.Plan.MantleFingerprint)
+	}
+	return &types.ScoreResponse{
+		MantleFingerprint: fingerprint,
+		Overall:           overall,
+		ProfileID:         "balanced",
+		ConfidenceTier:    "provisional",
+		EvidenceSignals:   len(summary.Samples),
+		UpdatedAt:         time.Now().UTC().Format(time.RFC3339),
+	}
+}
+
+func applyExploreRuntimePlan(runtimeName string, plan types.ExplorePlan) (func(), error) {
+	runtimeName = strings.ToLower(strings.TrimSpace(runtimeName))
+	if runtimeName != "vllm" && runtimeName != "tensorrt" {
+		return func() {}, nil
+	}
+
+	overrideImage := strings.TrimSpace(plan.RuntimePlan.Image)
+	overrideArgs := strings.TrimSpace(strings.Join(plan.RuntimePlan.Args, " "))
+	if overrideImage == "" && overrideArgs == "" && len(plan.RuntimePlan.Env) == 0 {
+		return func() {}, nil
+	}
+
+	envPath := ""
+	imageKey := ""
+	argsKey := ""
+	switch runtimeName {
+	case "vllm":
+		envPath = "/etc/mantler/vllm.env"
+		imageKey = "VLLM_CONTAINER_IMAGE"
+		argsKey = "VLLM_EXTRA_ARGS"
+	case "tensorrt":
+		envPath = "/etc/mantler/tensorrt.env"
+		imageKey = "TENSORRT_CONTAINER_IMAGE"
+		argsKey = "TENSORRT_EXTRA_ARGS"
+	}
+
+	existed := true
+	originalRaw, readErr := os.ReadFile(envPath)
+	if readErr != nil {
+		if !errors.Is(readErr, os.ErrNotExist) {
+			return func() {}, readErr
+		}
+		existed = false
+		originalRaw = []byte{}
+	}
+
+	values := parseEnvContent(string(originalRaw))
+	if overrideImage != "" {
+		values[imageKey] = overrideImage
+	}
+	if overrideArgs != "" {
+		values[argsKey] = overrideArgs
+	}
+	for key, value := range plan.RuntimePlan.Env {
+		trimmedKey := strings.TrimSpace(key)
+		if trimmedKey == "" {
+			continue
+		}
+		values[trimmedKey] = strings.TrimSpace(value)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(envPath), 0o755); err != nil {
+		return func() {}, err
+	}
+	if err := os.WriteFile(envPath, []byte(renderEnvContent(values)), 0o600); err != nil {
+		return func() {}, err
+	}
+
+	restore := func() {
+		if existed {
+			_ = os.WriteFile(envPath, originalRaw, 0o600)
+			return
+		}
+		_ = os.Remove(envPath)
+	}
+	return restore, nil
+}
+
+func parseEnvContent(raw string) map[string]string {
+	values := map[string]string{}
+	for _, line := range strings.Split(raw, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		parts := strings.SplitN(trimmed, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key := strings.TrimSpace(parts[0])
+		if key == "" {
+			continue
+		}
+		value := strings.TrimSpace(parts[1])
+		if unquoted, err := strconv.Unquote(value); err == nil {
+			value = unquoted
+		}
+		values[key] = value
+	}
+	return values
+}
+
+func renderEnvContent(values map[string]string) string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	// keep output deterministic for easier debugging/reviews
+	sort.Strings(keys)
+	lines := make([]string, 0, len(keys))
+	for _, key := range keys {
+		lines = append(lines, fmt.Sprintf("%s=%q", key, values[key]))
+	}
+	return strings.Join(lines, "\n") + "\n"
 }

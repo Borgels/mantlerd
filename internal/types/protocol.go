@@ -417,6 +417,13 @@ type ExplorePlan struct {
 		Orchestrator string `json:"orchestrator,omitempty"`
 		Provider     string `json:"provider,omitempty"`
 	} `json:"resolvedLayers"`
+	RuntimePlan struct {
+		Image        string            `json:"image,omitempty"`
+		Env          map[string]string `json:"env,omitempty"`
+		Args         []string          `json:"args,omitempty"`
+		InstallMode  string            `json:"installMode,omitempty"`
+		HealthChecks []string          `json:"healthChecks,omitempty"`
+	} `json:"runtimePlan"`
 	CreatedAt  string `json:"createdAt"`
 	AppliedAt  string `json:"appliedAt,omitempty"`
 	VerifiedAt string `json:"verifiedAt,omitempty"`
