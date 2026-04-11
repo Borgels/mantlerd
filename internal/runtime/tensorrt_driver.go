@@ -19,15 +19,16 @@ import (
 )
 
 const (
-	tensorrtConfigPath      = "/etc/mantler/tensorrt.json"
-	tensorrtEnvPath         = "/etc/mantler/tensorrt.env"
-	tensorrtUnitPath        = "/etc/systemd/system/tensorrt-llm.service"
-	tensorrtContainerName   = "mantler-tensorrt"
-	tensorrtDefaultImage    = "nvcr.io/nvidia/tritonserver:25.03-trtllm-python-py3"
-	tensorrtDefaultPort     = 8000
-	tensorrtReadyTimeout    = 180 * time.Second
-	tensorrtRestartCooldown = 90 * time.Second
-	tensorrtEnginesDir      = "/var/lib/mantler/trt-engines"
+	tensorrtConfigPath       = "/etc/mantler/tensorrt.json"
+	tensorrtEnvPath          = "/etc/mantler/tensorrt.env"
+	tensorrtUnitPath         = "/etc/systemd/system/tensorrt-llm.service"
+	tensorrtContainerName    = "mantler-tensorrt"
+	tensorrtDefaultImage     = "nvcr.io/nvidia/tritonserver:25.03-trtllm-python-py3"
+	tensorrtDefaultPort      = 8000
+	tensorrtReadyTimeout     = 180 * time.Second
+	tensorrtRestartCooldown  = 90 * time.Second
+	tensorrtEnginesDir       = "/var/lib/mantler/trt-engines"
+	tensorrtMaxHTTPBodyBytes = 1 << 20
 )
 
 type tensorrtConfig struct {
@@ -428,7 +429,7 @@ func (d *tensorrtDriver) benchmarkOnce(modelID string, prompt string, sampleOutp
 		return BenchmarkResult{}, fmt.Errorf("tensorrt benchmark request failed: %w", err)
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, tensorrtMaxHTTPBodyBytes))
 	if resp.StatusCode >= 400 {
 		return BenchmarkResult{}, fmt.Errorf("tensorrt benchmark failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
@@ -498,7 +499,7 @@ func (d *tensorrtDriver) CompletePrompt(
 		return PromptCompletionResult{}, fmt.Errorf("tensorrt completion request failed: %w", err)
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, tensorrtMaxHTTPBodyBytes))
 	if resp.StatusCode >= 400 {
 		return PromptCompletionResult{}, fmt.Errorf("tensorrt completion failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
@@ -774,11 +775,11 @@ func (d *tensorrtDriver) fetchRemoteModels() ([]string, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, tensorrtMaxHTTPBodyBytes))
 		return nil, fmt.Errorf("tensorrt models endpoint failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
-	body, _ := io.ReadAll(resp.Body)
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, tensorrtMaxHTTPBodyBytes))
 	var parsed struct {
 		Data []struct {
 			ID string `json:"id"`
@@ -908,9 +909,10 @@ func (d *tensorrtDriver) downloadModelSnapshotCtx(ctx context.Context, modelID s
 	if modelID == "" {
 		return fmt.Errorf("model ID is required")
 	}
-	script := "from huggingface_hub import snapshot_download; snapshot_download(repo_id='" + strings.ReplaceAll(modelID, "'", "\\'") + "', cache_dir='/root/.cache/huggingface', resume_download=True)"
+	script := `import os; from huggingface_hub import snapshot_download; snapshot_download(repo_id=os.environ["MANTLER_MODEL_ID"], cache_dir='/root/.cache/huggingface', resume_download=True)`
 	for _, python := range []string{"python3"} {
 		cmd := exec.CommandContext(ctx, python, "-c", script)
+		cmd.Env = append(os.Environ(), "MANTLER_MODEL_ID="+modelID)
 		if err := cmd.Run(); err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()

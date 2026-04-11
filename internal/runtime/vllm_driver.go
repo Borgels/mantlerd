@@ -34,6 +34,7 @@ const (
 	vllmStartupGraceWindow    = 20 * time.Minute
 	vllmRestartCooldown       = 90 * time.Second
 	nemotronSuper120BNVFP4    = "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4"
+	vllmMaxHTTPBodyBytes      = 1 << 20
 )
 
 type vllmConfig struct {
@@ -525,7 +526,7 @@ func (d *vllmDriver) benchmarkOnce(modelID string, prompt string, sampleOutputTo
 		return BenchmarkResult{}, fmt.Errorf("vllm benchmark request failed: %w", err)
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, vllmMaxHTTPBodyBytes))
 	if resp.StatusCode >= 400 {
 		return BenchmarkResult{}, fmt.Errorf("vllm benchmark failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
@@ -598,7 +599,7 @@ func (d *vllmDriver) CompletePrompt(
 		return PromptCompletionResult{}, fmt.Errorf("vllm completion request failed: %w", err)
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, vllmMaxHTTPBodyBytes))
 	if resp.StatusCode >= 400 {
 		return PromptCompletionResult{}, fmt.Errorf("vllm completion failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
@@ -1157,11 +1158,11 @@ func (d *vllmDriver) fetchRemoteModels() ([]string, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, vllmMaxHTTPBodyBytes))
 		return nil, fmt.Errorf("vllm models endpoint failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
-	body, _ := io.ReadAll(resp.Body)
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, vllmMaxHTTPBodyBytes))
 	var parsed struct {
 		Data []struct {
 			ID string `json:"id"`

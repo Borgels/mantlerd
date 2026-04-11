@@ -22,13 +22,14 @@ import (
 )
 
 const (
-	quantCppServiceUnitPath = "/etc/systemd/system/quantcpp.service"
-	quantCppConfigPath      = "/etc/mantler/quantcpp.json"
-	quantCppInstallDir      = "/opt/mantler/quantcpp"
-	quantCppBinaryPath      = "/opt/mantler/quantcpp/quant-server"
-	quantCppModelsDir       = "/var/lib/mantler/models/quantcpp"
-	quantCppDefaultPort     = 8080
-	quantCppReadyTimeout    = 90 * time.Second
+	quantCppServiceUnitPath  = "/etc/systemd/system/quantcpp.service"
+	quantCppConfigPath       = "/etc/mantler/quantcpp.json"
+	quantCppInstallDir       = "/opt/mantler/quantcpp"
+	quantCppBinaryPath       = "/opt/mantler/quantcpp/quant-server"
+	quantCppModelsDir        = "/var/lib/mantler/models/quantcpp"
+	quantCppDefaultPort      = 8080
+	quantCppReadyTimeout     = 90 * time.Second
+	quantCppMaxHTTPBodyBytes = 1 << 20
 )
 
 type quantCppConfig struct {
@@ -327,7 +328,7 @@ func (d *quantCppDriver) benchmarkOnce(modelID string, prompt string, sampleOutp
 		return BenchmarkResult{}, fmt.Errorf("quantcpp benchmark request failed: %w", err)
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, quantCppMaxHTTPBodyBytes))
 	if resp.StatusCode >= 400 {
 		return BenchmarkResult{}, fmt.Errorf("quantcpp benchmark failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
@@ -397,7 +398,7 @@ func (d *quantCppDriver) CompletePrompt(
 		return PromptCompletionResult{}, fmt.Errorf("quantcpp completion request failed: %w", err)
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, quantCppMaxHTTPBodyBytes))
 	if resp.StatusCode >= 400 {
 		return PromptCompletionResult{}, fmt.Errorf("quantcpp completion failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
@@ -492,7 +493,7 @@ func (d *quantCppDriver) fetchRemoteModels() ([]string, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, quantCppMaxHTTPBodyBytes))
 		return nil, fmt.Errorf("quantcpp models endpoint failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	var payload struct {
@@ -531,7 +532,7 @@ func (d *quantCppDriver) waitForReady(timeout time.Duration) error {
 		if err == nil {
 			resp, reqErr := client.Do(req)
 			if reqErr == nil {
-				_, _ = io.ReadAll(resp.Body)
+				_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, quantCppMaxHTTPBodyBytes))
 				resp.Body.Close()
 				if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 					return nil
@@ -693,7 +694,7 @@ func resolveQuantCppReleaseAssetURL() (string, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, quantCppMaxHTTPBodyBytes))
 		return "", fmt.Errorf("github release metadata request failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	var payload struct {

@@ -23,7 +23,7 @@ func TestToInstalledOrchestratorsBuiltinReady(t *testing.T) {
 	installed := toInstalledOrchestrators(types.DesiredConfig{
 		Orchestrators: []types.DesiredOrchestrator{{
 			ID:   "builtin",
-			Name: "ClawControl Pipeline",
+			Name: "Mantler Pipeline",
 			Type: "builtin",
 		}},
 	})

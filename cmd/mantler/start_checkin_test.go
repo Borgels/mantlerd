@@ -82,7 +82,7 @@ func TestRunCheckInFollowUpDoesNotResendOutcomeEvents(t *testing.T) {
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 	})
 
-	runCheckIn(context.Background(), cfg, cl, runtimeManager, trainerManager, executor, outcomes, dispatcher, time.Now())
+	runCheckIn(context.Background(), cfg, cl, runtimeManager, trainerManager, executor, outcomes, dispatcher, time.Now(), true)
 	waitCtx, waitCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer waitCancel()
 	if !dispatcher.WaitForIdle(waitCtx) {
@@ -99,5 +99,98 @@ func TestRunCheckInFollowUpDoesNotResendOutcomeEvents(t *testing.T) {
 	}
 	if len(requests[1].OutcomeEvents) != 0 {
 		t.Fatalf("expected follow-up checkin to send 0 outcome events, got %d", len(requests[1].OutcomeEvents))
+	}
+}
+
+func TestRunCheckInWithoutFollowUpWhenDisabled(t *testing.T) {
+	var (
+		mu       sync.Mutex
+		requests []types.CheckinRequest
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/agent/checkin" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		var payload types.CheckinRequest
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		requests = append(requests, payload)
+		mu.Unlock()
+
+		response := map[string]any{
+			"data": types.CheckinResponse{
+				Ack:        true,
+				ServerTime: time.Now().UTC().Format(time.RFC3339),
+				DesiredConfig: types.DesiredConfig{
+					Harnesses: []types.DesiredHarness{
+						{ID: "h1", Name: "Harness 1", Type: "codex_cli"},
+					},
+				},
+			},
+		}
+		_ = json.NewEncoder(w).Encode(response)
+	}))
+	defer server.Close()
+
+	cl, err := client.New(server.URL, "test-token", true)
+	if err != nil {
+		t.Fatalf("create client: %v", err)
+	}
+	cfg := config.Config{ServerURL: server.URL, Token: "test-token", MachineID: "machine-1", Interval: 30 * time.Second, Insecure: true}
+	runtimeManager := runtime.NewManager()
+	trainerManager := trainer.NewManager()
+	executor := commands.NewExecutor(runtimeManager, trainerManager, cfg, nil, nil)
+	dispatcher := newCommandDispatcher(context.Background(), executor, cl, defaultLightCommandConcurrency)
+	outcomes := &outcomeBuffer{}
+
+	runCheckIn(context.Background(), cfg, cl, runtimeManager, trainerManager, executor, outcomes, dispatcher, time.Now(), false)
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer waitCancel()
+	if !dispatcher.WaitForIdle(waitCtx) {
+		t.Fatal("timed out waiting for command completion")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(requests) != 1 {
+		t.Fatalf("expected exactly 1 checkin request when follow-up disabled, got %d", len(requests))
+	}
+}
+
+func TestRunCheckInRateLimitedErrorReturnsBackoff(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/agent/checkin" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Retry-After", "1")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte("rate limited"))
+	}))
+	defer server.Close()
+
+	cl, err := client.New(server.URL, "test-token", true)
+	if err != nil {
+		t.Fatalf("create client: %v", err)
+	}
+	cfg := config.Config{ServerURL: server.URL, Token: "test-token", MachineID: "machine-1", Interval: 30 * time.Second, Insecure: true}
+	runtimeManager := runtime.NewManager()
+	trainerManager := trainer.NewManager()
+	executor := commands.NewExecutor(runtimeManager, trainerManager, cfg, nil, nil)
+	outcomes := &outcomeBuffer{}
+
+	result := runCheckIn(context.Background(), cfg, cl, runtimeManager, trainerManager, executor, outcomes, nil, time.Now(), true)
+	if result.success {
+		t.Fatal("expected checkin cycle to fail on 429")
+	}
+	if result.rateLimitBackoff != time.Second {
+		t.Fatalf("expected 1s rate-limit backoff, got %v", result.rateLimitBackoff)
+	}
+	if result.activeOperations {
+		t.Fatalf("expected no active operations on clean runtime, got activeOperations=%v", result.activeOperations)
 	}
 }

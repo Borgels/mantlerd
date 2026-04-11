@@ -31,3 +31,29 @@ func TestWriteOrchestratorPayloadFileWritesJSON(t *testing.T) {
 		t.Fatalf("expected json file extension, got %s", path)
 	}
 }
+
+func TestValidateOrchestratorArgs(t *testing.T) {
+	if err := validateOrchestratorArgs("crewai", []string{"--help", "--port=9000"}); err != nil {
+		t.Fatalf("expected allowed flags to pass: %v", err)
+	}
+	if err := validateOrchestratorArgs("crewai", []string{"--dangerous"}); err == nil {
+		t.Fatalf("expected disallowed flags to fail")
+	}
+}
+
+func TestSanitizeOrchestratorWorkingDir(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("user home: %v", err)
+	}
+	allowed := filepath.Join(home, "project")
+	if _, err := sanitizeOrchestratorWorkingDir(allowed); err != nil {
+		t.Fatalf("expected home subpath to be allowed: %v", err)
+	}
+	if _, err := sanitizeOrchestratorWorkingDir("relative/path"); err == nil {
+		t.Fatalf("expected relative path to fail")
+	}
+	if _, err := sanitizeOrchestratorWorkingDir("/tmp/not-allowed"); err == nil {
+		t.Fatalf("expected unapproved root to fail")
+	}
+}

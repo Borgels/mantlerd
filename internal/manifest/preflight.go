@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Borgels/mantlerd/internal/netutil"
 	"github.com/Borgels/mantlerd/internal/runtime"
 	"github.com/Borgels/mantlerd/internal/types"
 )
@@ -59,7 +60,7 @@ func probeModelEndpoint(endpoint string, runtimeName string) error {
 	client := &http.Client{
 		Timeout: 4 * time.Second,
 		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: netutil.IsLoopbackHost(parsed.Hostname())},
 		},
 	}
 	resp, err := client.Do(req)

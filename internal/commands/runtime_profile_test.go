@@ -1,8 +1,12 @@
 package commands
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -78,5 +82,78 @@ func TestApplyAndVerifyRuntimeProfileOverridesForVLLM(t *testing.T) {
 	statePath := runtimeProfileStatePath("vllm")
 	if _, err := os.Stat(statePath); err != nil {
 		t.Fatalf("expected runtime profile state file at %s: %v", statePath, err)
+	}
+}
+
+func TestSanitizeRuntimeProfileDestination(t *testing.T) {
+	tempDir := t.TempDir()
+	oldRoot := runtimeProfileStateRoot
+	runtimeProfileStateRoot = tempDir
+	defer func() { runtimeProfileStateRoot = oldRoot }()
+
+	valid := filepath.Join(tempDir, "nested", "profile.txt")
+	got, err := sanitizeRuntimeProfileDestination(valid)
+	if err != nil {
+		t.Fatalf("expected valid destination, got error: %v", err)
+	}
+	if got != valid {
+		t.Fatalf("unexpected sanitized destination: %s", got)
+	}
+
+	if _, err := sanitizeRuntimeProfileDestination("/tmp/outside-root"); err == nil {
+		t.Fatalf("expected destination outside root to fail")
+	}
+}
+
+func TestFilterRuntimeProfileEnv(t *testing.T) {
+	filtered := filterRuntimeProfileEnv("vllm", map[string]string{
+		"VLLM_PORT":    "8000",
+		"CUDA_VISIBLE": "0",
+		"LD_PRELOAD":   "/tmp/libhack.so",
+	})
+	if _, ok := filtered["VLLM_PORT"]; !ok {
+		t.Fatalf("expected VLLM_PORT to be preserved")
+	}
+	if _, ok := filtered["LD_PRELOAD"]; ok {
+		t.Fatalf("expected LD_PRELOAD to be filtered out")
+	}
+}
+
+func TestDownloadProfileFileRequiresHTTPS(t *testing.T) {
+	tempDir := t.TempDir()
+	dest := filepath.Join(tempDir, "profile.txt")
+	err := downloadProfileFile("http://example.com/profile.txt", dest)
+	if err == nil || !strings.Contains(err.Error(), "must use https") {
+		t.Fatalf("expected non-https source to fail, got: %v", err)
+	}
+}
+
+func TestDownloadProfileFileWritesSecureFile(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("profile-data"))
+	}))
+	defer server.Close()
+	oldClient := profileDownloadHTTPClient
+	profileDownloadHTTPClient = server.Client()
+	defer func() { profileDownloadHTTPClient = oldClient }()
+
+	tempDir := t.TempDir()
+	dest := filepath.Join(tempDir, "profile.txt")
+	if err := downloadProfileFile(server.URL, dest); err != nil {
+		t.Fatalf("downloadProfileFile failed: %v", err)
+	}
+	raw, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatalf("read downloaded file: %v", err)
+	}
+	if string(raw) != "profile-data" {
+		t.Fatalf("unexpected downloaded content: %q", string(raw))
+	}
+	info, err := os.Stat(dest)
+	if err != nil {
+		t.Fatalf("stat downloaded file: %v", err)
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
+		t.Fatalf("expected file mode 0600, got %#o", info.Mode().Perm())
 	}
 }

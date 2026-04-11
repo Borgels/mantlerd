@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -347,16 +348,21 @@ func mergeDoctorConfig(fileCfg config.Config, viperCfg config.Config) config.Con
 	return merged
 }
 
-func maskURL(url string) string {
-	if url == "" {
+func maskURL(raw string) string {
+	if raw == "" {
 		return "(not set)"
 	}
-	// Show protocol and domain, mask the rest
-	parts := strings.SplitN(url, "://", 2)
-	if len(parts) == 2 {
-		return parts[0] + "://" + parts[1]
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return "(invalid URL)"
 	}
-	return url
+	parsed.User = nil
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	if parsed.Path != "" && parsed.Path != "/" {
+		parsed.Path = "/..."
+	}
+	return parsed.String()
 }
 
 func verifyWritableDir(path string) error {

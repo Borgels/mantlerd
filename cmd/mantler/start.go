@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"math/rand"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -26,7 +28,10 @@ import (
 const (
 	defaultLightCommandConcurrency = 8
 	heavyCommandQueueSize          = 64
+	maxDegradedInterval            = 5 * time.Minute
 )
+
+var outcomeBufferPath = "/var/lib/mantler/outcome-buffer.json"
 
 var startCmd = &cobra.Command{
 	Use:   "start",
@@ -43,6 +48,7 @@ func init() {
 func runStart(cmd *cobra.Command, args []string) {
 	// Load configuration
 	cfg := loadConfig(cmd)
+	configureStructuredLogging(cfg.LogLevel)
 
 	// Create API client
 	cl, err := client.New(cfg.ServerURL, cfg.Token, cfg.Insecure)
@@ -50,7 +56,7 @@ func runStart(cmd *cobra.Command, args []string) {
 		log.Fatalf("create api client: %v", err)
 	}
 
-	outcomes := &outcomeBuffer{}
+	outcomes := newOutcomeBuffer()
 
 	// Create runtime manager and executor
 	runtimeManager := runtimeagent.NewManager()
@@ -67,8 +73,14 @@ func runStart(cmd *cobra.Command, args []string) {
 
 	// Run initial check-in
 	startedAt := time.Now()
-	activeOperations := runCheckIn(ctx, cfg, cl, runtimeManager, trainerManager, executor, outcomes, dispatcher, startedAt)
-	timer := time.NewTimer(nextCheckinInterval(cfg.Interval, activeOperations))
+	consecutiveFailures := 0
+	cycle := runCheckIn(ctx, cfg, cl, runtimeManager, trainerManager, executor, outcomes, dispatcher, startedAt, consecutiveFailures == 0)
+	if cycle.success {
+		consecutiveFailures = 0
+	} else {
+		consecutiveFailures++
+	}
+	timer := time.NewTimer(computeCheckinDelay(cfg.Interval, cycle.activeOperations, consecutiveFailures, cycle.rateLimitBackoff))
 	defer timer.Stop()
 
 	for {
@@ -77,8 +89,13 @@ func runStart(cmd *cobra.Command, args []string) {
 			log.Println("Shutting down agent...")
 			return
 		case <-timer.C:
-			activeOperations = runCheckIn(ctx, cfg, cl, runtimeManager, trainerManager, executor, outcomes, dispatcher, startedAt)
-			timer.Reset(nextCheckinInterval(cfg.Interval, activeOperations))
+			cycle = runCheckIn(ctx, cfg, cl, runtimeManager, trainerManager, executor, outcomes, dispatcher, startedAt, consecutiveFailures == 0)
+			if cycle.success {
+				consecutiveFailures = 0
+			} else {
+				consecutiveFailures++
+			}
+			timer.Reset(computeCheckinDelay(cfg.Interval, cycle.activeOperations, consecutiveFailures, cycle.rateLimitBackoff))
 		}
 	}
 }
@@ -156,6 +173,12 @@ func loadConfig(cmd *cobra.Command) config.Config {
 type outcomeBuffer struct {
 	mu     sync.Mutex
 	events []types.OutcomeEvent
+}
+
+func newOutcomeBuffer() *outcomeBuffer {
+	buffer := &outcomeBuffer{}
+	buffer.load()
+	return buffer
 }
 
 type commandDispatcher struct {
@@ -242,7 +265,7 @@ func (d *commandDispatcher) execute(command types.AgentCommand) {
 	} else {
 		log.Printf("command %s (%s) completed", command.ID, command.Type)
 	}
-	ackErr := ackCommandWithRetry(d.client, types.AckRequest{
+	ackErr := ackCommandWithRetry(d.ctx, d.client, types.AckRequest{
 		CommandID:     command.ID,
 		Status:        status,
 		Details:       result.Details,
@@ -279,6 +302,10 @@ func (b *outcomeBuffer) Add(event types.OutcomeEvent) {
 	}
 	b.mu.Lock()
 	b.events = append(b.events, event)
+	if len(b.events) > 2000 {
+		b.events = append([]types.OutcomeEvent{}, b.events[len(b.events)-2000:]...)
+	}
+	b.persistLocked()
 	b.mu.Unlock()
 }
 
@@ -301,9 +328,38 @@ func (b *outcomeBuffer) DropPrefix(count int) {
 	defer b.mu.Unlock()
 	if count >= len(b.events) {
 		b.events = nil
+		b.persistLocked()
 		return
 	}
 	b.events = append([]types.OutcomeEvent{}, b.events[count:]...)
+	b.persistLocked()
+}
+
+func (b *outcomeBuffer) load() {
+	raw, err := os.ReadFile(outcomeBufferPath)
+	if err != nil {
+		return
+	}
+	var events []types.OutcomeEvent
+	if err := json.Unmarshal(raw, &events); err != nil {
+		return
+	}
+	b.events = events
+}
+
+func (b *outcomeBuffer) persistLocked() {
+	if err := os.MkdirAll(filepath.Dir(outcomeBufferPath), 0o755); err != nil {
+		log.Printf("failed to create outcome buffer directory: %v", err)
+		return
+	}
+	raw, err := json.Marshal(b.events)
+	if err != nil {
+		log.Printf("failed to marshal outcome buffer: %v", err)
+		return
+	}
+	if err := os.WriteFile(outcomeBufferPath, raw, 0o600); err != nil {
+		log.Printf("failed to persist outcome buffer: %v", err)
+	}
 }
 
 func runCheckIn(
@@ -316,7 +372,9 @@ func runCheckIn(
 	outcomes *outcomeBuffer,
 	dispatcher *commandDispatcher,
 	startedAt time.Time,
-) bool {
+	allowFollowup bool,
+) checkinCycleResult {
+	flushFailedAcks(cl)
 	cachedDesired := loadCachedDesiredConfig()
 
 	report := discovery.Collect()
@@ -378,8 +436,20 @@ func runCheckIn(
 	})
 	if err != nil {
 		log.Printf("checkin error: %v", err)
+		rateLimitBackoff := time.Duration(0)
+		if client.IsRateLimited(err) {
+			rateLimitBackoff = client.RetryAfterFromError(err)
+			if rateLimitBackoff <= 0 {
+				rateLimitBackoff = 30 * time.Second
+			}
+			log.Printf("rate limited by server, backing off for %v", rateLimitBackoff)
+		}
 		enforceDesiredConfig(runtimeManager, cachedDesired)
-		return hasActiveWork
+		return checkinCycleResult{
+			activeOperations: hasActiveWork || (dispatcher != nil && dispatcher.HasActiveWork()),
+			success:          false,
+			rateLimitBackoff: rateLimitBackoff,
+		}
 	}
 	if len(pendingOutcomes) > 0 {
 		outcomes.DropPrefix(len(pendingOutcomes))
@@ -390,7 +460,7 @@ func runCheckIn(
 	}
 	desiredHarnesses := toInstalledHarnesses(resp.DesiredConfig)
 	desiredOrchestrators := toInstalledOrchestrators(resp.DesiredConfig)
-	if harnessReportsDiffer(payload.InstalledHarnesses, desiredHarnesses) || orchestratorReportsDiffer(payload.InstalledOrchestrators, desiredOrchestrators) {
+	if allowFollowup && (harnessReportsDiffer(payload.InstalledHarnesses, desiredHarnesses) || orchestratorReportsDiffer(payload.InstalledOrchestrators, desiredOrchestrators)) {
 		refreshPayload := payload
 		refreshPayload.InstalledHarnesses = desiredHarnesses
 		refreshPayload.InstalledOrchestrators = desiredOrchestrators
@@ -399,7 +469,11 @@ func runCheckIn(
 		refreshCtx, refreshCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer refreshCancel()
 		if _, err := cl.Checkin(refreshCtx, refreshPayload); err != nil {
-			log.Printf("follow-up harness/orchestrator refresh checkin failed: %v", err)
+			if client.IsRateLimited(err) {
+				log.Printf("follow-up harness/orchestrator refresh checkin rate-limited; skipping")
+			} else {
+				log.Printf("follow-up harness/orchestrator refresh checkin failed: %v", err)
+			}
 		}
 	}
 	enforceDesiredConfig(runtimeManager, resp.DesiredConfig)
@@ -412,7 +486,10 @@ func runCheckIn(
 	if dispatcher != nil && len(resp.Commands) > 0 {
 		dispatcher.EnqueueBatch(resp.Commands)
 	}
-	return hasActiveWork || (dispatcher != nil && dispatcher.HasActiveWork())
+	return checkinCycleResult{
+		activeOperations: hasActiveWork || (dispatcher != nil && dispatcher.HasActiveWork()),
+		success:          true,
+	}
 }
 
 func readLoadAvg() []float64 {
@@ -508,8 +585,14 @@ func sendInProgressAck(cl *client.Client, payload types.AckRequest) {
 		return
 	}
 	payload.Status = "in_progress"
-	err := cl.Ack(context.Background(), payload)
+	ackCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := cl.Ack(ackCtx, payload)
 	if err != nil {
+		if client.IsRateLimited(err) {
+			log.Printf("progress ack rate-limited for %s; skipping", payload.CommandID)
+			return
+		}
 		log.Printf("progress ack failed for %s: %v", payload.CommandID, err)
 	}
 }
@@ -544,13 +627,67 @@ func hasActiveOperations(runtimeStatuses map[types.RuntimeType]types.RuntimeStat
 	return false
 }
 
+type checkinCycleResult struct {
+	activeOperations bool
+	success          bool
+	rateLimitBackoff time.Duration
+}
+
 func nextCheckinInterval(idleInterval time.Duration, active bool) time.Duration {
-	if !active {
-		return idleInterval
+	interval := idleInterval
+	if active {
+		const activeInterval = 15 * time.Second
+		if idleInterval > activeInterval {
+			interval = activeInterval
+		}
 	}
-	const activeInterval = 15 * time.Second
-	if idleInterval <= activeInterval {
-		return idleInterval
+	if interval <= 0 {
+		interval = 15 * time.Second
 	}
-	return activeInterval
+	baseJitter := int64(interval) * 2 / 5
+	if baseJitter <= 0 {
+		return interval
+	}
+	jitter := time.Duration(rand.Int63n(baseJitter))
+	return interval - interval/5 + jitter
+}
+
+func computeCheckinDelay(
+	idleInterval time.Duration,
+	active bool,
+	consecutiveFailures int,
+	rateLimitedDelay time.Duration,
+) time.Duration {
+	if rateLimitedDelay > 0 {
+		delay := rateLimitedDelay
+		if delay > maxDegradedInterval {
+			delay = maxDegradedInterval
+		}
+		// Spread retries to avoid synchronized bursts after rate limits.
+		jitterWindow := int64(delay) / 5
+		if jitterWindow > 0 {
+			jitter := time.Duration(rand.Int63n(jitterWindow*2+1)) - time.Duration(jitterWindow)
+			delay += jitter
+			if delay < time.Second {
+				delay = time.Second
+			}
+			if delay > maxDegradedInterval {
+				delay = maxDegradedInterval
+			}
+		}
+		return delay
+	}
+	interval := nextCheckinInterval(idleInterval, active)
+	if consecutiveFailures <= 0 {
+		return interval
+	}
+	multiplier := 1
+	for i := 0; i < consecutiveFailures && multiplier < 8; i++ {
+		multiplier *= 2
+	}
+	delay := interval * time.Duration(multiplier)
+	if delay > maxDegradedInterval {
+		return maxDegradedInterval
+	}
+	return delay
 }

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,6 +22,7 @@ import (
 
 	"github.com/Borgels/mantlerd/internal/config"
 	agenteval "github.com/Borgels/mantlerd/internal/eval"
+	"github.com/Borgels/mantlerd/internal/netutil"
 	agentruntime "github.com/Borgels/mantlerd/internal/runtime"
 	agenttrainer "github.com/Borgels/mantlerd/internal/trainer"
 	"github.com/Borgels/mantlerd/internal/types"
@@ -568,6 +570,14 @@ func (e *Executor) ExecuteWithContext(ctx context.Context, command types.AgentCo
 		return ExecutionResult{
 			Details: fmt.Sprintf("self shutdown scheduled in %d seconds (haltMachine=%t)", delaySeconds, halt),
 		}, nil
+	case "stop_agent", "uninstall_agent":
+		delaySeconds := intParam(command.Params, "delaySeconds", 5)
+		if err := scheduleSelfShutdown(delaySeconds, false); err != nil {
+			return ExecutionResult{}, err
+		}
+		return ExecutionResult{
+			Details: fmt.Sprintf("agent shutdown scheduled in %d seconds", delaySeconds),
+		}, nil
 	case "run_harness_exec":
 		return e.runHarnessExec(command)
 	case "harness_login":
@@ -798,7 +808,10 @@ var (
 	llamaCppRuntimeConfigPath = "/etc/mantler/llamacpp.json"
 	quantCppRuntimeConfigPath = "/etc/mantler/quantcpp.json"
 	runtimeProfileStateRoot   = "/var/lib/mantler/runtime-profiles"
+	profileDownloadHTTPClient = &http.Client{Timeout: 30 * time.Second}
 )
+
+const maxRuntimeProfileFileSize = 512 << 20 // 512 MiB
 
 // resolveHostPath converts a container destination path to a host path.
 // If the destination starts with a known mount prefix, it's rewritten.
@@ -933,7 +946,11 @@ func applyRuntimeProfileOverrides(params map[string]interface{}, runtimeHint str
 		}
 		// Resolve container path to host path based on runtime mount mapping
 		hostPath := resolveHostPath(runtimeName, dst)
-		if err := downloadProfileFile(src, hostPath); err != nil {
+		safeHostPath, err := sanitizeRuntimeProfileDestination(hostPath)
+		if err != nil {
+			return err
+		}
+		if err := downloadProfileFile(src, safeHostPath); err != nil {
 			return err
 		}
 	}
@@ -947,11 +964,8 @@ func applyRuntimeProfileOverrides(params map[string]interface{}, runtimeHint str
 		if len(profile.ExtraArgs) > 0 {
 			values["VLLM_EXTRA_ARGS"] = strings.TrimSpace(strings.Join(profile.ExtraArgs, " "))
 		}
-		for key, value := range profile.EnvironmentVariables {
-			if strings.TrimSpace(key) == "" {
-				continue
-			}
-			values[strings.TrimSpace(key)] = strings.TrimSpace(value)
+		for key, value := range filterRuntimeProfileEnv(runtimeName, profile.EnvironmentVariables) {
+			values[key] = value
 		}
 		if err := writeEnvFile(vllmRuntimeEnvPath, values); err != nil {
 			return err
@@ -965,11 +979,8 @@ func applyRuntimeProfileOverrides(params map[string]interface{}, runtimeHint str
 		if len(profile.ExtraArgs) > 0 {
 			values["TENSORRT_EXTRA_ARGS"] = strings.TrimSpace(strings.Join(profile.ExtraArgs, " "))
 		}
-		for key, value := range profile.EnvironmentVariables {
-			if strings.TrimSpace(key) == "" {
-				continue
-			}
-			values[strings.TrimSpace(key)] = strings.TrimSpace(value)
+		for key, value := range filterRuntimeProfileEnv(runtimeName, profile.EnvironmentVariables) {
+			values[key] = value
 		}
 		if err := writeEnvFile(tensorrtRuntimeEnvPath, values); err != nil {
 			return err
@@ -981,7 +992,15 @@ func applyRuntimeProfileOverrides(params map[string]interface{}, runtimeHint str
 }
 
 func downloadProfileFile(source string, destination string) error {
-	resp, err := (&http.Client{Timeout: 30 * time.Second}).Get(source)
+	parsed, err := url.Parse(source)
+	if err != nil {
+		return fmt.Errorf("invalid required profile file source %s: %w", source, err)
+	}
+	if !strings.EqualFold(parsed.Scheme, "https") {
+		return fmt.Errorf("required profile file source must use https: %s", source)
+	}
+
+	resp, err := profileDownloadHTTPClient.Get(source)
 	if err != nil {
 		return fmt.Errorf("download required profile file %s: %w", source, err)
 	}
@@ -989,17 +1008,59 @@ func downloadProfileFile(source string, destination string) error {
 	if resp.StatusCode >= 400 {
 		return fmt.Errorf("download required profile file %s failed with status %d", source, resp.StatusCode)
 	}
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("read required profile file %s: %w", source, err)
-	}
 	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
 		return fmt.Errorf("create required profile file directory: %w", err)
 	}
-	if err := os.WriteFile(destination, body, 0o644); err != nil {
+	dst, err := os.OpenFile(destination, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	if err != nil {
 		return fmt.Errorf("write required profile file: %w", err)
 	}
+	defer dst.Close()
+
+	limitedReader := io.LimitReader(resp.Body, maxRuntimeProfileFileSize+1)
+	written, err := io.Copy(dst, limitedReader)
+	if err != nil {
+		return fmt.Errorf("read required profile file %s: %w", source, err)
+	}
+	if written > maxRuntimeProfileFileSize {
+		return fmt.Errorf("required profile file %s exceeds %d bytes", source, maxRuntimeProfileFileSize)
+	}
 	return nil
+}
+
+func sanitizeRuntimeProfileDestination(destination string) (string, error) {
+	cleanDest := filepath.Clean(strings.TrimSpace(destination))
+	if cleanDest == "." || cleanDest == "" {
+		return "", fmt.Errorf("required profile destination is empty")
+	}
+	cleanRoot := filepath.Clean(runtimeProfileStateRoot)
+	prefix := cleanRoot + string(os.PathSeparator)
+	if cleanDest != cleanRoot && !strings.HasPrefix(cleanDest, prefix) {
+		return "", fmt.Errorf("required profile destination %q must be under %q", destination, runtimeProfileStateRoot)
+	}
+	return cleanDest, nil
+}
+
+func filterRuntimeProfileEnv(runtimeName string, env map[string]string) map[string]string {
+	allowedPrefixes := map[string][]string{
+		"vllm":     {"VLLM_", "HF_", "HUGGINGFACE_", "HUGGING_FACE_", "NVIDIA_", "CUDA_"},
+		"tensorrt": {"TENSORRT_", "TRT_", "NVIDIA_", "CUDA_"},
+	}
+	result := map[string]string{}
+	prefixes := allowedPrefixes[strings.ToLower(strings.TrimSpace(runtimeName))]
+	for key, value := range env {
+		trimmedKey := strings.TrimSpace(key)
+		if trimmedKey == "" {
+			continue
+		}
+		for _, prefix := range prefixes {
+			if strings.HasPrefix(trimmedKey, prefix) {
+				result[trimmedKey] = strings.TrimSpace(value)
+				break
+			}
+		}
+	}
+	return result
 }
 
 func readEnvFile(path string) map[string]string {
@@ -1354,7 +1415,6 @@ func (e *Executor) startAgentUpdate(version string) (string, error) {
 	installer := "https://raw.githubusercontent.com/Borgels/mantlerd/master/scripts/install.sh"
 	commandParts := []string{
 		"curl", "-fsSL", shellQuote(installer), "|", "sh", "-s", "--",
-		"--token", shellQuote(e.cfg.Token),
 		"--machine", shellQuote(e.cfg.MachineID),
 		"--server", shellQuote(e.cfg.ServerURL),
 		"--version", shellQuote(version),
@@ -1368,7 +1428,11 @@ func (e *Executor) startAgentUpdate(version string) (string, error) {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "sh", "-c", commandLine)
-	cmd.Env = append(os.Environ(), "MANTLERD_SELF_UPDATE=true", "CLAWCONTROL_AGENT_SELF_UPDATE=true")
+	cmd.Env = append(
+		os.Environ(),
+		"MANTLERD_SELF_UPDATE=true",
+		"MANTLER_TOKEN="+e.cfg.Token,
+	)
 	output, err := cmd.CombinedOutput()
 	details := strings.TrimSpace(string(output))
 	if details == "" {
@@ -1755,7 +1819,7 @@ func gooseDaemonReachable(baseURL string) bool {
 	client := &http.Client{
 		Timeout: 3 * time.Second,
 		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: netutil.ShouldSkipTLSVerifyForURL(baseURL)},
 		},
 	}
 	resp, err := client.Get(baseURL + "/status")

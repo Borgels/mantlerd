@@ -21,30 +21,30 @@ VLLM_PYTHON="${VLLM_VENV_PATH}/bin/python3"
 RUNTIME_STATE_DIR="${CONFIG_DIR}/runtimes"
 HF_CACHE_DIR="/var/cache/huggingface"
 AGENT_GROUP="mantler"
-INTERVAL_MS="${MANTLERD_INTERVAL_MS:-${CLAWCONTROL_AGENT_INTERVAL_MS:-30000}}"
-LOG_LEVEL="${MANTLERD_LOG_LEVEL:-${CLAWCONTROL_AGENT_LOG_LEVEL:-info}}"
-INSECURE="${MANTLERD_INSECURE:-${CLAWCONTROL_AGENT_INSECURE:-false}}"
-VERSION="${MANTLERD_VERSION:-${CLAWCONTROL_AGENT_VERSION:-latest}}"
-OLLAMA_CONFIGURE_REMOTE="${MANTLER_OLLAMA_CONFIGURE_REMOTE:-${CLAWCONTROL_OLLAMA_CONFIGURE_REMOTE:-true}}"
-OLLAMA_HOST="${MANTLER_OLLAMA_HOST:-${CLAWCONTROL_OLLAMA_HOST:-0.0.0.0:11434}}"
-VLLM_CONFIGURE="${MANTLER_VLLM_CONFIGURE:-${CLAWCONTROL_VLLM_CONFIGURE:-true}}"
-VLLM_PREINSTALL="${MANTLER_VLLM_PREINSTALL:-${CLAWCONTROL_VLLM_PREINSTALL:-true}}"
-VLLM_RUNTIME_MODE="${MANTLER_VLLM_RUNTIME_MODE:-${CLAWCONTROL_VLLM_RUNTIME_MODE:-auto}}"
-VLLM_PORT="${MANTLER_VLLM_PORT:-${CLAWCONTROL_VLLM_PORT:-8000}}"
-VLLM_GPU_MEMORY_UTILIZATION="${MANTLER_VLLM_GPU_MEMORY_UTILIZATION:-${CLAWCONTROL_VLLM_GPU_MEMORY_UTILIZATION:-0.9}}"
-VLLM_TRUST_REMOTE_CODE="${MANTLER_VLLM_TRUST_REMOTE_CODE:-${CLAWCONTROL_VLLM_TRUST_REMOTE_CODE:-false}}"
-VLLM_EXTRA_ARGS="${MANTLER_VLLM_EXTRA_ARGS:-${CLAWCONTROL_VLLM_EXTRA_ARGS:-}}"
-VLLM_HF_TOKEN="${MANTLER_HF_TOKEN:-${CLAWCONTROL_HF_TOKEN:-${HF_TOKEN:-}}}"
-VLLM_HF_HUB_TOKEN="${MANTLER_HUGGING_FACE_HUB_TOKEN:-${CLAWCONTROL_HUGGING_FACE_HUB_TOKEN:-${HUGGING_FACE_HUB_TOKEN:-}}}"
-SELF_UPDATE_MODE="${MANTLERD_SELF_UPDATE:-${CLAWCONTROL_AGENT_SELF_UPDATE:-false}}"
+INTERVAL_MS="${MANTLERD_INTERVAL_MS:-30000}"
+LOG_LEVEL="${MANTLERD_LOG_LEVEL:-info}"
+INSECURE="${MANTLERD_INSECURE:-false}"
+VERSION="${MANTLERD_VERSION:-latest}"
+OLLAMA_CONFIGURE_REMOTE="${MANTLER_OLLAMA_CONFIGURE_REMOTE:-true}"
+OLLAMA_HOST="${MANTLER_OLLAMA_HOST:-0.0.0.0:11434}"
+VLLM_CONFIGURE="${MANTLER_VLLM_CONFIGURE:-true}"
+VLLM_PREINSTALL="${MANTLER_VLLM_PREINSTALL:-true}"
+VLLM_RUNTIME_MODE="${MANTLER_VLLM_RUNTIME_MODE:-auto}"
+VLLM_PORT="${MANTLER_VLLM_PORT:-8000}"
+VLLM_GPU_MEMORY_UTILIZATION="${MANTLER_VLLM_GPU_MEMORY_UTILIZATION:-0.9}"
+VLLM_TRUST_REMOTE_CODE="${MANTLER_VLLM_TRUST_REMOTE_CODE:-false}"
+VLLM_EXTRA_ARGS="${MANTLER_VLLM_EXTRA_ARGS:-}"
+VLLM_HF_TOKEN="${MANTLER_HF_TOKEN:-${HF_TOKEN:-}}"
+VLLM_HF_HUB_TOKEN="${MANTLER_HUGGING_FACE_HUB_TOKEN:-${HUGGING_FACE_HUB_TOKEN:-}}"
+SELF_UPDATE_MODE="${MANTLERD_SELF_UPDATE:-false}"
 LAUNCHD_LABEL="com.mantler.mantlerd"
 LAUNCHD_PLIST=""
 LAUNCHD_STDOUT_PATH=""
 LAUNCHD_STDERR_PATH=""
 
-TOKEN=""
+TOKEN="${MANTLER_TOKEN:-}"
 MACHINE_ID=""
-SERVER_URL="${MANTLER_SERVER_URL:-${CLAWCONTROL_SERVER_URL:-}}"
+SERVER_URL="${MANTLER_SERVER_URL:-}"
 SUDO=""
 TMP_DIR=""
 BIN_TMP=""
@@ -54,7 +54,7 @@ INSTALLING_USER=""
 
 usage() {
   cat <<EOF
-Usage: install.sh --token <token> --machine <machine-id> --server <server-url> [--version <tag|latest>] [--insecure]
+Usage: install.sh [--token <token>] --machine <machine-id> --server <server-url> [--version <tag|latest>] [--insecure]
 
 Environment overrides:
   MANTLERD_VERSION      Release tag (default: latest)
@@ -72,7 +72,7 @@ Environment overrides:
   MANTLER_VLLM_EXTRA_ARGS    extra CLI args appended to vLLM serve
   MANTLER_HF_TOKEN           optional Hugging Face token persisted for vLLM model pulls
   MANTLER_HUGGING_FACE_HUB_TOKEN optional Hugging Face Hub token persisted for vLLM model pulls
-  Legacy CLAWCONTROL_* env vars are still accepted for compatibility.
+  MANTLER_TOKEN              agent token (alternative to --token)
 EOF
 }
 
@@ -205,7 +205,7 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-[ -n "$TOKEN" ] || { usage; fatal "Missing --token"; }
+[ -n "$TOKEN" ] || { usage; fatal "Missing token (--token or MANTLER_TOKEN)"; }
 [ -n "$MACHINE_ID" ] || { usage; fatal "Missing --machine"; }
 [ -n "$SERVER_URL" ] || { usage; fatal "Missing --server"; }
 
@@ -221,7 +221,7 @@ case "$INSECURE" in
   true|false)
     ;;
   *)
-    fatal "MANTLERD_INSECURE (or CLAWCONTROL_AGENT_INSECURE) must be true or false"
+    fatal "MANTLERD_INSECURE must be true or false"
     ;;
 esac
 
@@ -229,7 +229,7 @@ case "$VLLM_CONFIGURE" in
   true|false)
     ;;
   *)
-    fatal "MANTLER_VLLM_CONFIGURE (or CLAWCONTROL_VLLM_CONFIGURE) must be true or false"
+    fatal "MANTLER_VLLM_CONFIGURE must be true or false"
     ;;
 esac
 
@@ -237,7 +237,7 @@ case "$VLLM_PREINSTALL" in
   true|false)
     ;;
   *)
-    fatal "MANTLER_VLLM_PREINSTALL (or CLAWCONTROL_VLLM_PREINSTALL) must be true or false"
+    fatal "MANTLER_VLLM_PREINSTALL must be true or false"
     ;;
 esac
 
@@ -245,7 +245,7 @@ case "$VLLM_RUNTIME_MODE" in
   auto|native|container)
     ;;
   *)
-    fatal "MANTLER_VLLM_RUNTIME_MODE (or CLAWCONTROL_VLLM_RUNTIME_MODE) must be auto, native, or container"
+    fatal "MANTLER_VLLM_RUNTIME_MODE must be auto, native, or container"
     ;;
 esac
 
@@ -253,7 +253,7 @@ case "$VLLM_TRUST_REMOTE_CODE" in
   true|false)
     ;;
   *)
-    fatal "MANTLER_VLLM_TRUST_REMOTE_CODE (or CLAWCONTROL_VLLM_TRUST_REMOTE_CODE) must be true or false"
+    fatal "MANTLER_VLLM_TRUST_REMOTE_CODE must be true or false"
     ;;
 esac
 
@@ -261,7 +261,7 @@ case "$SELF_UPDATE_MODE" in
   true|false)
     ;;
   *)
-    fatal "MANTLERD_SELF_UPDATE (or CLAWCONTROL_AGENT_SELF_UPDATE) must be true or false"
+    fatal "MANTLERD_SELF_UPDATE must be true or false"
     ;;
 esac
 

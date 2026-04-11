@@ -69,8 +69,6 @@ launchctl print "gui/$(id -u)/com.mantler.mantlerd"
 - Starts daemon with:
   - `ExecStart=/usr/local/bin/mantlerd start --config /etc/mantler/agent.json`
 
-Legacy `CLAWCONTROL_*` installer environment variables are still accepted for compatibility during migration.
-
 ## Configuration
 
 Default config path:
