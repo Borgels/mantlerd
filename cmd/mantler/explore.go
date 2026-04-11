@@ -70,167 +70,199 @@ func runExplore(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("error creating API client: %w", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
-	defer cancel()
-	exploreResp, err := cl.Explore(ctx, types.ExploreQuery{
-		Runtime:     strings.TrimSpace(exploreRuntime),
-		ModelID:     strings.TrimSpace(exploreModel),
-		Workload:    workload,
-		MaxAttempts: 5,
-	})
-	if err != nil {
-		return fmt.Errorf("explore request failed: %w", err)
-	}
-
-	runtimeName := strings.TrimSpace(exploreResp.Selection.Runtime)
-	modelID := strings.TrimSpace(exploreResp.Selection.ModelID)
-	if runtimeName == "" || modelID == "" {
-		return fmt.Errorf("explore recommendation is missing runtime/model data")
-	}
-	if !exploreJSON {
-		fmt.Printf("Recommended stack: %s + %s\n", runtimeName, modelID)
-		fmt.Printf("Compatibility: allowed=%t confidence=%s blockers=%d warnings=%d\n",
-			exploreResp.Plan.Compatibility.Allowed,
-			strings.TrimSpace(exploreResp.Plan.Confidence),
-			len(exploreResp.Plan.Compatibility.Blockers),
-			len(exploreResp.Plan.Compatibility.Warnings),
-		)
-		if image := strings.TrimSpace(exploreResp.Plan.RuntimePlan.Image); image != "" {
-			fmt.Printf("Runtime plan image: %s\n", image)
+	runtimeConstraint := strings.TrimSpace(exploreRuntime)
+	for recommendationAttempt := 0; recommendationAttempt < 2; recommendationAttempt++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+		exploreResp, exploreErr := cl.Explore(ctx, types.ExploreQuery{
+			Runtime:     runtimeConstraint,
+			ModelID:     strings.TrimSpace(exploreModel),
+			Workload:    workload,
+			MaxAttempts: 5,
+		})
+		cancel()
+		if exploreErr != nil {
+			return fmt.Errorf("explore request failed: %w", exploreErr)
 		}
-		if len(exploreResp.Plan.RuntimePlan.Args) > 0 {
-			fmt.Printf("Runtime plan args: %s\n", strings.Join(exploreResp.Plan.RuntimePlan.Args, " "))
-		}
-	}
 
-	if !exploreYes && !exploreJSON {
-		fmt.Printf("Proceed with %s + %s? [Y/n] ", runtimeName, modelID)
-		reader := bufio.NewReader(os.Stdin)
-		answer, _ := reader.ReadString('\n')
-		answer = strings.ToLower(strings.TrimSpace(answer))
-		if answer != "" && answer != "y" && answer != "yes" {
-			fmt.Println("Cancelled.")
+		runtimeName := strings.TrimSpace(exploreResp.Selection.Runtime)
+		modelID := strings.TrimSpace(exploreResp.Selection.ModelID)
+		if runtimeName == "" || modelID == "" {
+			return fmt.Errorf("explore recommendation is missing runtime/model data")
+		}
+		if !exploreJSON {
+			fmt.Printf("Recommended stack: %s + %s\n", runtimeName, modelID)
+			fmt.Printf("Compatibility: allowed=%t confidence=%s blockers=%d warnings=%d\n",
+				exploreResp.Plan.Compatibility.Allowed,
+				strings.TrimSpace(exploreResp.Plan.Confidence),
+				len(exploreResp.Plan.Compatibility.Blockers),
+				len(exploreResp.Plan.Compatibility.Warnings),
+			)
+			if image := strings.TrimSpace(exploreResp.Plan.RuntimePlan.Image); image != "" {
+				fmt.Printf("Runtime plan image: %s\n", image)
+			}
+			if len(exploreResp.Plan.RuntimePlan.Args) > 0 {
+				fmt.Printf("Runtime plan args: %s\n", strings.Join(exploreResp.Plan.RuntimePlan.Args, " "))
+			}
+		}
+
+		if !exploreYes && !exploreJSON {
+			fmt.Printf("Proceed with %s + %s? [Y/n] ", runtimeName, modelID)
+			reader := bufio.NewReader(os.Stdin)
+			answer, _ := reader.ReadString('\n')
+			answer = strings.ToLower(strings.TrimSpace(answer))
+			if answer != "" && answer != "y" && answer != "yes" {
+				fmt.Println("Cancelled.")
+				return nil
+			}
+		}
+
+		manager := runtime.NewManager()
+		if err := manager.EnsureRuntime(runtimeName); err != nil {
+			if recommendationAttempt == 0 && shouldFallbackToOllama(runtimeName, err) {
+				if !exploreJSON {
+					fmt.Fprintf(os.Stderr, "Warning: runtime %s failed preflight (%v), retrying explore with ollama fallback\n", runtimeName, err)
+				}
+				runtimeConstraint = "ollama"
+				continue
+			}
+			return fmt.Errorf("failed to ensure runtime %s: %w", runtimeName, err)
+		}
+		restoreRuntimePlan := func() {}
+		if restore, applyErr := applyExploreRuntimePlan(runtimeName, exploreResp.Plan); applyErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to apply runtime plan overrides: %v\n", applyErr)
+		} else {
+			restoreRuntimePlan = restore
+		}
+		if err := manager.PrepareModelWithRuntime(modelID, runtimeName, nil); err != nil {
+			restoreRuntimePlan()
+			if recommendationAttempt == 0 && shouldFallbackToOllama(runtimeName, err) {
+				if !exploreJSON {
+					fmt.Fprintf(os.Stderr, "Warning: prepare failed on %s (%v), retrying explore with ollama fallback\n", runtimeName, err)
+				}
+				runtimeConstraint = "ollama"
+				continue
+			}
+			return fmt.Errorf("failed to prepare model %s on %s: %w", modelID, runtimeName, err)
+		}
+		if err := manager.StartModelWithRuntime(modelID, runtimeName, nil); err != nil {
+			restoreRuntimePlan()
+			if recommendationAttempt == 0 && shouldFallbackToOllama(runtimeName, err) {
+				if !exploreJSON {
+					fmt.Fprintf(os.Stderr, "Warning: start failed on %s (%v), retrying explore with ollama fallback\n", runtimeName, err)
+				}
+				runtimeConstraint = "ollama"
+				continue
+			}
+			return fmt.Errorf("failed to start model %s on %s: %w", modelID, runtimeName, err)
+		}
+		defer restoreRuntimePlan()
+		defer func() {
+			if stopErr := manager.StopModelWithRuntime(modelID, runtimeName); stopErr != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to stop model %s on %s: %v\n", modelID, runtimeName, stopErr)
+			} else if !exploreJSON {
+				fmt.Println("Model offloaded successfully.")
+			}
+		}()
+
+		prompts := localEvalPrompts(workload, "quick")
+		if !exploreEval && len(prompts) > 1 {
+			prompts = prompts[:1]
+		}
+		runner := agenteval.NewRunner(manager)
+		evalCtx, evalCancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer evalCancel()
+		summary, err := runner.Run(evalCtx, modelID, workload, "quick", prompts, nil)
+		if err != nil {
+			return fmt.Errorf("eval run failed: %w", err)
+		}
+		if !exploreJSON {
+			printEvalSummary(summary)
+		}
+
+		suiteVersion := ""
+		if len(prompts) > 0 {
+			suiteVersion = strings.TrimSpace(prompts[0].SuiteVersion)
+		}
+		if err := reportEvalSummary(
+			cl,
+			cfg.MachineID,
+			modelID,
+			runtimeName,
+			summary,
+			workload,
+			0,
+			summary.EvalSessionToken,
+			"mantler-standard",
+			suiteVersion,
+			exploreResp.Plan.ID,
+			exploreResp.Plan.MantleFingerprint,
+			exploreResp.Plan.BaseFingerprint,
+			buildPromptTokenHints(prompts),
+		); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to report outcomes: %v\n", err)
+		}
+
+		var score *types.ScoreResponse
+		targetFingerprints := []string{
+			strings.TrimSpace(exploreResp.Plan.MantleFingerprint),
+			strings.TrimSpace(exploreResp.Plan.BaseFingerprint),
+		}
+		scoreErr := error(nil)
+		for _, targetFingerprint := range targetFingerprints {
+			if targetFingerprint == "" {
+				continue
+			}
+			score, scoreErr = waitForScore(cl, targetFingerprint, 4*time.Minute)
+			if scoreErr == nil {
+				break
+			}
+		}
+		if scoreErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to fetch score: %v\n", scoreErr)
+			score = buildLocalFallbackScore(exploreResp, summary)
+		}
+		if score != nil && !exploreJSON {
+			fmt.Printf(
+				"Score: overall=%.2f confidence=%s evidence=%d\n",
+				score.Overall,
+				score.ConfidenceTier,
+				score.EvidenceSignals,
+			)
+		}
+
+		if exploreJSON {
+			redactedSummary := redactEvalSummary(summary)
+			out := exploreOutput{
+				Recommendation: exploreResp,
+				EvalSummary:    &redactedSummary,
+				Score:          score,
+			}
+			raw, marshalErr := json.MarshalIndent(out, "", "  ")
+			if marshalErr != nil {
+				return fmt.Errorf("failed to encode JSON output: %w", marshalErr)
+			}
+			fmt.Println(string(raw))
 			return nil
 		}
-	}
 
-	manager := runtime.NewManager()
-	if err := manager.EnsureRuntime(runtimeName); err != nil {
-		return fmt.Errorf("failed to ensure runtime %s: %w", runtimeName, err)
-	}
-	restoreRuntimePlan := func() {}
-	if restore, applyErr := applyExploreRuntimePlan(runtimeName, exploreResp.Plan); applyErr != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to apply runtime plan overrides: %v\n", applyErr)
-	} else {
-		restoreRuntimePlan = restore
-	}
-	defer restoreRuntimePlan()
-	if err := manager.PrepareModelWithRuntime(modelID, runtimeName, nil); err != nil {
-		return fmt.Errorf("failed to prepare model %s on %s: %w", modelID, runtimeName, err)
-	}
-	if err := manager.StartModelWithRuntime(modelID, runtimeName, nil); err != nil {
-		return fmt.Errorf("failed to start model %s on %s: %w", modelID, runtimeName, err)
-	}
-	defer func() {
-		if stopErr := manager.StopModelWithRuntime(modelID, runtimeName); stopErr != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to stop model %s on %s: %v\n", modelID, runtimeName, stopErr)
-		} else if !exploreJSON {
-			fmt.Println("Model offloaded successfully.")
-		}
-	}()
-
-	prompts := localEvalPrompts(workload, "quick")
-	if !exploreEval && len(prompts) > 1 {
-		prompts = prompts[:1]
-	}
-	runner := agenteval.NewRunner(manager)
-	evalCtx, evalCancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer evalCancel()
-	summary, err := runner.Run(evalCtx, modelID, workload, "quick", prompts, nil)
-	if err != nil {
-		return fmt.Errorf("eval run failed: %w", err)
-	}
-	if !exploreJSON {
-		printEvalSummary(summary)
-	}
-
-	suiteVersion := ""
-	if len(prompts) > 0 {
-		suiteVersion = strings.TrimSpace(prompts[0].SuiteVersion)
-	}
-	if err := reportEvalSummary(
-		cl,
-		cfg.MachineID,
-		modelID,
-		runtimeName,
-		summary,
-		workload,
-		0,
-		summary.EvalSessionToken,
-		"mantler-standard",
-		suiteVersion,
-	); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to report outcomes: %v\n", err)
-	}
-
-	var score *types.ScoreResponse
-	targetFingerprints := []string{
-		strings.TrimSpace(exploreResp.Plan.MantleFingerprint),
-		strings.TrimSpace(exploreResp.Plan.BaseFingerprint),
-	}
-	scoreErr := error(nil)
-	for _, targetFingerprint := range targetFingerprints {
-		if targetFingerprint == "" {
-			continue
-		}
-		score, scoreErr = waitForScore(cl, targetFingerprint, 4*time.Minute)
-		if scoreErr == nil {
-			break
-		}
-	}
-	if scoreErr != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to fetch score: %v\n", scoreErr)
-		score = buildLocalFallbackScore(exploreResp, summary)
-	}
-	if score != nil && !exploreJSON {
-		fmt.Printf(
-			"Score: overall=%.2f confidence=%s evidence=%d\n",
-			score.Overall,
-			score.ConfidenceTier,
-			score.EvidenceSignals,
-		)
-	}
-
-	if exploreJSON {
-		out := exploreOutput{
-			Recommendation: exploreResp,
-			EvalSummary:    &summary,
-			Score:          score,
-		}
-		raw, marshalErr := json.MarshalIndent(out, "", "  ")
-		if marshalErr != nil {
-			return fmt.Errorf("failed to encode JSON output: %w", marshalErr)
-		}
-		fmt.Println(string(raw))
+		fmt.Println("Explore flow complete.")
 		return nil
 	}
-
-	fmt.Println("Explore flow complete.")
-	return nil
+	return fmt.Errorf("explore retries exhausted")
 }
 
 func waitForScore(cl *client.Client, fingerprint string, timeout time.Duration) (*types.ScoreResponse, error) {
 	deadline := time.Now().Add(timeout)
 	var lastErr error
 	for {
-		scoreCtx, scoreCancel := context.WithTimeout(context.Background(), 20*time.Second)
+		scoreCtx, scoreCancel := context.WithTimeout(context.Background(), 45*time.Second)
 		score, err := cl.GetScore(scoreCtx, fingerprint)
 		scoreCancel()
 		if err == nil {
 			return score, nil
 		}
 		lastErr = err
-		if !strings.Contains(strings.ToLower(err.Error()), "score not found") {
+		if !isRetryableScoreError(err) {
 			return nil, err
 		}
 		if time.Now().After(deadline) {
@@ -242,6 +274,25 @@ func waitForScore(cl *client.Client, fingerprint string, timeout time.Duration) 
 		lastErr = errors.New("score not found")
 	}
 	return nil, lastErr
+}
+
+func isRetryableScoreError(err error) bool {
+	if err == nil {
+		return false
+	}
+	lowerErr := strings.ToLower(err.Error())
+	return strings.Contains(lowerErr, "score not found") ||
+		strings.Contains(lowerErr, "context deadline exceeded") ||
+		strings.Contains(lowerErr, "(500)") ||
+		strings.Contains(lowerErr, "(502)") ||
+		strings.Contains(lowerErr, "(503)") ||
+		strings.Contains(lowerErr, "(504)") ||
+		strings.Contains(lowerErr, "internal server error") ||
+		strings.Contains(lowerErr, "bad gateway") ||
+		strings.Contains(lowerErr, "service unavailable") ||
+		strings.Contains(lowerErr, "gateway timeout") ||
+		strings.Contains(lowerErr, "connection refused") ||
+		strings.Contains(lowerErr, "i/o timeout")
 }
 
 func buildLocalFallbackScore(exploreResp *types.ExploreResponse, summary types.EvalRunSummary) *types.ScoreResponse {
@@ -277,8 +328,10 @@ func applyExploreRuntimePlan(runtimeName string, plan types.ExplorePlan) (func()
 	}
 
 	overrideImage := strings.TrimSpace(plan.RuntimePlan.Image)
-	overrideArgs := strings.TrimSpace(strings.Join(plan.RuntimePlan.Args, " "))
-	if overrideImage == "" && overrideArgs == "" && len(plan.RuntimePlan.Env) == 0 {
+	filteredArgs := filterRuntimePlanArgs(runtimeName, plan.RuntimePlan.Args)
+	overrideArgs := strings.TrimSpace(strings.Join(filteredArgs, " "))
+	filteredEnv := filterRuntimePlanEnv(runtimeName, plan.RuntimePlan.Env)
+	if overrideImage == "" && overrideArgs == "" && len(filteredEnv) == 0 {
 		return func() {}, nil
 	}
 
@@ -313,7 +366,7 @@ func applyExploreRuntimePlan(runtimeName string, plan types.ExplorePlan) (func()
 	if overrideArgs != "" {
 		values[argsKey] = overrideArgs
 	}
-	for key, value := range plan.RuntimePlan.Env {
+	for key, value := range filteredEnv {
 		trimmedKey := strings.TrimSpace(key)
 		if trimmedKey == "" {
 			continue
@@ -374,4 +427,74 @@ func renderEnvContent(values map[string]string) string {
 		lines = append(lines, fmt.Sprintf("%s=%q", key, values[key]))
 	}
 	return strings.Join(lines, "\n") + "\n"
+}
+
+func shouldFallbackToOllama(runtimeName string, err error) bool {
+	if strings.EqualFold(strings.TrimSpace(runtimeName), "ollama") {
+		return false
+	}
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	if strings.Contains(message, "invalid runtime") ||
+		strings.Contains(message, "unknown runtime") ||
+		strings.Contains(message, "invalid model id") {
+		return false
+	}
+	return true
+}
+
+func filterRuntimePlanArgs(runtimeName string, args []string) []string {
+	allowedPrefixes := map[string][]string{
+		"vllm": {"--model", "--tensor-parallel-size", "--max-model-len", "--gpu-memory-utilization", "--dtype"},
+		"tensorrt": {"--model", "--max_batch_size", "--max_input_len", "--max_output_len", "--max_beam_width"},
+	}
+	prefixes := allowedPrefixes[runtimeName]
+	if len(prefixes) == 0 {
+		return nil
+	}
+	filtered := make([]string, 0, len(args))
+	for _, arg := range args {
+		trimmed := strings.TrimSpace(arg)
+		if trimmed == "" {
+			continue
+		}
+		for _, prefix := range prefixes {
+			if strings.HasPrefix(trimmed, prefix) {
+				filtered = append(filtered, trimmed)
+				break
+			}
+		}
+	}
+	return filtered
+}
+
+func filterRuntimePlanEnv(runtimeName string, env map[string]string) map[string]string {
+	if len(env) == 0 {
+		return map[string]string{}
+	}
+	allowedPrefixes := map[string][]string{
+		"vllm": {"VLLM_", "HF_", "HUGGINGFACE_", "NVIDIA_", "CUDA_"},
+		"tensorrt": {"TENSORRT_", "HF_", "HUGGINGFACE_", "NVIDIA_", "CUDA_"},
+	}
+	prefixes := allowedPrefixes[runtimeName]
+	if len(prefixes) == 0 {
+		return map[string]string{}
+	}
+	filtered := make(map[string]string, len(env))
+	for key, value := range env {
+		trimmedKey := strings.TrimSpace(key)
+		if trimmedKey == "" {
+			continue
+		}
+		upperKey := strings.ToUpper(trimmedKey)
+		for _, prefix := range prefixes {
+			if strings.HasPrefix(upperKey, prefix) {
+				filtered[trimmedKey] = strings.TrimSpace(value)
+				break
+			}
+		}
+	}
+	return filtered
 }
