@@ -26,6 +26,7 @@ func newOllamaDriver() Driver {
 }
 
 const ollamaRemoteTagsURL = "https://ollama.com/api/tags"
+const ollamaMaxHTTPBodyBytes = 1 << 20
 
 var ollamaRemoteDigestCache = struct {
 	mu        sync.Mutex
@@ -205,7 +206,7 @@ func (d *ollamaDriver) fetchLocalTagDigests() (map[string]string, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, ollamaMaxHTTPBodyBytes))
 		return nil, fmt.Errorf("ollama local tags failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
@@ -521,7 +522,7 @@ func (d *ollamaDriver) benchmarkOnce(modelID string, prompt string, sampleOutput
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, ollamaMaxHTTPBodyBytes))
 	if resp.StatusCode >= 400 {
 		return ollamaGenerateResponse{}, fmt.Errorf("ollama benchmark failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}

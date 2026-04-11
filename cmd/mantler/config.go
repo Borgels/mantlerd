@@ -158,7 +158,11 @@ func runConfigSet(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 
-	fmt.Printf("Set %s = %s\n", key, value)
+	displayValue := value
+	if key == "token" {
+		displayValue = maskToken(value)
+	}
+	fmt.Printf("Set %s = %s\n", key, displayValue)
 	fmt.Printf("Configuration saved to: %s\n", configPath)
 }
 

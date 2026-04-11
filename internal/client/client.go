@@ -5,12 +5,14 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -22,6 +24,38 @@ type Client struct {
 	baseURL    string
 	token      string
 	httpClient *http.Client
+}
+
+const maxRetryAfter = 2 * time.Minute
+const maxHTTPBodyBytes = 64 * 1024
+
+type HTTPError struct {
+	StatusCode int
+	RetryAfter time.Duration
+	Body       string
+}
+
+func (e *HTTPError) Error() string {
+	if e == nil {
+		return "http error"
+	}
+	if e.RetryAfter > 0 {
+		return fmt.Sprintf("http %d: %s (retry after %s)", e.StatusCode, e.Body, e.RetryAfter)
+	}
+	return fmt.Sprintf("http %d: %s", e.StatusCode, e.Body)
+}
+
+func IsRateLimited(err error) bool {
+	var httpErr *HTTPError
+	return errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusTooManyRequests
+}
+
+func RetryAfterFromError(err error) time.Duration {
+	var httpErr *HTTPError
+	if !errors.As(err, &httpErr) {
+		return 0
+	}
+	return httpErr.RetryAfter
 }
 
 func New(serverURL, token string, insecure bool) (*Client, error) {
@@ -78,8 +112,12 @@ func (c *Client) Checkin(ctx context.Context, payload types.CheckinRequest) (typ
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(resp.Body)
-		return types.CheckinResponse{}, fmt.Errorf("checkin failed (%d): %s", resp.StatusCode, string(body))
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxHTTPBodyBytes))
+		return types.CheckinResponse{}, &HTTPError{
+			StatusCode: resp.StatusCode,
+			RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After")),
+			Body:       strings.TrimSpace(string(body)),
+		}
 	}
 
 	var envelope struct {
@@ -111,8 +149,12 @@ func (c *Client) Ack(ctx context.Context, payload types.AckRequest) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("ack failed (%d): %s", resp.StatusCode, string(body))
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxHTTPBodyBytes))
+		return &HTTPError{
+			StatusCode: resp.StatusCode,
+			RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After")),
+			Body:       strings.TrimSpace(string(body)),
+		}
 	}
 	return nil
 }
@@ -164,8 +206,7 @@ func (c *Client) Recommend(ctx context.Context, q types.RecommendQuery) (*types.
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("recommendations failed (%d): %s", resp.StatusCode, string(body))
+		return nil, httpErrorFromResponse(resp, "recommendations failed")
 	}
 	var envelope struct {
 		Data types.RecommendResponse `json:"data"`
@@ -199,14 +240,22 @@ func (c *Client) Explore(ctx context.Context, q types.ExploreQuery) (*types.Expl
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxHTTPBodyBytes))
 		if resp.StatusCode == http.StatusNotFound && strings.Contains(strings.ToLower(string(body)), "<!doctype html>") {
-			return nil, fmt.Errorf(
-				"explore failed (404): /api/agent/explore is not available on %s; deploy backend routes first",
-				c.baseURL,
-			)
+			return nil, &HTTPError{
+				StatusCode: resp.StatusCode,
+				RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After")),
+				Body: fmt.Sprintf(
+					"/api/agent/explore is not available on %s; deploy backend routes first",
+					c.baseURL,
+				),
+			}
 		}
-		return nil, fmt.Errorf("explore failed (%d): %s", resp.StatusCode, compactHTTPErrorBody(body))
+		return nil, &HTTPError{
+			StatusCode: resp.StatusCode,
+			RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After")),
+			Body:       "explore failed: " + compactHTTPErrorBody(body),
+		}
 	}
 
 	var envelope struct {
@@ -255,8 +304,7 @@ func (c *Client) GetScore(ctx context.Context, fingerprint string) (*types.Score
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("score request failed (%d): %s", resp.StatusCode, string(body))
+		return nil, httpErrorFromResponse(resp, "score request failed")
 	}
 
 	var envelope struct {
@@ -304,8 +352,7 @@ func (c *Client) GetEvalPrompts(
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, "", fmt.Errorf("eval prompts failed (%d): %s", resp.StatusCode, string(body))
+		return nil, "", httpErrorFromResponse(resp, "eval prompts failed")
 	}
 	var envelope struct {
 		Data struct {
@@ -332,17 +379,74 @@ func Retry[T any](ctx context.Context, attempts int, fn func() (T, error)) (T, e
 		if err == nil {
 			return result, nil
 		}
-		if i == attempts-1 {
-			break
-		}
-		select {
-		case <-ctx.Done():
-			return zero, ctx.Err()
-		case <-time.After(backoff):
-		}
-		if backoff < 10*time.Second {
-			backoff *= 2
+		if retryAfter, retryable := retryDecision(err); !retryable {
+			return zero, err
+		} else if i < attempts-1 {
+			wait := backoff
+			if retryAfter > 0 {
+				wait = retryAfter
+			}
+			select {
+			case <-ctx.Done():
+				return zero, ctx.Err()
+			case <-time.After(wait):
+			}
+			if retryAfter == 0 && backoff < 10*time.Second {
+				backoff *= 2
+			}
+			continue
 		}
 	}
 	return zero, err
+}
+
+func retryDecision(err error) (time.Duration, bool) {
+	var httpErr *HTTPError
+	if !errors.As(err, &httpErr) {
+		return 0, true
+	}
+	if httpErr.StatusCode == http.StatusTooManyRequests {
+		return 0, false
+	}
+	if httpErr.StatusCode >= 400 && httpErr.StatusCode < 500 {
+		return 0, false
+	}
+	return httpErr.RetryAfter, true
+}
+
+func parseRetryAfter(headerValue string) time.Duration {
+	trimmed := strings.TrimSpace(headerValue)
+	if trimmed == "" {
+		return 0
+	}
+	if seconds, err := strconv.ParseInt(trimmed, 10, 64); err == nil && seconds > 0 {
+		wait := time.Duration(seconds) * time.Second
+		if wait > maxRetryAfter {
+			return maxRetryAfter
+		}
+		return wait
+	}
+	if when, err := http.ParseTime(trimmed); err == nil {
+		until := time.Until(when)
+		if until > 0 {
+			if until > maxRetryAfter {
+				return maxRetryAfter
+			}
+			return until
+		}
+	}
+	return 0
+}
+
+func httpErrorFromResponse(resp *http.Response, message string) *HTTPError {
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxHTTPBodyBytes))
+	compacted := compactHTTPErrorBody(body)
+	if strings.TrimSpace(message) != "" {
+		compacted = strings.TrimSpace(message) + ": " + compacted
+	}
+	return &HTTPError{
+		StatusCode: resp.StatusCode,
+		RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After")),
+		Body:       compacted,
+	}
 }

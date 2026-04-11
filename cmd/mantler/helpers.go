@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -14,12 +15,16 @@ import (
 	"time"
 
 	"github.com/Borgels/mantlerd/internal/client"
+	"github.com/Borgels/mantlerd/internal/netutil"
 	"github.com/Borgels/mantlerd/internal/runtime"
 	"github.com/Borgels/mantlerd/internal/types"
 )
 
 const desiredConfigCachePath = "/etc/mantler/desired-config.json"
 const llamaCppKeepWarmEnv = "MANTLER_LLAMACPP_KEEP_WARM"
+const failedAckFlushBatchSize = 50
+
+var failedAckQueuePath = "/var/lib/mantler/failed-acks.json"
 
 func enforceDesiredConfig(runtimeManager *runtime.Manager, desired types.DesiredConfig) {
 	ejectLlamaCpp := shouldAutoEjectLlamaCpp(desired)
@@ -443,7 +448,7 @@ func gooseDaemonReachable(baseURL string) bool {
 	client := &http.Client{
 		Timeout: 3 * time.Second,
 		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: netutil.ShouldSkipTLSVerifyForURL(baseURL)},
 		},
 	}
 	resp, err := client.Get(baseURL + "/status")
@@ -876,17 +881,127 @@ func orchestratorReportsDiffer(a []types.InstalledOrchestrator, b []types.Instal
 	return false
 }
 
-func ackCommandWithRetry(cl *client.Client, payload types.AckRequest) error {
+func ackCommandWithRetry(ctx context.Context, cl *client.Client, payload types.AckRequest) error {
 	var lastErr error
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	for attempt := 0; attempt < 3; attempt++ {
-		ackCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		ackCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		err := cl.Ack(ackCtx, payload)
 		cancel()
 		if err == nil {
 			return nil
 		}
 		lastErr = err
-		time.Sleep(300 * time.Millisecond)
+		var httpErr *client.HTTPError
+		if errors.As(err, &httpErr) {
+			if httpErr.StatusCode == 429 {
+				wait := httpErr.RetryAfter
+				if wait <= 0 {
+					wait = time.Second
+				}
+				if wait > 60*time.Second {
+					wait = 60 * time.Second
+				}
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(wait):
+				}
+				continue
+			}
+			if httpErr.StatusCode >= 400 && httpErr.StatusCode < 500 {
+				return err
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(300 * time.Millisecond):
+		}
 	}
+	_ = enqueueFailedAck(payload)
 	return lastErr
+}
+
+func flushFailedAcks(cl *client.Client) {
+	queued, err := loadFailedAcks()
+	if err != nil {
+		log.Printf("failed to load queued acks: %v", err)
+		return
+	}
+	if len(queued) == 0 {
+		return
+	}
+	remaining := make([]types.AckRequest, 0, len(queued))
+	batchEnd := failedAckFlushBatchSize
+	if batchEnd > len(queued) {
+		batchEnd = len(queued)
+	}
+	flushCtx, flushCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer flushCancel()
+	for i, payload := range queued[:batchEnd] {
+		if flushCtx.Err() != nil {
+			remaining = append(remaining, queued[i:batchEnd]...)
+			break
+		}
+		ackCtx, cancel := context.WithTimeout(flushCtx, 5*time.Second)
+		err := cl.Ack(ackCtx, payload)
+		cancel()
+		if err != nil {
+			if client.IsRateLimited(err) {
+				remaining = append(remaining, queued[i:batchEnd]...)
+				break
+			}
+			remaining = append(remaining, payload)
+			remaining = append(remaining, queued[i+1:batchEnd]...)
+			break
+		}
+	}
+	remaining = append(remaining, queued[batchEnd:]...)
+	if err := saveFailedAcks(remaining); err != nil {
+		log.Printf("failed to persist queued acks: %v", err)
+	}
+}
+
+func enqueueFailedAck(payload types.AckRequest) error {
+	queued, err := loadFailedAcks()
+	if err != nil {
+		return err
+	}
+	queued = append(queued, payload)
+	if len(queued) > 2000 {
+		queued = queued[len(queued)-2000:]
+	}
+	return saveFailedAcks(queued)
+}
+
+func loadFailedAcks() ([]types.AckRequest, error) {
+	raw, err := os.ReadFile(failedAckQueuePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var payloads []types.AckRequest
+	if err := json.Unmarshal(raw, &payloads); err != nil {
+		return nil, err
+	}
+	return payloads, nil
+}
+
+func saveFailedAcks(payloads []types.AckRequest) error {
+	if err := os.MkdirAll(filepath.Dir(failedAckQueuePath), 0o755); err != nil {
+		return err
+	}
+	raw, err := json.Marshal(payloads)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(failedAckQueuePath, raw, 0o600)
 }

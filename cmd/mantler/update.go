@@ -238,7 +238,7 @@ func fetchChecksum(url string) (string, error) {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
 		return "", fmt.Errorf("checksum request failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1024))
 	if err != nil {
 		return "", fmt.Errorf("read checksum response: %w", err)
 	}

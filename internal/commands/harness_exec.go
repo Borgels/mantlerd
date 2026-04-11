@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Borgels/mantlerd/internal/netutil"
 	"github.com/Borgels/mantlerd/internal/types"
 )
 
@@ -61,23 +62,23 @@ type codexEvent struct {
 }
 
 type harnessExecParams struct {
-	HarnessID         string
-	HarnessType       string
-	DirectTargetID    string
-	TaskID            string
+	HarnessID           string
+	HarnessType         string
+	DirectTargetID      string
+	TaskID              string
 	CompatibilityPlanID string
-	MantleFingerprint string
-	BaseFingerprint   string
-	Model             string
-	Messages          []harnessExecMessage
-	PreferredRepo     string
-	HarnessSessionID  string
-	TransportKind     string
-	TransportBaseURL  string
-	TransportEndpoint string
-	TransportCommand  string
-	TransportArgs     []string
-	CredentialEnv     map[string]string
+	MantleFingerprint   string
+	BaseFingerprint     string
+	Model               string
+	Messages            []harnessExecMessage
+	PreferredRepo       string
+	HarnessSessionID    string
+	TransportKind       string
+	TransportBaseURL    string
+	TransportEndpoint   string
+	TransportCommand    string
+	TransportArgs       []string
+	CredentialEnv       map[string]string
 }
 
 type codexExecutionState struct {
@@ -142,20 +143,20 @@ func (e *Executor) runHarnessExec(command types.AgentCommand) (ExecutionResult, 
 
 func parseHarnessExecParams(params map[string]interface{}) (harnessExecParams, error) {
 	result := harnessExecParams{
-		HarnessID:         optionalStringParam(params, "harnessId"),
-		HarnessType:       optionalStringParam(params, "harnessType"),
-		DirectTargetID:    optionalStringParam(params, "directTargetId"),
-		TaskID:            optionalStringParam(params, "taskId"),
+		HarnessID:           optionalStringParam(params, "harnessId"),
+		HarnessType:         optionalStringParam(params, "harnessType"),
+		DirectTargetID:      optionalStringParam(params, "directTargetId"),
+		TaskID:              optionalStringParam(params, "taskId"),
 		CompatibilityPlanID: optionalStringParam(params, "compatibilityPlanId"),
-		MantleFingerprint: optionalStringParam(params, "mantleFingerprint"),
-		BaseFingerprint:   optionalStringParam(params, "baseFingerprint"),
-		Model:             optionalStringParam(params, "model"),
-		PreferredRepo:     optionalStringParam(params, "preferredRepository"),
-		HarnessSessionID:  optionalStringParam(params, "harnessSessionId"),
-		TransportKind:     optionalStringParam(params, "transportKind"),
-		TransportBaseURL:  optionalStringParam(params, "transportBaseUrl"),
-		TransportEndpoint: optionalStringParam(params, "transportEndpointPath"),
-		TransportCommand:  optionalStringParam(params, "transportCommand"),
+		MantleFingerprint:   optionalStringParam(params, "mantleFingerprint"),
+		BaseFingerprint:     optionalStringParam(params, "baseFingerprint"),
+		Model:               optionalStringParam(params, "model"),
+		PreferredRepo:       optionalStringParam(params, "preferredRepository"),
+		HarnessSessionID:    optionalStringParam(params, "harnessSessionId"),
+		TransportKind:       optionalStringParam(params, "transportKind"),
+		TransportBaseURL:    optionalStringParam(params, "transportBaseUrl"),
+		TransportEndpoint:   optionalStringParam(params, "transportEndpointPath"),
+		TransportCommand:    optionalStringParam(params, "transportCommand"),
 	}
 	if result.HarnessID == "" {
 		return result, fmt.Errorf("missing harnessId param")
@@ -700,7 +701,7 @@ func waitForGooseStatus(ctx context.Context, baseURL string, secret string) erro
 		if strings.TrimSpace(secret) != "" {
 			req.Header.Set("X-Secret-Key", secret)
 		}
-		resp, err := gooseHTTPClient().Do(req)
+		resp, err := gooseHTTPClient(req.URL.String()).Do(req)
 		if err == nil && resp != nil {
 			_ = resp.Body.Close()
 			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
@@ -1118,7 +1119,7 @@ func gooseJSONRequest(
 		req.Header.Set("X-Secret-Key", daemon.secret)
 	}
 
-	resp, err := gooseHTTPClient().Do(req)
+	resp, err := gooseHTTPClient(req.URL.String()).Do(req)
 	if err != nil {
 		return err
 	}
@@ -1153,13 +1154,13 @@ func gooseStreamRequest(
 	if strings.TrimSpace(daemon.secret) != "" {
 		req.Header.Set("X-Secret-Key", daemon.secret)
 	}
-	return gooseHTTPClient().Do(req)
+	return gooseHTTPClient(req.URL.String()).Do(req)
 }
 
-func gooseHTTPClient() *http.Client {
+func gooseHTTPClient(targetURL string) *http.Client {
 	return &http.Client{
 		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: netutil.ShouldSkipTLSVerifyForURL(targetURL)},
 			DialContext: (&net.Dialer{
 				Timeout: 10 * time.Second,
 			}).DialContext,
@@ -1371,7 +1372,7 @@ func containsArg(args []string, flag string) bool {
 
 func buildCodexPrompt(messages []harnessExecMessage) string {
 	var builder strings.Builder
-	builder.WriteString("You are continuing a ClawControl direct chat session on this machine.\n")
+	builder.WriteString("You are continuing a Mantler direct chat session on this machine.\n")
 	builder.WriteString("Use the conversation history below as context and provide the next assistant response.\n")
 	builder.WriteString("When interacting with the local workspace, prefer the repository requested by the user if one is implied.\n\n")
 	builder.WriteString("Conversation history:\n")

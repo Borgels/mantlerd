@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -42,6 +43,11 @@ var (
 	exploreEval     bool
 	exploreJSON     bool
 )
+
+var runtimePlanAllowedRoots = []string{
+	"/etc/mantler",
+	"/var/lib/mantler",
+}
 
 func init() {
 	rootCmd.AddCommand(exploreCmd)
@@ -597,9 +603,17 @@ func applyRuntimePlanFiles(files []types.RuntimePlanFile) (func(), error) {
 		if destination == "" {
 			continue
 		}
+		safeDestination, err := sanitizeRuntimePlanPath(destination)
+		if err != nil {
+			return nil, err
+		}
 		content := []byte(file.Content)
 		if len(content) == 0 && source != "" {
-			sourceFile, err := os.Open(source)
+			safeSource, err := sanitizeRuntimePlanPath(source)
+			if err != nil {
+				return nil, err
+			}
+			sourceFile, err := os.Open(safeSource)
 			if err != nil {
 				if errors.Is(err, os.ErrNotExist) {
 					continue
@@ -617,7 +631,7 @@ func applyRuntimePlanFiles(files []types.RuntimePlanFile) (func(), error) {
 		}
 
 		destExists := true
-		original, readErr := os.ReadFile(destination)
+		original, readErr := os.ReadFile(safeDestination)
 		if readErr != nil {
 			if !errors.Is(readErr, os.ErrNotExist) {
 				return nil, readErr
@@ -625,18 +639,18 @@ func applyRuntimePlanFiles(files []types.RuntimePlanFile) (func(), error) {
 			destExists = false
 			original = nil
 		}
-		if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(safeDestination), 0o755); err != nil {
 			return nil, err
 		}
-		if err := os.WriteFile(destination, content, 0o600); err != nil {
+		if err := os.WriteFile(safeDestination, content, 0o600); err != nil {
 			return nil, err
 		}
 		restoreFns = append(restoreFns, func() {
 			if destExists {
-				_ = os.WriteFile(destination, original, 0o600)
+				_ = os.WriteFile(safeDestination, original, 0o600)
 				return
 			}
-			_ = os.Remove(destination)
+			_ = os.Remove(safeDestination)
 		})
 	}
 	if len(restoreFns) == 0 {
@@ -647,6 +661,23 @@ func applyRuntimePlanFiles(files []types.RuntimePlanFile) (func(), error) {
 			restoreFns[i]()
 		}
 	}, nil
+}
+
+func sanitizeRuntimePlanPath(path string) (string, error) {
+	cleanPath := filepath.Clean(strings.TrimSpace(path))
+	if cleanPath == "." || cleanPath == "" {
+		return "", fmt.Errorf("runtime plan file path is empty")
+	}
+	if !filepath.IsAbs(cleanPath) {
+		return "", fmt.Errorf("runtime plan path %q must be absolute", path)
+	}
+	for _, root := range runtimePlanAllowedRoots {
+		cleanRoot := filepath.Clean(root)
+		if cleanPath == cleanRoot || strings.HasPrefix(cleanPath, cleanRoot+string(os.PathSeparator)) {
+			return cleanPath, nil
+		}
+	}
+	return "", fmt.Errorf("runtime plan path %q must be under %s", path, strings.Join(runtimePlanAllowedRoots, ", "))
 }
 
 func waitForExploreHealthChecks(runtimeName string, checks []string, timeout time.Duration) error {
@@ -672,9 +703,19 @@ func waitForExploreHealthChecks(runtimeName string, checks []string, timeout tim
 			if strings.EqualFold(strings.TrimSpace(runtimeName), "ollama") && strings.TrimSpace(target) == "/health" {
 				target = "/api/tags"
 			}
-			if !strings.HasPrefix(target, "http://") && !strings.HasPrefix(target, "https://") {
-				target = strings.TrimRight(baseURL, "/") + "/" + strings.TrimLeft(target, "/")
+			if strings.HasPrefix(target, "http://") || strings.HasPrefix(target, "https://") {
+				parsed, parseErr := url.Parse(target)
+				if parseErr != nil {
+					lastErr = parseErr
+					allHealthy = false
+					continue
+				}
+				target = parsed.Path
+				if target == "" {
+					target = "/"
+				}
 			}
+			target = strings.TrimRight(baseURL, "/") + "/" + strings.TrimLeft(target, "/")
 			req, err := http.NewRequest(http.MethodGet, target, nil)
 			if err != nil {
 				lastErr = err
@@ -806,9 +847,9 @@ func recordFailedFingerprint(resp *types.ExploreResponse, target map[string]stru
 
 func filterRuntimePlanArgs(runtimeName string, args []string) []string {
 	allowedPrefixes := map[string][]string{
-		"vllm": {"--model", "--tensor-parallel-size", "--max-model-len", "--gpu-memory-utilization", "--dtype"},
+		"vllm":     {"--model", "--tensor-parallel-size", "--max-model-len", "--gpu-memory-utilization", "--dtype"},
 		"tensorrt": {"--model", "--max_batch_size", "--max_input_len", "--max_output_len", "--max_beam_width"},
-		"ollama": {"--num-gpu", "--num-ctx", "--temperature", "--top-p"},
+		"ollama":   {"--num-gpu", "--num-ctx", "--temperature", "--top-p"},
 	}
 	prefixes := allowedPrefixes[runtimeName]
 	if len(prefixes) == 0 {
@@ -835,9 +876,9 @@ func filterRuntimePlanEnv(runtimeName string, env map[string]string) map[string]
 		return map[string]string{}
 	}
 	allowedPrefixes := map[string][]string{
-		"vllm": {"VLLM_", "HF_", "HUGGINGFACE_", "NVIDIA_", "CUDA_"},
+		"vllm":     {"VLLM_", "HF_", "HUGGINGFACE_", "NVIDIA_", "CUDA_"},
 		"tensorrt": {"TENSORRT_", "HF_", "HUGGINGFACE_", "NVIDIA_", "CUDA_"},
-		"ollama": {"OLLAMA_", "HF_", "HUGGINGFACE_"},
+		"ollama":   {"OLLAMA_", "HF_", "HUGGINGFACE_"},
 	}
 	prefixes := allowedPrefixes[runtimeName]
 	if len(prefixes) == 0 {

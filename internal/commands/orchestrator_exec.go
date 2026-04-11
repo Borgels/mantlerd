@@ -66,12 +66,19 @@ func (e *Executor) runOrchestratorExec(command types.AgentCommand) (ExecutionRes
 	if err != nil {
 		return ExecutionResult{}, err
 	}
+	if err := validateOrchestratorArgs(params.OrchestratorType, cmdArgs); err != nil {
+		return ExecutionResult{}, err
+	}
 
 	cmd := exec.CommandContext(ctx, commandPath, cmdArgs...)
 	if params.WorkingDir != "" {
 		workingDir, err := filepath.Abs(params.WorkingDir)
 		if err != nil {
 			return ExecutionResult{}, fmt.Errorf("resolve orchestrator workingDir: %w", err)
+		}
+		workingDir, err = sanitizeOrchestratorWorkingDir(workingDir)
+		if err != nil {
+			return ExecutionResult{}, err
 		}
 		info, err := os.Stat(workingDir)
 		if err != nil {
@@ -190,14 +197,9 @@ func (e *Executor) runOrchestratorExec(command types.AgentCommand) (ExecutionRes
 		"MANTLER_ORCHESTRATOR_TYPE="+params.OrchestratorType,
 		"MANTLER_TASK_FILE="+taskFile,
 		"MANTLER_SKILLS_FILE="+skillsFile,
-		// Compatibility for existing orchestrators during migration.
-		"CLAWCONTROL_ORCHESTRATOR_ID="+params.OrchestratorID,
-		"CLAWCONTROL_ORCHESTRATOR_TYPE="+params.OrchestratorType,
-		"CLAWCONTROL_TASK_FILE="+taskFile,
-		"CLAWCONTROL_SKILLS_FILE="+skillsFile,
 	)
 	if manifestFile != "" {
-		cmd.Env = append(cmd.Env, "MANTLER_MANIFEST_FILE="+manifestFile, "CLAWCONTROL_MANIFEST_FILE="+manifestFile)
+		cmd.Env = append(cmd.Env, "MANTLER_MANIFEST_FILE="+manifestFile)
 	}
 	if description, ok := params.Task["description"].(string); ok && strings.TrimSpace(description) != "" {
 		cmd.Stdin = strings.NewReader(description)
@@ -548,4 +550,52 @@ func parseOrchestratorExecParams(params map[string]interface{}) (orchestratorExe
 		}
 	}
 	return result, nil
+}
+
+func validateOrchestratorArgs(orchestratorType string, args []string) error {
+	allowedFlagPrefixes := map[string][]string{
+		"crewai":    {"--help", "--version", "--verbose", "--quiet", "--config", "--port", "--host"},
+		"langgraph": {"--help", "--version", "--verbose", "--quiet", "--config", "--port", "--host"},
+		"autogen":   {"--help", "--version", "--verbose", "--quiet", "--config", "--port", "--host"},
+		"ag2":       {"--help", "--version", "--verbose", "--quiet", "--config", "--port", "--host"},
+	}
+	normalizedType := strings.ToLower(strings.TrimSpace(orchestratorType))
+	allowed := allowedFlagPrefixes[normalizedType]
+	for _, arg := range args {
+		trimmed := strings.TrimSpace(arg)
+		if trimmed == "" || !strings.HasPrefix(trimmed, "-") {
+			continue
+		}
+		permitted := false
+		for _, prefix := range allowed {
+			if strings.HasPrefix(trimmed, prefix) {
+				permitted = true
+				break
+			}
+		}
+		if !permitted {
+			return fmt.Errorf("orchestrator argument %q is not allowed for type %s", arg, orchestratorType)
+		}
+	}
+	return nil
+}
+
+func sanitizeOrchestratorWorkingDir(path string) (string, error) {
+	cleanPath := filepath.Clean(strings.TrimSpace(path))
+	if cleanPath == "." || cleanPath == "" {
+		return "", fmt.Errorf("orchestrator workingDir is empty")
+	}
+	if !filepath.IsAbs(cleanPath) {
+		return "", fmt.Errorf("orchestrator workingDir must be absolute")
+	}
+	allowedRoots := []string{"/var/lib/mantler"}
+	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
+		allowedRoots = append(allowedRoots, filepath.Clean(home))
+	}
+	for _, root := range allowedRoots {
+		if cleanPath == root || strings.HasPrefix(cleanPath, root+string(os.PathSeparator)) {
+			return cleanPath, nil
+		}
+	}
+	return "", fmt.Errorf("orchestrator workingDir %q must be under approved roots", cleanPath)
 }

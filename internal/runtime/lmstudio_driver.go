@@ -22,13 +22,14 @@ import (
 )
 
 const (
-	llamaCppServiceUnitPath = "/etc/systemd/system/llamacpp.service"
-	llamaCppConfigPath      = "/etc/mantler/llamacpp.json"
-	llamaCppInstallDir      = "/opt/mantler/llamacpp"
-	llamaCppBinaryPath      = "/opt/mantler/llamacpp/llama-server"
-	llamaCppModelsDir       = "/var/lib/mantler/models/llamacpp"
-	llamaCppDefaultPort     = 1234
-	llamaCppReadyTimeout    = 90 * time.Second
+	llamaCppServiceUnitPath  = "/etc/systemd/system/llamacpp.service"
+	llamaCppConfigPath       = "/etc/mantler/llamacpp.json"
+	llamaCppInstallDir       = "/opt/mantler/llamacpp"
+	llamaCppBinaryPath       = "/opt/mantler/llamacpp/llama-server"
+	llamaCppModelsDir        = "/var/lib/mantler/models/llamacpp"
+	llamaCppDefaultPort      = 1234
+	llamaCppReadyTimeout     = 90 * time.Second
+	llamaCppMaxHTTPBodyBytes = 1 << 20
 )
 
 type llamaCppConfig struct {
@@ -386,7 +387,7 @@ func (d *llamaCppDriver) benchmarkOnce(modelID string, prompt string, sampleOutp
 		return BenchmarkResult{}, fmt.Errorf("llamacpp benchmark request failed: %w", err)
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, llamaCppMaxHTTPBodyBytes))
 	if resp.StatusCode >= 400 {
 		return BenchmarkResult{}, fmt.Errorf("llamacpp benchmark failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
@@ -456,7 +457,7 @@ func (d *llamaCppDriver) CompletePrompt(
 		return PromptCompletionResult{}, fmt.Errorf("llamacpp completion request failed: %w", err)
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, llamaCppMaxHTTPBodyBytes))
 	if resp.StatusCode >= 400 {
 		return PromptCompletionResult{}, fmt.Errorf("llamacpp completion failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
@@ -552,7 +553,7 @@ func (d *llamaCppDriver) fetchRemoteModels() ([]string, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, llamaCppMaxHTTPBodyBytes))
 		return nil, fmt.Errorf("llamacpp models endpoint failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	var payload struct {
@@ -591,7 +592,7 @@ func (d *llamaCppDriver) waitForReady(timeout time.Duration) error {
 		if err == nil {
 			resp, reqErr := client.Do(req)
 			if reqErr == nil {
-				_, _ = io.ReadAll(resp.Body)
+				_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, llamaCppMaxHTTPBodyBytes))
 				resp.Body.Close()
 				if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 					return nil
@@ -910,22 +911,28 @@ func unzipArchive(zipPath string, destDir string) error {
 		return err
 	}
 	defer reader.Close()
+	cleanDest := filepath.Clean(destDir)
+	prefix := cleanDest + string(os.PathSeparator)
 	for _, file := range reader.File {
 		targetPath := filepath.Join(destDir, file.Name)
+		cleanTarget := filepath.Clean(targetPath)
+		if cleanTarget != cleanDest && !strings.HasPrefix(cleanTarget, prefix) {
+			return fmt.Errorf("unsafe zip path: %s", file.Name)
+		}
 		if file.FileInfo().IsDir() {
-			if err := os.MkdirAll(targetPath, 0o755); err != nil {
+			if err := os.MkdirAll(cleanTarget, 0o755); err != nil {
 				return err
 			}
 			continue
 		}
-		if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(cleanTarget), 0o755); err != nil {
 			return err
 		}
 		src, err := file.Open()
 		if err != nil {
 			return err
 		}
-		dst, err := os.OpenFile(targetPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, file.Mode())
+		dst, err := os.OpenFile(cleanTarget, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, file.Mode())
 		if err != nil {
 			src.Close()
 			return err
