@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -238,6 +239,50 @@ func runDoctor(cmd *cobra.Command, args []string) {
 			os.Remove(testFile)
 			fmt.Println("✓")
 			fmt.Printf("  Config directory is writable: %s\n", configDir)
+
+			exePath, err := resolveExecutablePath()
+			if err != nil {
+				fmt.Printf("  Warning: cannot resolve executable path: %v\n", err)
+			} else if err := ensureWritableTarget(exePath); err != nil {
+				fmt.Printf("  Warning: self-update may fail: %v\n", err)
+				allPassed = false
+			} else {
+				fmt.Printf("  Update target is writable: %s\n", filepath.Dir(exePath))
+			}
+
+			if runtimeDirErr := verifyWritableDir("/etc/mantler/runtimes"); runtimeDirErr != nil {
+				fmt.Printf("  Warning: runtime state directory is not writable (/etc/mantler/runtimes): %v\n", runtimeDirErr)
+				allPassed = false
+			} else {
+				fmt.Println("  Runtime state directory is writable: /etc/mantler/runtimes")
+			}
+
+			if cacheErr := verifyWritableDir("/var/cache/huggingface"); cacheErr != nil {
+				fmt.Printf("  Warning: HuggingFace cache directory is not writable (/var/cache/huggingface): %v\n", cacheErr)
+				allPassed = false
+			} else {
+				fmt.Println("  HuggingFace cache directory is writable: /var/cache/huggingface")
+			}
+
+			if groups, err := currentUserGroups(); err == nil {
+				if !strings.Contains(groups, " docker ") {
+					fmt.Println("  Warning: current user is not in docker group; Docker runtimes may fail.")
+					allPassed = false
+				} else {
+					fmt.Println("  Docker group membership detected.")
+				}
+			} else {
+				fmt.Printf("  Warning: unable to determine group membership: %v\n", err)
+			}
+
+			if _, err := exec.LookPath("nvidia-smi"); err != nil {
+				fmt.Println("  Warning: nvidia-smi not found; GPU runtime checks are limited.")
+			} else if err := exec.Command("nvidia-smi", "-L").Run(); err != nil {
+				fmt.Printf("  Warning: nvidia-smi failed: %v\n", err)
+				allPassed = false
+			} else {
+				fmt.Println("  NVIDIA driver appears healthy.")
+			}
 		}
 	}
 	fmt.Println()
@@ -312,4 +357,33 @@ func maskURL(url string) string {
 		return parts[0] + "://" + parts[1]
 	}
 	return url
+}
+
+func verifyWritableDir(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%s is not a directory", path)
+	}
+	if info.Mode().Perm()&0o200 == 0 {
+		// Fast-fail with a clearer error before write probe.
+		return fmt.Errorf("%s is not writable", path)
+	}
+	testFile := filepath.Join(path, ".doctor-write-test")
+	if err := os.WriteFile(testFile, []byte("ok"), 0o600); err != nil {
+		return err
+	}
+	_ = os.Remove(testFile)
+	return nil
+}
+
+func currentUserGroups() (string, error) {
+	out, err := exec.Command("id", "-nG").Output()
+	if err != nil {
+		return "", err
+	}
+	normalized := " " + strings.TrimSpace(string(out)) + " "
+	return normalized, nil
 }

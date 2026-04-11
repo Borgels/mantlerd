@@ -6,7 +6,8 @@ REPO_NAME="mantlerd"
 BINARY_NAME="mantlerd"
 CLI_NAME="mantler"
 SERVICE_NAME="mantlerd"
-INSTALL_DIR="/usr/local/bin"
+BINARY_INSTALL_DIR="/opt/mantler/bin"
+CLI_LINK_DIR="/usr/local/bin"
 CONFIG_DIR="/etc/mantler"
 CONFIG_PATH="${CONFIG_DIR}/agent.json"
 SYSTEMD_UNIT_PATH="/etc/systemd/system/${SERVICE_NAME}.service"
@@ -17,6 +18,9 @@ VLLM_CONFIG_PATH="${CONFIG_DIR}/vllm.json"
 VLLM_ENV_PATH="${CONFIG_DIR}/vllm.env"
 VLLM_VENV_PATH="/opt/mantler/vllm-venv"
 VLLM_PYTHON="${VLLM_VENV_PATH}/bin/python3"
+RUNTIME_STATE_DIR="${CONFIG_DIR}/runtimes"
+HF_CACHE_DIR="/var/cache/huggingface"
+AGENT_GROUP="mantler"
 INTERVAL_MS="${MANTLERD_INTERVAL_MS:-${CLAWCONTROL_AGENT_INTERVAL_MS:-30000}}"
 LOG_LEVEL="${MANTLERD_LOG_LEVEL:-${CLAWCONTROL_AGENT_LOG_LEVEL:-info}}"
 INSECURE="${MANTLERD_INSECURE:-${CLAWCONTROL_AGENT_INSECURE:-false}}"
@@ -46,6 +50,7 @@ TMP_DIR=""
 BIN_TMP=""
 SHA_TMP=""
 SHA_EXPECTED=""
+INSTALLING_USER=""
 
 usage() {
   cat <<EOF
@@ -90,6 +95,45 @@ trap cleanup EXIT INT TERM
 
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || fatal "Required command not found: $1"
+}
+
+ensure_group_exists() {
+  group_name="$1"
+  if $SUDO getent group "$group_name" >/dev/null 2>&1; then
+    return 0
+  fi
+  log "Creating system group ${group_name}"
+  $SUDO groupadd --system "$group_name"
+}
+
+ensure_user_in_group() {
+  user_name="$1"
+  group_name="$2"
+  if [ -z "$user_name" ] || [ "$user_name" = "root" ]; then
+    return 0
+  fi
+  if id -nG "$user_name" 2>/dev/null | tr ' ' '\n' | grep -Fx "$group_name" >/dev/null 2>&1; then
+    return 0
+  fi
+  log "Adding ${user_name} to group ${group_name}"
+  $SUDO usermod -aG "$group_name" "$user_name"
+}
+
+configure_linux_permissions() {
+  require_cmd getent
+  require_cmd groupadd
+  require_cmd usermod
+  ensure_group_exists "$AGENT_GROUP"
+  if command -v docker >/dev/null 2>&1; then
+    ensure_group_exists "docker"
+    ensure_user_in_group "$INSTALLING_USER" "docker"
+  fi
+  ensure_user_in_group "$INSTALLING_USER" "$AGENT_GROUP"
+
+  $SUDO install -d -m 2775 -o root -g "$AGENT_GROUP" "$BINARY_INSTALL_DIR"
+  $SUDO install -d -m 2775 -o root -g "$AGENT_GROUP" "$RUNTIME_STATE_DIR"
+  $SUDO install -d -m 2775 -o root -g "$AGENT_GROUP" "$HF_CACHE_DIR"
+  $SUDO install -d -m 2775 -o root -g "$AGENT_GROUP" "${HF_CACHE_DIR}/hub"
 }
 
 escape_json() {
@@ -241,6 +285,8 @@ require_cmd install
 require_cmd mktemp
 require_cmd chmod
 require_cmd awk
+require_cmd id
+require_cmd grep
 
 if command -v sha256sum >/dev/null 2>&1; then
   SHA256_CMD="sha256sum"
@@ -270,9 +316,19 @@ case "$ARCH" in
     ;;
 esac
 
+if [ "$OS" = "linux" ]; then
+  if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
+    INSTALLING_USER="$SUDO_USER"
+  else
+    INSTALLING_USER="$(id -un)"
+  fi
+fi
+
 if [ "$OS" = "darwin" ]; then
   CONFIG_DIR="${HOME}/.mantler"
   CONFIG_PATH="${CONFIG_DIR}/agent.json"
+  BINARY_INSTALL_DIR="${CONFIG_DIR}/bin"
+  CLI_LINK_DIR="${HOME}/.local/bin"
   VLLM_CONFIG_PATH="${CONFIG_DIR}/vllm.json"
   VLLM_ENV_PATH="${CONFIG_DIR}/vllm.env"
   LAUNCHD_PLIST="${HOME}/Library/LaunchAgents/${LAUNCHD_LABEL}.plist"
@@ -308,11 +364,21 @@ SHA_EXPECTED="$(awk '{print $1}' "$SHA_TMP" | head -n 1)"
 SHA_ACTUAL="$($SHA256_CMD "$BIN_TMP" | awk '{print $1}')"
 [ "$SHA_EXPECTED" = "$SHA_ACTUAL" ] || fatal "Checksum mismatch for downloaded binary"
 
-log "Installing binary to ${INSTALL_DIR}/${BINARY_NAME}"
-$SUDO install -d -m 0755 "$INSTALL_DIR"
-$SUDO install -m 0755 "$BIN_TMP" "${INSTALL_DIR}/${BINARY_NAME}"
+if [ "$OS" = "linux" ]; then
+  configure_linux_permissions
+fi
+
+log "Installing binary to ${BINARY_INSTALL_DIR}/${BINARY_NAME}"
+if [ "$OS" = "darwin" ]; then
+  $SUDO install -d -m 0755 "$BINARY_INSTALL_DIR"
+fi
+$SUDO install -d -m 0755 "$CLI_LINK_DIR"
+$SUDO install -m 0775 "$BIN_TMP" "${BINARY_INSTALL_DIR}/${BINARY_NAME}"
+if [ "$OS" = "linux" ]; then
+  $SUDO chown root:"$AGENT_GROUP" "${BINARY_INSTALL_DIR}/${BINARY_NAME}"
+fi
 log "Linking CLI command ${CLI_NAME} -> ${BINARY_NAME}"
-$SUDO ln -sf "${INSTALL_DIR}/${BINARY_NAME}" "${INSTALL_DIR}/${CLI_NAME}"
+$SUDO ln -sf "${BINARY_INSTALL_DIR}/${BINARY_NAME}" "${CLI_LINK_DIR}/${CLI_NAME}"
 
 HEALTH_URL="${SERVER_URL%/}/api/health"
 log "Preflight: checking server reachability at ${HEALTH_URL}"
@@ -341,7 +407,11 @@ if [ "$OS" = "darwin" ]; then
 EOF
   chmod 600 "$CONFIG_PATH"
 else
-  $SUDO install -d -m 0755 "$CONFIG_DIR"
+  if [ "$OS" = "linux" ]; then
+    $SUDO install -d -m 2775 -o root -g "$AGENT_GROUP" "$CONFIG_DIR"
+  else
+    $SUDO install -d -m 0755 "$CONFIG_DIR"
+  fi
   $SUDO sh -c "cat > \"$CONFIG_PATH\" <<EOF
 {
   \"serverUrl\": \"${SERVER_URL_ESCAPED}\",
@@ -353,8 +423,14 @@ else
 }
 EOF"
   $SUDO chmod 600 "$CONFIG_PATH"
-  $SUDO install -d -m 0755 "${CONFIG_DIR}/.config"
-  $SUDO install -d -m 0755 "${CONFIG_DIR}/.config/mantlerd"
+  if [ "$OS" = "linux" ]; then
+    $SUDO chgrp "$AGENT_GROUP" "$CONFIG_PATH" || true
+    $SUDO install -d -m 2775 -o root -g "$AGENT_GROUP" "${CONFIG_DIR}/.config"
+    $SUDO install -d -m 2775 -o root -g "$AGENT_GROUP" "${CONFIG_DIR}/.config/mantlerd"
+  else
+    $SUDO install -d -m 0755 "${CONFIG_DIR}/.config"
+    $SUDO install -d -m 0755 "${CONFIG_DIR}/.config/mantlerd"
+  fi
 fi
 
 if [ "$OS" = "linux" ]; then
@@ -368,16 +444,18 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=${INSTALL_DIR}/${BINARY_NAME} start --config ${CONFIG_PATH}
+ExecStart=${BINARY_INSTALL_DIR}/${BINARY_NAME} start --config ${CONFIG_PATH}
 Restart=always
 RestartSec=5
 User=root
 Environment=HOME=${CONFIG_DIR}
 Environment=XDG_CONFIG_HOME=${CONFIG_DIR}/.config
+Environment=HF_HOME=${HF_CACHE_DIR}
+Environment=HUGGINGFACE_HUB_CACHE=${HF_CACHE_DIR}/hub
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
-ReadWritePaths=${CONFIG_DIR}
+ReadWritePaths=${CONFIG_DIR} ${HF_CACHE_DIR} ${RUNTIME_STATE_DIR}
 LimitNOFILE=65536
 
 [Install]
@@ -401,6 +479,7 @@ EOF"
       $SUDO sh -c "cat > \"$OLLAMA_OVERRIDE_PATH\" <<EOF
 [Service]
 Environment=\"OLLAMA_HOST=${OLLAMA_HOST}\"
+EnvironmentFile=-/etc/mantler/ollama.env
 EOF"
       $SUDO chmod 0644 "$OLLAMA_OVERRIDE_PATH"
       $SUDO systemctl daemon-reload
@@ -441,6 +520,8 @@ VLLM_LD_LIBRARY_PATH=
 VLLM_TRUST_REMOTE_CODE=${VLLM_TRUST_REMOTE_CODE}
 VLLM_EXTRA_ARGS="${VLLM_EXTRA_ARGS}"
 VLLM_RUNTIME_MODE=${VLLM_RUNTIME_MODE}
+HF_HOME=${HF_CACHE_DIR}
+HUGGINGFACE_HUB_CACHE=${HF_CACHE_DIR}/hub
 EOF"
       if [ -n "$VLLM_HF_TOKEN" ]; then
         VLLM_ESCAPED_HF_TOKEN="$(printf '%s' "$VLLM_HF_TOKEN" | sed 's/\\/\\\\/g; s/"/\\"/g')"
@@ -542,7 +623,7 @@ EOF"
     fi
   else
     log "systemd not detected. Start manually:"
-    log "${INSTALL_DIR}/${BINARY_NAME} --config ${CONFIG_PATH}"
+    log "${BINARY_INSTALL_DIR}/${BINARY_NAME} --config ${CONFIG_PATH}"
   fi
 else
   require_cmd launchctl
@@ -557,7 +638,7 @@ else
   <string>${LAUNCHD_LABEL}</string>
   <key>ProgramArguments</key>
   <array>
-    <string>${INSTALL_DIR}/${BINARY_NAME}</string>
+    <string>${BINARY_INSTALL_DIR}/${BINARY_NAME}</string>
     <string>start</string>
     <string>--config</string>
     <string>${CONFIG_PATH}</string>

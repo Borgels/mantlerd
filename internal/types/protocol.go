@@ -383,12 +383,26 @@ type RecommendQuery struct {
 }
 
 type ExploreQuery struct {
-	Runtime      string `json:"runtime,omitempty"`
-	ModelID      string `json:"modelId,omitempty"`
-	Workload     string `json:"workload,omitempty"`
-	Harness      string `json:"harness,omitempty"`
-	Orchestrator string `json:"orchestrator,omitempty"`
-	MaxAttempts  int    `json:"maxAttempts,omitempty"`
+	Runtime             string               `json:"runtime,omitempty"`
+	ModelID             string               `json:"modelId,omitempty"`
+	Workload            string               `json:"workload,omitempty"`
+	Harness             string               `json:"harness,omitempty"`
+	Orchestrator        string               `json:"orchestrator,omitempty"`
+	MaxAttempts         int                  `json:"maxAttempts,omitempty"`
+	Capabilities        *ExploreCapabilities `json:"capabilities,omitempty"`
+	ExcludeFingerprints []string             `json:"excludeFingerprints,omitempty"`
+}
+
+type ExploreCapabilities struct {
+	Docker          bool `json:"docker"`
+	HFToken         bool `json:"hfToken"`
+	GPUDriverLoaded bool `json:"gpuDriverLoaded"`
+}
+
+type RuntimePlanFile struct {
+	Source      string `json:"source,omitempty"`
+	Destination string `json:"destination,omitempty"`
+	Content     string `json:"content,omitempty"`
 }
 
 type ExploreSelection struct {
@@ -421,6 +435,7 @@ type ExplorePlan struct {
 		Image        string            `json:"image,omitempty"`
 		Env          map[string]string `json:"env,omitempty"`
 		Args         []string          `json:"args,omitempty"`
+		Files        []RuntimePlanFile `json:"files,omitempty"`
 		InstallMode  string            `json:"installMode,omitempty"`
 		HealthChecks []string          `json:"healthChecks,omitempty"`
 	} `json:"runtimePlan"`
