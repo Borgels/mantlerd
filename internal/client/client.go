@@ -53,6 +53,7 @@ func New(serverURL, token string, insecure bool) (*Client, error) {
 		token:   token,
 		httpClient: &http.Client{
 			Transport: transport,
+			Timeout:   180 * time.Second,
 		},
 	}, nil
 }

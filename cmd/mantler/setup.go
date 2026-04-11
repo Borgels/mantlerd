@@ -109,7 +109,8 @@ func runSetup(cmd *cobra.Command, args []string) {
 		}
 		fmt.Printf("Running quick eval for %s (%s)...\n", modelID, workload)
 		runner := agenteval.NewRunner(manager)
-		summary, evalErr := runner.Run(context.Background(), modelID, workload, "quick", localEvalPrompts(workload, "quick"), nil)
+		prompts := localEvalPrompts(workload, "quick")
+		summary, evalErr := runner.Run(context.Background(), modelID, workload, "quick", prompts, nil)
 		if evalErr != nil {
 			fmt.Fprintf(os.Stderr, "Warning: quick eval failed: %v\n", evalErr)
 		} else {
@@ -125,6 +126,10 @@ func runSetup(cmd *cobra.Command, args []string) {
 				"",
 				"mantler-standard",
 				"",
+				"",
+				"",
+				"",
+				buildPromptTokenHints(prompts),
 			); reportErr != nil {
 				fmt.Fprintf(os.Stderr, "Warning: failed to report eval outcomes: %v\n", reportErr)
 			} else {

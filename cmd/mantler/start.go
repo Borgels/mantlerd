@@ -137,9 +137,17 @@ func loadConfig(cmd *cobra.Command) config.Config {
 		log.Fatalf("invalid config: %v", err)
 	}
 
-	// Persist config
-	if err := config.Save(configPath, cfg); err != nil {
-		log.Fatalf("persist config: %v", err)
+	shouldPersist := cmd.Flags().Changed("server") ||
+		cmd.Flags().Changed("token") ||
+		cmd.Flags().Changed("machine") ||
+		cmd.Flags().Changed("interval") ||
+		cmd.Flags().Changed("insecure") ||
+		cmd.Flags().Changed("log-level") ||
+		cmd.Flags().Changed("cloud-provisioned")
+	if shouldPersist {
+		if err := config.Save(configPath, cfg); err != nil {
+			log.Fatalf("persist config: %v", err)
+		}
 	}
 
 	return cfg

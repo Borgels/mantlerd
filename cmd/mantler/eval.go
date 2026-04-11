@@ -185,7 +185,8 @@ func runEval(cmd *cobra.Command, args []string) {
 	}
 
 	if evalJSON {
-		raw, marshalErr := json.MarshalIndent(summary, "", "  ")
+		redactedSummary := redactEvalSummary(summary)
+		raw, marshalErr := json.MarshalIndent(redactedSummary, "", "  ")
 		if marshalErr != nil {
 			fmt.Fprintf(os.Stderr, "Failed to encode JSON output: %v\n", marshalErr)
 			os.Exit(1)
@@ -198,6 +199,7 @@ func runEval(cmd *cobra.Command, args []string) {
 		if len(prompts) > 0 {
 			suiteVersion = strings.TrimSpace(prompts[0].SuiteVersion)
 		}
+		promptTokenHints := buildPromptTokenHints(prompts)
 		err = reportEvalSummary(
 			reportingCtx.client,
 			reportingCtx.machineID,
@@ -209,6 +211,10 @@ func runEval(cmd *cobra.Command, args []string) {
 			evalSessionToken,
 			suiteID,
 			suiteVersion,
+			"",
+			"",
+			"",
+			promptTokenHints,
 		)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to report eval outcomes to server: %v\n", err)
@@ -270,8 +276,15 @@ func reportEvalSummary(
 	evalSessionToken string,
 	benchmarkSuiteID string,
 	benchmarkSuiteVersion string,
+	planID string,
+	mantleFingerprint string,
+	baseFingerprintOverride string,
+	promptTokenHints map[string]int,
 ) error {
 	baseFingerprint := buildBaseFingerprint(machineID, modelID, runtimeName, "")
+	if trimmed := strings.TrimSpace(baseFingerprintOverride); trimmed != "" {
+		baseFingerprint = trimmed
+	}
 	events := make([]types.OutcomeEvent, 0, len(summary.Samples)+1)
 	for _, sample := range summary.Samples {
 		eventType := "task_failure"
@@ -279,7 +292,13 @@ func reportEvalSummary(
 			eventType = "task_success"
 		}
 		score := sample.QualityScore
+		promptTokens := promptTokenHints[sample.PromptID]
+		if promptTokens < 0 {
+			promptTokens = 0
+		}
 		events = append(events, types.OutcomeEvent{
+			PlanID:                strings.TrimSpace(planID),
+			MantleFingerprint:     strings.TrimSpace(mantleFingerprint),
 			BaseFingerprint:       baseFingerprint,
 			EventType:             eventType,
 			EvidenceKind:          "benchmark",
@@ -291,9 +310,9 @@ func reportEvalSummary(
 			EvalSessionToken:      strings.TrimSpace(evalSessionToken),
 			DurationMs:            int64(sample.LatencyMs),
 			TokenUsage: &types.OutcomeTokenUsage{
-				PromptTokens:     0,
+				PromptTokens:     promptTokens,
 				CompletionTokens: sample.OutputTokens,
-				TotalTokens:      sample.OutputTokens,
+				TotalTokens:      sample.OutputTokens + promptTokens,
 			},
 			QualityScore: &score,
 			Detail:       sample.Notes,
@@ -303,6 +322,8 @@ func reportEvalSummary(
 	if rating > 0 {
 		score := float64(rating * 20)
 		events = append(events, types.OutcomeEvent{
+			PlanID:                strings.TrimSpace(planID),
+			MantleFingerprint:     strings.TrimSpace(mantleFingerprint),
 			BaseFingerprint:       baseFingerprint,
 			EventType:             "task_success",
 			EvidenceKind:          "benchmark",
@@ -322,6 +343,24 @@ func reportEvalSummary(
 		OutcomeEvents: events,
 	})
 	return err
+}
+
+func buildPromptTokenHints(prompts []agenteval.Prompt) map[string]int {
+	hints := make(map[string]int, len(prompts))
+	for _, prompt := range prompts {
+		id := strings.TrimSpace(prompt.ID)
+		if id == "" {
+			continue
+		}
+		hints[id] = len(strings.Fields(prompt.Prompt))
+	}
+	return hints
+}
+
+func redactEvalSummary(summary types.EvalRunSummary) types.EvalRunSummary {
+	redacted := summary
+	redacted.EvalSessionToken = ""
+	return redacted
 }
 
 func resolveEvalRuntime(manager *runtime.Manager, modelID string, runtimeHint string) string {
