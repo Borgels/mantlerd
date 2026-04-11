@@ -16,7 +16,6 @@ const (
 	RuntimeOllama   RuntimeType = "ollama"
 	RuntimeLlamaCpp RuntimeType = "llamacpp"
 	RuntimeTensorRT RuntimeType = "tensorrt"
-	RuntimeMLX      RuntimeType = "mlxserver"
 )
 
 type TrainerType string
@@ -381,6 +380,63 @@ type RecommendQuery struct {
 	Role          string `json:"role,omitempty"`
 	Workload      string `json:"workload,omitempty"`
 	Limit         int    `json:"limit,omitempty"`
+}
+
+type ExploreQuery struct {
+	Runtime      string `json:"runtime,omitempty"`
+	ModelID      string `json:"modelId,omitempty"`
+	Workload     string `json:"workload,omitempty"`
+	Harness      string `json:"harness,omitempty"`
+	Orchestrator string `json:"orchestrator,omitempty"`
+	MaxAttempts  int    `json:"maxAttempts,omitempty"`
+}
+
+type ExploreSelection struct {
+	MachineID string `json:"machineId"`
+	ModelID   string `json:"modelId"`
+	Runtime   string `json:"runtime"`
+}
+
+type ExplorePlan struct {
+	ID                string `json:"id"`
+	Status            string `json:"status"`
+	Confidence        string `json:"confidence"`
+	BaseFingerprint   string `json:"baseFingerprint"`
+	MantleFingerprint string `json:"mantleFingerprint"`
+	Compatibility     struct {
+		Allowed  bool     `json:"allowed"`
+		Blockers []string `json:"blockers"`
+		Warnings []string `json:"warnings"`
+	} `json:"compatibility"`
+	ResolvedLayers struct {
+		MachineID    string `json:"machineId"`
+		ModelID      string `json:"modelId"`
+		Runtime      string `json:"runtime"`
+		Backend      string `json:"backend,omitempty"`
+		Harness      string `json:"harness,omitempty"`
+		Orchestrator string `json:"orchestrator,omitempty"`
+		Provider     string `json:"provider,omitempty"`
+	} `json:"resolvedLayers"`
+	CreatedAt  string `json:"createdAt"`
+	AppliedAt  string `json:"appliedAt,omitempty"`
+	VerifiedAt string `json:"verifiedAt,omitempty"`
+	FailedAt   string `json:"failedAt,omitempty"`
+	ScoredAt   string `json:"scoredAt,omitempty"`
+}
+
+type ExploreResponse struct {
+	Selection ExploreSelection `json:"selection"`
+	Plan      ExplorePlan      `json:"plan"`
+	Attempts  int              `json:"attempts"`
+}
+
+type ScoreResponse struct {
+	MantleFingerprint string  `json:"mantleFingerprint"`
+	Overall           float64 `json:"overall"`
+	ProfileID         string  `json:"profileId"`
+	ConfidenceTier    string  `json:"confidenceTier"`
+	EvidenceSignals   int     `json:"evidenceSignals"`
+	UpdatedAt         string  `json:"updatedAt"`
 }
 
 type ModelFeatureFlags struct {
