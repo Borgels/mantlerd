@@ -21,30 +21,30 @@ VLLM_PYTHON="${VLLM_VENV_PATH}/bin/python3"
 RUNTIME_STATE_DIR="${CONFIG_DIR}/runtimes"
 HF_CACHE_DIR="/var/cache/huggingface"
 AGENT_GROUP="mantler"
-INTERVAL_MS="${MANTLERD_INTERVAL_MS:-30000}"
-LOG_LEVEL="${MANTLERD_LOG_LEVEL:-info}"
-INSECURE="${MANTLERD_INSECURE:-false}"
-VERSION="${MANTLERD_VERSION:-latest}"
-OLLAMA_CONFIGURE_REMOTE="${MANTLER_OLLAMA_CONFIGURE_REMOTE:-true}"
-OLLAMA_HOST="${MANTLER_OLLAMA_HOST:-0.0.0.0:11434}"
-VLLM_CONFIGURE="${MANTLER_VLLM_CONFIGURE:-true}"
-VLLM_PREINSTALL="${MANTLER_VLLM_PREINSTALL:-true}"
-VLLM_RUNTIME_MODE="${MANTLER_VLLM_RUNTIME_MODE:-auto}"
-VLLM_PORT="${MANTLER_VLLM_PORT:-8000}"
-VLLM_GPU_MEMORY_UTILIZATION="${MANTLER_VLLM_GPU_MEMORY_UTILIZATION:-0.9}"
-VLLM_TRUST_REMOTE_CODE="${MANTLER_VLLM_TRUST_REMOTE_CODE:-false}"
-VLLM_EXTRA_ARGS="${MANTLER_VLLM_EXTRA_ARGS:-}"
-VLLM_HF_TOKEN="${MANTLER_HF_TOKEN:-${HF_TOKEN:-}}"
-VLLM_HF_HUB_TOKEN="${MANTLER_HUGGING_FACE_HUB_TOKEN:-${HUGGING_FACE_HUB_TOKEN:-}}"
-SELF_UPDATE_MODE="${MANTLERD_SELF_UPDATE:-false}"
+INTERVAL_MS="${MANTLERD_INTERVAL_MS:-${CLAWCONTROL_AGENT_INTERVAL_MS:-30000}}"
+LOG_LEVEL="${MANTLERD_LOG_LEVEL:-${CLAWCONTROL_AGENT_LOG_LEVEL:-info}}"
+INSECURE="${MANTLERD_INSECURE:-${CLAWCONTROL_AGENT_INSECURE:-false}}"
+VERSION="${MANTLERD_VERSION:-${CLAWCONTROL_AGENT_VERSION:-latest}}"
+OLLAMA_CONFIGURE_REMOTE="${MANTLER_OLLAMA_CONFIGURE_REMOTE:-${CLAWCONTROL_OLLAMA_CONFIGURE_REMOTE:-true}}"
+OLLAMA_HOST="${MANTLER_OLLAMA_HOST:-${CLAWCONTROL_OLLAMA_HOST:-0.0.0.0:11434}}"
+VLLM_CONFIGURE="${MANTLER_VLLM_CONFIGURE:-${CLAWCONTROL_VLLM_CONFIGURE:-true}}"
+VLLM_PREINSTALL="${MANTLER_VLLM_PREINSTALL:-${CLAWCONTROL_VLLM_PREINSTALL:-true}}"
+VLLM_RUNTIME_MODE="${MANTLER_VLLM_RUNTIME_MODE:-${CLAWCONTROL_VLLM_RUNTIME_MODE:-auto}}"
+VLLM_PORT="${MANTLER_VLLM_PORT:-${CLAWCONTROL_VLLM_PORT:-8000}}"
+VLLM_GPU_MEMORY_UTILIZATION="${MANTLER_VLLM_GPU_MEMORY_UTILIZATION:-${CLAWCONTROL_VLLM_GPU_MEMORY_UTILIZATION:-0.9}}"
+VLLM_TRUST_REMOTE_CODE="${MANTLER_VLLM_TRUST_REMOTE_CODE:-${CLAWCONTROL_VLLM_TRUST_REMOTE_CODE:-false}}"
+VLLM_EXTRA_ARGS="${MANTLER_VLLM_EXTRA_ARGS:-${CLAWCONTROL_VLLM_EXTRA_ARGS:-}}"
+VLLM_HF_TOKEN="${MANTLER_HF_TOKEN:-${CLAWCONTROL_HF_TOKEN:-${HF_TOKEN:-}}}"
+VLLM_HF_HUB_TOKEN="${MANTLER_HUGGING_FACE_HUB_TOKEN:-${CLAWCONTROL_HUGGING_FACE_HUB_TOKEN:-${HUGGING_FACE_HUB_TOKEN:-}}}"
+SELF_UPDATE_MODE="${MANTLERD_SELF_UPDATE:-${CLAWCONTROL_AGENT_SELF_UPDATE:-false}}"
 LAUNCHD_LABEL="com.mantler.mantlerd"
 LAUNCHD_PLIST=""
 LAUNCHD_STDOUT_PATH=""
 LAUNCHD_STDERR_PATH=""
 
-TOKEN="${MANTLER_TOKEN:-}"
+TOKEN=""
 MACHINE_ID=""
-SERVER_URL="${MANTLER_SERVER_URL:-}"
+SERVER_URL="${MANTLER_SERVER_URL:-${CLAWCONTROL_SERVER_URL:-}}"
 SUDO=""
 TMP_DIR=""
 BIN_TMP=""
@@ -54,7 +54,7 @@ INSTALLING_USER=""
 
 usage() {
   cat <<EOF
-Usage: install.sh [--token <token>] --machine <machine-id> --server <server-url> [--version <tag|latest>] [--insecure]
+Usage: install.sh --token <token> --machine <machine-id> --server <server-url> [--version <tag|latest>] [--insecure]
 
 Environment overrides:
   MANTLERD_VERSION      Release tag (default: latest)
@@ -72,7 +72,7 @@ Environment overrides:
   MANTLER_VLLM_EXTRA_ARGS    extra CLI args appended to vLLM serve
   MANTLER_HF_TOKEN           optional Hugging Face token persisted for vLLM model pulls
   MANTLER_HUGGING_FACE_HUB_TOKEN optional Hugging Face Hub token persisted for vLLM model pulls
-  MANTLER_TOKEN              agent token (alternative to --token)
+  Legacy CLAWCONTROL_* env vars are still accepted for compatibility.
 EOF
 }
 
@@ -205,7 +205,7 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-[ -n "$TOKEN" ] || { usage; fatal "Missing token (--token or MANTLER_TOKEN)"; }
+[ -n "$TOKEN" ] || { usage; fatal "Missing --token"; }
 [ -n "$MACHINE_ID" ] || { usage; fatal "Missing --machine"; }
 [ -n "$SERVER_URL" ] || { usage; fatal "Missing --server"; }
 
@@ -221,7 +221,7 @@ case "$INSECURE" in
   true|false)
     ;;
   *)
-    fatal "MANTLERD_INSECURE must be true or false"
+    fatal "MANTLERD_INSECURE (or CLAWCONTROL_AGENT_INSECURE) must be true or false"
     ;;
 esac
 
@@ -229,7 +229,7 @@ case "$VLLM_CONFIGURE" in
   true|false)
     ;;
   *)
-    fatal "MANTLER_VLLM_CONFIGURE must be true or false"
+    fatal "MANTLER_VLLM_CONFIGURE (or CLAWCONTROL_VLLM_CONFIGURE) must be true or false"
     ;;
 esac
 
@@ -237,7 +237,7 @@ case "$VLLM_PREINSTALL" in
   true|false)
     ;;
   *)
-    fatal "MANTLER_VLLM_PREINSTALL must be true or false"
+    fatal "MANTLER_VLLM_PREINSTALL (or CLAWCONTROL_VLLM_PREINSTALL) must be true or false"
     ;;
 esac
 
@@ -245,7 +245,7 @@ case "$VLLM_RUNTIME_MODE" in
   auto|native|container)
     ;;
   *)
-    fatal "MANTLER_VLLM_RUNTIME_MODE must be auto, native, or container"
+    fatal "MANTLER_VLLM_RUNTIME_MODE (or CLAWCONTROL_VLLM_RUNTIME_MODE) must be auto, native, or container"
     ;;
 esac
 
@@ -253,7 +253,7 @@ case "$VLLM_TRUST_REMOTE_CODE" in
   true|false)
     ;;
   *)
-    fatal "MANTLER_VLLM_TRUST_REMOTE_CODE must be true or false"
+    fatal "MANTLER_VLLM_TRUST_REMOTE_CODE (or CLAWCONTROL_VLLM_TRUST_REMOTE_CODE) must be true or false"
     ;;
 esac
 
@@ -261,7 +261,7 @@ case "$SELF_UPDATE_MODE" in
   true|false)
     ;;
   *)
-    fatal "MANTLERD_SELF_UPDATE must be true or false"
+    fatal "MANTLERD_SELF_UPDATE (or CLAWCONTROL_AGENT_SELF_UPDATE) must be true or false"
     ;;
 esac
 
@@ -345,18 +345,79 @@ fi
 
 ARTIFACT_URL="${RELEASE_BASE}/${ASSET_NAME}"
 CHECKSUM_URL="${RELEASE_BASE}/${ASSET_NAME}.sha256"
+ARTIFACT_FALLBACK_URL=""
+CHECKSUM_FALLBACK_URL=""
+ARTIFACT_API_URL=""
+CHECKSUM_API_URL=""
+
+if [ "$VERSION" = "latest" ]; then
+  LATEST_RELEASE_JSON="$(curl --fail --show-error --location --retry 3 --retry-delay 1 --retry-connrefused \
+    "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/releases/latest" 2>/dev/null || true)"
+  RESOLVED_TAG="$(printf '%s' "$LATEST_RELEASE_JSON" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
+  if [ -n "$RESOLVED_TAG" ]; then
+    RESOLVED_BASE="https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/download/${RESOLVED_TAG}"
+    ARTIFACT_FALLBACK_URL="${RESOLVED_BASE}/${ASSET_NAME}"
+    CHECKSUM_FALLBACK_URL="${RESOLVED_BASE}/${ASSET_NAME}.sha256"
+  fi
+  if [ -n "$LATEST_RELEASE_JSON" ]; then
+    ARTIFACT_API_URL="$(printf '%s' "$LATEST_RELEASE_JSON" | awk -v want="\"name\":\"${ASSET_NAME}\"" '
+      BEGIN { RS = "{" }
+      index($0, want) {
+        if (match($0, /"url":"[^"]+"/)) {
+          raw = substr($0, RSTART + 7, RLENGTH - 8);
+          print raw;
+          exit;
+        }
+      }
+    ')"
+    CHECKSUM_API_URL="$(printf '%s' "$LATEST_RELEASE_JSON" | awk -v want="\"name\":\"${ASSET_NAME}.sha256\"" '
+      BEGIN { RS = "{" }
+      index($0, want) {
+        if (match($0, /"url":"[^"]+"/)) {
+          raw = substr($0, RSTART + 7, RLENGTH - 8);
+          print raw;
+          exit;
+        }
+      }
+    ')"
+  fi
+fi
+
+download_with_fallback() {
+  output_path="$1"
+  api_url="$2"
+  shift 2
+
+  for candidate_url in "$@"; do
+    [ -n "$candidate_url" ] || continue
+    log "Downloading ${candidate_url}"
+    if curl --fail --show-error --location --retry 5 --retry-delay 1 --retry-connrefused \
+      --retry-all-errors --output "$output_path" "$candidate_url"; then
+      return 0
+    fi
+    log "Download failed from ${candidate_url}; trying next source."
+  done
+
+  if [ -n "$api_url" ]; then
+    log "Downloading ${api_url} via GitHub Releases API"
+    if curl --fail --show-error --location --retry 5 --retry-delay 1 --retry-connrefused \
+      --retry-all-errors -H "Accept: application/octet-stream" --output "$output_path" "$api_url"; then
+      return 0
+    fi
+  fi
+
+  return 1
+}
 
 TMP_DIR="$(mktemp -d)"
 BIN_TMP="${TMP_DIR}/${ASSET_NAME}"
 SHA_TMP="${TMP_DIR}/${ASSET_NAME}.sha256"
 
-log "Downloading ${ARTIFACT_URL}"
-curl --fail --show-error --location --retry 5 --retry-delay 1 --retry-connrefused \
-  --output "$BIN_TMP" "$ARTIFACT_URL"
+download_with_fallback "$BIN_TMP" "$ARTIFACT_API_URL" "$ARTIFACT_URL" "$ARTIFACT_FALLBACK_URL" \
+  || fatal "Failed to download ${ASSET_NAME} from GitHub release assets."
 
-log "Downloading checksum ${CHECKSUM_URL}"
-curl --fail --show-error --location --retry 5 --retry-delay 1 --retry-connrefused \
-  --output "$SHA_TMP" "$CHECKSUM_URL"
+download_with_fallback "$SHA_TMP" "$CHECKSUM_API_URL" "$CHECKSUM_URL" "$CHECKSUM_FALLBACK_URL" \
+  || fatal "Failed to download checksum for ${ASSET_NAME}."
 
 SHA_EXPECTED="$(awk '{print $1}' "$SHA_TMP" | head -n 1)"
 [ -n "$SHA_EXPECTED" ] || fatal "Checksum file is empty or invalid"
