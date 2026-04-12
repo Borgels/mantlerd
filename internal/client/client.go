@@ -259,7 +259,7 @@ func (c *Client) Explore(ctx context.Context, q types.ExploreQuery) (*types.Expl
 	return &envelope.Data, nil
 }
 
-func (c *Client) GetCompatCatalog(ctx context.Context, kinds []string) (*types.CompatCatalog, error) {
+func (c *Client) GetCompatCatalog(ctx context.Context, kinds []string, since *time.Time) (*types.CompatCatalog, error) {
 	params := url.Values{}
 	trimmedKinds := make([]string, 0, len(kinds))
 	for _, kind := range kinds {
@@ -271,6 +271,9 @@ func (c *Client) GetCompatCatalog(ctx context.Context, kinds []string) (*types.C
 	}
 	if len(trimmedKinds) > 0 {
 		params.Set("kinds", strings.Join(trimmedKinds, ","))
+	}
+	if since != nil {
+		params.Set("since", since.UTC().Format(time.RFC3339))
 	}
 
 	targetURL := c.baseURL + "/api/agent/compat-catalog"
@@ -435,8 +438,8 @@ func (c *Client) StartEvalSession(
 	benchmarkSuiteID string,
 ) (*types.EvalChallengeSessionStartResponse, error) {
 	body := map[string]string{
-		"workload": workload,
-		"profile": profile,
+		"workload":         workload,
+		"profile":          profile,
 		"benchmarkSuiteId": benchmarkSuiteID,
 	}
 	reqBody, err := json.Marshal(body)
@@ -478,10 +481,10 @@ func (c *Client) RespondToChallenge(
 	outputTokens int,
 ) (*types.EvalChallengeResponseResult, error) {
 	body := map[string]any{
-		"promptId": promptID,
-		"output": output,
-		"latencyMs": latencyMs,
-		"ttftMs": ttftMs,
+		"promptId":     promptID,
+		"output":       output,
+		"latencyMs":    latencyMs,
+		"ttftMs":       ttftMs,
 		"tokensPerSec": tokensPerSec,
 		"outputTokens": outputTokens,
 	}
