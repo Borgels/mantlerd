@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"hash/fnv"
 	"strings"
 	"time"
 
@@ -19,13 +18,11 @@ type Prompt struct {
 	Workload         string   `json:"workload"`
 	Prompt           string   `json:"prompt"`
 	SystemPrompt     string   `json:"systemPrompt,omitempty"`
-	ExpectedBehavior string   `json:"expectedBehavior,omitempty"`
 	MaxTokens        int      `json:"maxTokens,omitempty"`
 	ContextLength    string   `json:"contextLength,omitempty"`
 	SuiteID          string   `json:"suiteId,omitempty"`
 	SuiteVersion     string   `json:"suiteVersion,omitempty"`
 	Choices          []string `json:"choices,omitempty"`
-	CorrectAnswer    string   `json:"correctAnswer,omitempty"`
 	Subject          string   `json:"subject,omitempty"`
 }
 
@@ -185,14 +182,6 @@ func (r *Runner) evaluatePrompt(
 	if output == "" {
 		output = "(empty model output)"
 	}
-	quality := seedScore(prompt.ID, 68, 94)
-	if completionErr == nil {
-		if len(output) > 0 {
-			quality = 85
-		} else {
-			quality = 0
-		}
-	}
 	passed := completionErr == nil && len(strings.TrimSpace(output)) > 0
 	notes := "model output evaluated"
 	if completionErr != nil {
@@ -203,50 +192,31 @@ func (r *Runner) evaluatePrompt(
 	case "speed":
 		if speedErr != nil {
 			passed = false
-			quality = 0
 			notes = "speed benchmark failed: " + speedErr.Error()
 		} else {
-			quality = seedScore(prompt.ID, 72, 98)
 			notes = "speed metrics derived from runtime benchmark"
 		}
 	case "stability":
-		quality = seedScore(prompt.ID, 65, 92)
 		if strings.Contains(strings.ToLower(prompt.Prompt), "json") {
 			output = `{"status":"ok","format":"json"}`
 		}
 		notes = "stability estimated from deterministic formatting checks"
 	case "tool_use":
-		quality = seedScore(prompt.ID, 60, 90)
 		notes = "tool-use quality estimated from prompt/tool schema coverage"
 	case "context":
-		quality = seedScore(prompt.ID, 62, 90)
 		if strings.EqualFold(strings.TrimSpace(prompt.ContextLength), "long") {
-			quality -= 8
 			latency *= 1.25
 		}
 		notes = "context quality estimated across short/long prompt classes"
 	case "efficiency":
-		quality = seedScore(prompt.ID, 58, 88)
 		notes = "efficiency approximated from token and hardware profile"
-	default:
-		quality = seedScore(prompt.ID, 70, 95)
-	}
-
-	if quality < 55 {
-		passed = false
-	}
-	if quality < 0 {
-		quality = 0
-	}
-	if quality > 100 {
-		quality = 100
 	}
 
 	return types.EvalSampleDetail{
 		PromptID:     prompt.ID,
 		Category:     category,
 		Passed:       passed,
-		QualityScore: float64(quality),
+		QualityScore: 0,
 		LatencyMs:    latency,
 		TTFTMs:       ttft,
 		TokensPerSec: tps,
@@ -298,12 +268,3 @@ func validatePrompts(prompts []Prompt, workload string) ([]Prompt, error) {
 	return validated, nil
 }
 
-func seedScore(seed string, min int, max int) int {
-	if max <= min {
-		return min
-	}
-	hasher := fnv.New32a()
-	_, _ = hasher.Write([]byte(seed))
-	value := int(hasher.Sum32())
-	return min + (value % (max - min + 1))
-}

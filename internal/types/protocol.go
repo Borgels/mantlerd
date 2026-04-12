@@ -383,14 +383,14 @@ type RecommendQuery struct {
 }
 
 type ExploreQuery struct {
-	Runtime             string               `json:"runtime,omitempty"`
-	ModelID             string               `json:"modelId,omitempty"`
-	Workload            string               `json:"workload,omitempty"`
-	Harness             string               `json:"harness,omitempty"`
-	Orchestrator        string               `json:"orchestrator,omitempty"`
-	MaxAttempts         int                  `json:"maxAttempts,omitempty"`
-	Capabilities        *ExploreCapabilities `json:"capabilities,omitempty"`
-	ExcludeFingerprints []string             `json:"excludeFingerprints,omitempty"`
+	Runtime      string               `json:"runtime,omitempty"`
+	ModelID      string               `json:"modelId,omitempty"`
+	Workload     string               `json:"workload,omitempty"`
+	Harness      string               `json:"harness,omitempty"`
+	Orchestrator string               `json:"orchestrator,omitempty"`
+	MaxAttempts  int                  `json:"maxAttempts,omitempty"`
+	Capabilities *ExploreCapabilities `json:"capabilities,omitempty"`
+	ExcludeFingerprints []string      `json:"excludeFingerprints,omitempty"`
 }
 
 type ExploreCapabilities struct {
@@ -412,11 +412,11 @@ type ExploreSelection struct {
 }
 
 type ExplorePlan struct {
-	ID                string `json:"id"`
-	Status            string `json:"status"`
-	Confidence        string `json:"confidence"`
-	BaseFingerprint   string `json:"baseFingerprint"`
-	MantleFingerprint string `json:"mantleFingerprint"`
+	ID                string   `json:"id"`
+	Status            string   `json:"status"`
+	Confidence        string   `json:"confidence"`
+	BaseFingerprint   string   `json:"baseFingerprint"`
+	MantleFingerprint string   `json:"mantleFingerprint"`
 	Compatibility     struct {
 		Allowed  bool     `json:"allowed"`
 		Blockers []string `json:"blockers"`
@@ -439,11 +439,11 @@ type ExplorePlan struct {
 		InstallMode  string            `json:"installMode,omitempty"`
 		HealthChecks []string          `json:"healthChecks,omitempty"`
 	} `json:"runtimePlan"`
-	CreatedAt  string `json:"createdAt"`
-	AppliedAt  string `json:"appliedAt,omitempty"`
+	CreatedAt string `json:"createdAt"`
+	AppliedAt string `json:"appliedAt,omitempty"`
 	VerifiedAt string `json:"verifiedAt,omitempty"`
-	FailedAt   string `json:"failedAt,omitempty"`
-	ScoredAt   string `json:"scoredAt,omitempty"`
+	FailedAt string `json:"failedAt,omitempty"`
+	ScoredAt string `json:"scoredAt,omitempty"`
 }
 
 type ExploreResponse struct {
@@ -469,16 +469,60 @@ type ScoreRawSignals struct {
 	Cost          *float64 `json:"cost"`
 }
 
+type EvidenceBreakdown struct {
+	Verified     int `json:"verified"`
+	Observed     int `json:"observed"`
+	SelfReported int `json:"selfReported"`
+}
+
 type ScoreResponse struct {
-	MantleFingerprint string          `json:"mantleFingerprint"`
-	Overall           float64         `json:"overall"`
-	ProfileID         string          `json:"profileId"`
-	FormulaVersion    int             `json:"formulaVersion"`
-	ConfidenceTier    string          `json:"confidenceTier"`
-	EvidenceSignals   int             `json:"evidenceSignals"`
-	EvidenceCount     int             `json:"evidenceCount"`
+	MantleFingerprint string  `json:"mantleFingerprint"`
+	Overall           float64 `json:"overall"`
+	ProfileID         string  `json:"profileId"`
+	FormulaVersion    int     `json:"formulaVersion"`
+	ConfidenceTier    string  `json:"confidenceTier"`
+	EvidenceSignals   int     `json:"evidenceSignals"`
+	EvidenceCount     int     `json:"evidenceCount"`
+	EvidenceBreakdown EvidenceBreakdown `json:"evidenceBreakdown"`
 	RawSignals        ScoreRawSignals `json:"rawSignals"`
-	UpdatedAt         string          `json:"updatedAt"`
+	UpdatedAt         string  `json:"updatedAt"`
+}
+
+type EvalChallengeSessionStartResponse struct {
+	SessionID             string `json:"sessionId"`
+	BenchmarkSuiteID      string `json:"benchmarkSuiteId"`
+	BenchmarkSuiteVersion string `json:"benchmarkSuiteVersion"`
+	NextPromptID          string `json:"nextPromptId,omitempty"`
+	Prompts               []EvalChallengePrompt `json:"prompts,omitempty"`
+}
+
+type EvalChallengePrompt struct {
+	ID            string   `json:"id"`
+	Category      string   `json:"category"`
+	Workload      string   `json:"workload"`
+	Prompt        string   `json:"prompt"`
+	SystemPrompt  string   `json:"systemPrompt,omitempty"`
+	MaxTokens     int      `json:"maxTokens,omitempty"`
+	ContextLength string   `json:"contextLength,omitempty"`
+	SuiteID       string   `json:"suiteId,omitempty"`
+	SuiteVersion  string   `json:"suiteVersion,omitempty"`
+	Choices       []string `json:"choices,omitempty"`
+	Subject       string   `json:"subject,omitempty"`
+}
+
+type EvalChallengeResponseResult struct {
+	SessionID   string `json:"sessionId"`
+	Done        bool   `json:"done"`
+	NextPromptID string `json:"nextPromptId,omitempty"`
+	ScoreCount  int    `json:"scoreCount,omitempty"`
+}
+
+type EvalChallengeStatus struct {
+	SessionID   string `json:"sessionId"`
+	Done        bool   `json:"done"`
+	Cursor      int    `json:"cursor"`
+	TotalPrompts int   `json:"totalPrompts"`
+	ScoreCount  int    `json:"scoreCount,omitempty"`
 }
 
 type ModelFeatureFlags struct {

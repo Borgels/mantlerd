@@ -7,8 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -43,11 +43,6 @@ var (
 	exploreEval     bool
 	exploreJSON     bool
 )
-
-var runtimePlanAllowedRoots = []string{
-	"/etc/mantler",
-	"/var/lib/mantler",
-}
 
 func init() {
 	rootCmd.AddCommand(exploreCmd)
@@ -276,16 +271,31 @@ func runExplore(cmd *cobra.Command, args []string) error {
 			}
 		}()
 
+		challengeSessionID := ""
 		prompts := localEvalPrompts(workload, "quick")
-		evalSessionToken := ""
-		promptCtx, promptCancel := context.WithTimeout(context.Background(), 15*time.Second)
-		serverPrompts, sessionToken, promptErr := cl.GetEvalPrompts(promptCtx, workload, "quick", "mantler-standard")
-		promptCancel()
-		if promptErr == nil && len(serverPrompts) > 0 {
-			prompts = serverPrompts
-			evalSessionToken = strings.TrimSpace(sessionToken)
-		} else if !exploreJSON {
-			fmt.Fprintf(os.Stderr, "Warning: failed to fetch server eval prompts/session; using local prompts (%v)\n", promptErr)
+		challengeCtx, challengeCancel := context.WithTimeout(context.Background(), 20*time.Second)
+		challengeStart, challengeErr := cl.StartEvalSession(challengeCtx, workload, "quick", "mantler-standard")
+		challengeCancel()
+		if challengeErr == nil && challengeStart != nil {
+			challengeSessionID = strings.TrimSpace(challengeStart.SessionID)
+			if len(challengeStart.Prompts) > 0 {
+				prompts = make([]agenteval.Prompt, 0, len(challengeStart.Prompts))
+				for _, prompt := range challengeStart.Prompts {
+					prompts = append(prompts, agenteval.Prompt{
+						ID: prompt.ID,
+						Category: prompt.Category,
+						Workload: prompt.Workload,
+						Prompt: prompt.Prompt,
+						SystemPrompt: prompt.SystemPrompt,
+						MaxTokens: prompt.MaxTokens,
+						ContextLength: prompt.ContextLength,
+						SuiteID: prompt.SuiteID,
+						SuiteVersion: prompt.SuiteVersion,
+						Choices: prompt.Choices,
+						Subject: prompt.Subject,
+					})
+				}
+			}
 		}
 		if !exploreEval && len(prompts) > 1 {
 			prompts = prompts[:1]
@@ -296,9 +306,6 @@ func runExplore(cmd *cobra.Command, args []string) error {
 		summary, err := runner.Run(evalCtx, modelID, workload, "quick", prompts, nil)
 		if err != nil {
 			return fmt.Errorf("eval run failed: %w", err)
-		}
-		if evalSessionToken != "" {
-			summary.EvalSessionToken = evalSessionToken
 		}
 		if !exploreJSON {
 			printEvalSummary(summary)
@@ -326,6 +333,25 @@ func runExplore(cmd *cobra.Command, args []string) error {
 		); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to report outcomes: %v\n", err)
 		}
+		if challengeSessionID != "" {
+			for _, sample := range summary.Samples {
+				respondCtx, respondCancel := context.WithTimeout(context.Background(), 15*time.Second)
+				_, respondErr := cl.RespondToChallenge(
+					respondCtx,
+					challengeSessionID,
+					sample.PromptID,
+					sample.Output,
+					sample.LatencyMs,
+					sample.TTFTMs,
+					sample.TokensPerSec,
+					sample.OutputTokens,
+				)
+				respondCancel()
+				if respondErr != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to upload challenge response for prompt %s: %v\n", sample.PromptID, respondErr)
+				}
+			}
+		}
 
 		var score *types.ScoreResponse
 		targetFingerprints := []string{
@@ -347,11 +373,20 @@ func runExplore(cmd *cobra.Command, args []string) error {
 			score = buildLocalFallbackScore(exploreResp, summary)
 		}
 		if score != nil && !exploreJSON {
+			evidenceCount := score.EvidenceCount
+			if evidenceCount <= 0 {
+				evidenceCount = score.EvidenceSignals
+			}
+			profileID := strings.TrimSpace(score.ProfileID)
+			if profileID == "" {
+				profileID = "balanced"
+			}
 			fmt.Printf(
-				"Score: overall=%.2f confidence=%s evidence=%d\n",
-				score.Overall,
-				score.ConfidenceTier,
-				score.EvidenceSignals,
+				"Score: %s (%s preset, based on %d runs, formula v%d)\n",
+				formatStackScore(score.Overall),
+				profileID,
+				evidenceCount,
+				max(1, score.FormulaVersion),
 			)
 		}
 
@@ -430,7 +465,11 @@ func buildLocalFallbackScore(exploreResp *types.ExploreResponse, summary types.E
 	}
 	overall := 0.0
 	if len(summary.Samples) > 0 {
-		overall = totalQuality / float64(len(summary.Samples))
+		avgQuality := totalQuality / float64(len(summary.Samples))
+		normalizedQuality := avgQuality / 80.0
+		if normalizedQuality > 0 {
+			overall = math.Floor(1000.0 * math.Pow(normalizedQuality, 1.5))
+		}
 	}
 	fingerprint := strings.TrimSpace(exploreResp.Plan.BaseFingerprint)
 	if fingerprint == "" {
@@ -440,10 +479,37 @@ func buildLocalFallbackScore(exploreResp *types.ExploreResponse, summary types.E
 		MantleFingerprint: fingerprint,
 		Overall:           overall,
 		ProfileID:         "balanced",
+		FormulaVersion:    1,
 		ConfidenceTier:    "provisional",
 		EvidenceSignals:   len(summary.Samples),
+		EvidenceCount:     len(summary.Samples),
 		UpdatedAt:         time.Now().UTC().Format(time.RFC3339),
 	}
+}
+
+func formatStackScore(value float64) string {
+	if value <= 0 {
+		return "n/a"
+	}
+	return fmt.Sprintf("%s", formatThousands(int64(value+0.5)))
+}
+
+func formatThousands(value int64) string {
+	raw := strconv.FormatInt(value, 10)
+	if len(raw) <= 3 {
+		return raw
+	}
+	var b strings.Builder
+	prefix := len(raw) % 3
+	if prefix == 0 {
+		prefix = 3
+	}
+	b.WriteString(raw[:prefix])
+	for i := prefix; i < len(raw); i += 3 {
+		b.WriteString(",")
+		b.WriteString(raw[i : i+3])
+	}
+	return b.String()
 }
 
 func applyExploreRuntimePlan(runtimeName string, plan types.ExplorePlan) (func(), error) {
@@ -603,17 +669,13 @@ func applyRuntimePlanFiles(files []types.RuntimePlanFile) (func(), error) {
 		if destination == "" {
 			continue
 		}
-		safeDestination, err := sanitizeRuntimePlanPath(destination)
+		sanitizedDestination, err := sanitizeRuntimePlanPath(destination)
 		if err != nil {
 			return nil, err
 		}
 		content := []byte(file.Content)
 		if len(content) == 0 && source != "" {
-			safeSource, err := sanitizeRuntimePlanPath(source)
-			if err != nil {
-				return nil, err
-			}
-			sourceFile, err := os.Open(safeSource)
+			sourceFile, err := os.Open(source)
 			if err != nil {
 				if errors.Is(err, os.ErrNotExist) {
 					continue
@@ -631,7 +693,7 @@ func applyRuntimePlanFiles(files []types.RuntimePlanFile) (func(), error) {
 		}
 
 		destExists := true
-		original, readErr := os.ReadFile(safeDestination)
+		original, readErr := os.ReadFile(sanitizedDestination)
 		if readErr != nil {
 			if !errors.Is(readErr, os.ErrNotExist) {
 				return nil, readErr
@@ -639,18 +701,18 @@ func applyRuntimePlanFiles(files []types.RuntimePlanFile) (func(), error) {
 			destExists = false
 			original = nil
 		}
-		if err := os.MkdirAll(filepath.Dir(safeDestination), 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(sanitizedDestination), 0o755); err != nil {
 			return nil, err
 		}
-		if err := os.WriteFile(safeDestination, content, 0o600); err != nil {
+		if err := os.WriteFile(sanitizedDestination, content, 0o600); err != nil {
 			return nil, err
 		}
 		restoreFns = append(restoreFns, func() {
 			if destExists {
-				_ = os.WriteFile(safeDestination, original, 0o600)
+				_ = os.WriteFile(sanitizedDestination, original, 0o600)
 				return
 			}
-			_ = os.Remove(safeDestination)
+			_ = os.Remove(sanitizedDestination)
 		})
 	}
 	if len(restoreFns) == 0 {
@@ -663,21 +725,25 @@ func applyRuntimePlanFiles(files []types.RuntimePlanFile) (func(), error) {
 	}, nil
 }
 
-func sanitizeRuntimePlanPath(path string) (string, error) {
-	cleanPath := filepath.Clean(strings.TrimSpace(path))
-	if cleanPath == "." || cleanPath == "" {
-		return "", fmt.Errorf("runtime plan file path is empty")
+func sanitizeRuntimePlanPath(destination string) (string, error) {
+	cleaned := filepath.Clean(strings.TrimSpace(destination))
+	if cleaned == "." || cleaned == "" {
+		return "", fmt.Errorf("runtime plan destination is empty")
 	}
-	if !filepath.IsAbs(cleanPath) {
-		return "", fmt.Errorf("runtime plan path %q must be absolute", path)
+	if !filepath.IsAbs(cleaned) {
+		return "", fmt.Errorf("runtime plan destination must be absolute: %s", destination)
 	}
-	for _, root := range runtimePlanAllowedRoots {
-		cleanRoot := filepath.Clean(root)
-		if cleanPath == cleanRoot || strings.HasPrefix(cleanPath, cleanRoot+string(os.PathSeparator)) {
-			return cleanPath, nil
+	allowedRoots := []string{
+		"/etc/mantler",
+		"/var/lib/mantler",
+		"/opt/mantler",
+	}
+	for _, root := range allowedRoots {
+		if cleaned == root || strings.HasPrefix(cleaned, root+"/") {
+			return cleaned, nil
 		}
 	}
-	return "", fmt.Errorf("runtime plan path %q must be under %s", path, strings.Join(runtimePlanAllowedRoots, ", "))
+	return "", fmt.Errorf("runtime plan destination %q is outside allowed roots", destination)
 }
 
 func waitForExploreHealthChecks(runtimeName string, checks []string, timeout time.Duration) error {
@@ -703,19 +769,9 @@ func waitForExploreHealthChecks(runtimeName string, checks []string, timeout tim
 			if strings.EqualFold(strings.TrimSpace(runtimeName), "ollama") && strings.TrimSpace(target) == "/health" {
 				target = "/api/tags"
 			}
-			if strings.HasPrefix(target, "http://") || strings.HasPrefix(target, "https://") {
-				parsed, parseErr := url.Parse(target)
-				if parseErr != nil {
-					lastErr = parseErr
-					allHealthy = false
-					continue
-				}
-				target = parsed.Path
-				if target == "" {
-					target = "/"
-				}
+			if !strings.HasPrefix(target, "http://") && !strings.HasPrefix(target, "https://") {
+				target = strings.TrimRight(baseURL, "/") + "/" + strings.TrimLeft(target, "/")
 			}
-			target = strings.TrimRight(baseURL, "/") + "/" + strings.TrimLeft(target, "/")
 			req, err := http.NewRequest(http.MethodGet, target, nil)
 			if err != nil {
 				lastErr = err
@@ -847,9 +903,9 @@ func recordFailedFingerprint(resp *types.ExploreResponse, target map[string]stru
 
 func filterRuntimePlanArgs(runtimeName string, args []string) []string {
 	allowedPrefixes := map[string][]string{
-		"vllm":     {"--model", "--tensor-parallel-size", "--max-model-len", "--gpu-memory-utilization", "--dtype"},
+		"vllm": {"--model", "--tensor-parallel-size", "--max-model-len", "--gpu-memory-utilization", "--dtype"},
 		"tensorrt": {"--model", "--max_batch_size", "--max_input_len", "--max_output_len", "--max_beam_width"},
-		"ollama":   {"--num-gpu", "--num-ctx", "--temperature", "--top-p"},
+		"ollama": {"--num-gpu", "--num-ctx", "--temperature", "--top-p"},
 	}
 	prefixes := allowedPrefixes[runtimeName]
 	if len(prefixes) == 0 {
@@ -876,9 +932,9 @@ func filterRuntimePlanEnv(runtimeName string, env map[string]string) map[string]
 		return map[string]string{}
 	}
 	allowedPrefixes := map[string][]string{
-		"vllm":     {"VLLM_", "HF_", "HUGGINGFACE_", "NVIDIA_", "CUDA_"},
+		"vllm": {"VLLM_", "HF_", "HUGGINGFACE_", "NVIDIA_", "CUDA_"},
 		"tensorrt": {"TENSORRT_", "HF_", "HUGGINGFACE_", "NVIDIA_", "CUDA_"},
-		"ollama":   {"OLLAMA_", "HF_", "HUGGINGFACE_"},
+		"ollama": {"OLLAMA_", "HF_", "HUGGINGFACE_"},
 	}
 	prefixes := allowedPrefixes[runtimeName]
 	if len(prefixes) == 0 {

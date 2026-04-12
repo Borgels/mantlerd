@@ -141,14 +141,40 @@ func runEval(cmd *cobra.Command, args []string) {
 	}
 	prompts := localEvalPrompts(workload, profile)
 	evalSessionToken := ""
+	challengeSessionID := ""
 	runtimeHint := strings.TrimSpace(evalRuntime)
 	if reportingCtx != nil {
-		promptCtx, promptCancel := context.WithTimeout(context.Background(), 15*time.Second)
-		serverPrompts, sessionToken, promptErr := reportingCtx.client.GetEvalPrompts(promptCtx, workload, profile, suiteID)
+		promptCtx, promptCancel := context.WithTimeout(context.Background(), 20*time.Second)
+		challengeStart, challengeErr := reportingCtx.client.StartEvalSession(promptCtx, workload, profile, suiteID)
 		promptCancel()
-		if promptErr == nil && len(serverPrompts) > 0 {
-			prompts = serverPrompts
-			evalSessionToken = strings.TrimSpace(sessionToken)
+		if challengeErr == nil && challengeStart != nil {
+			challengeSessionID = strings.TrimSpace(challengeStart.SessionID)
+			if len(challengeStart.Prompts) > 0 {
+				prompts = make([]agenteval.Prompt, 0, len(challengeStart.Prompts))
+				for _, prompt := range challengeStart.Prompts {
+					prompts = append(prompts, agenteval.Prompt{
+						ID: prompt.ID,
+						Category: prompt.Category,
+						Workload: prompt.Workload,
+						Prompt: prompt.Prompt,
+						SystemPrompt: prompt.SystemPrompt,
+						MaxTokens: prompt.MaxTokens,
+						ContextLength: prompt.ContextLength,
+						SuiteID: prompt.SuiteID,
+						SuiteVersion: prompt.SuiteVersion,
+						Choices: prompt.Choices,
+						Subject: prompt.Subject,
+					})
+				}
+			}
+		} else {
+			promptCtx, promptCancel = context.WithTimeout(context.Background(), 15*time.Second)
+			serverPrompts, sessionToken, promptErr := reportingCtx.client.GetEvalPrompts(promptCtx, workload, profile, suiteID)
+			promptCancel()
+			if promptErr == nil && len(serverPrompts) > 0 {
+				prompts = serverPrompts
+				evalSessionToken = strings.TrimSpace(sessionToken)
+			}
 		}
 	}
 	manager := runtime.NewManager()
@@ -219,6 +245,28 @@ func runEval(cmd *cobra.Command, args []string) {
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to report eval outcomes to server: %v\n", err)
 			return
+		}
+		if challengeSessionID != "" {
+			for _, sample := range summary.Samples {
+				challengeCtx, challengeCancel := context.WithTimeout(context.Background(), 15*time.Second)
+				_, challengeErr := reportingCtx.client.RespondToChallenge(
+					challengeCtx,
+					challengeSessionID,
+					sample.PromptID,
+					sample.Output,
+					sample.LatencyMs,
+					sample.TTFTMs,
+					sample.TokensPerSec,
+					sample.OutputTokens,
+				)
+				challengeCancel()
+				if challengeErr != nil {
+					fmt.Fprintf(os.Stderr, "Warning: challenge response failed for prompt %s: %v\n", sample.PromptID, challengeErr)
+				}
+			}
+			statusCtx, statusCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			_, _ = reportingCtx.client.GetEvalSessionResult(statusCtx, challengeSessionID)
+			statusCancel()
 		}
 		if !evalJSON {
 			fmt.Println("Results reported to Mantler server.")
