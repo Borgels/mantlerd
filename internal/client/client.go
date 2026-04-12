@@ -247,7 +247,11 @@ func (c *Client) Explore(ctx context.Context, q types.ExploreQuery) (*types.Expl
 				c.baseURL,
 			)
 		}
-		return nil, fmt.Errorf("explore failed (%d): %s", resp.StatusCode, compactHTTPErrorBody(body))
+		return nil, &HTTPError{
+			StatusCode: resp.StatusCode,
+			RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After")),
+			Body:       compactHTTPErrorBody(body),
+		}
 	}
 
 	var envelope struct {

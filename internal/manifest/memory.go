@@ -74,41 +74,128 @@ func parseParameterCountInBillions(value string) float64 {
 	}
 }
 
-func EstimateModelVRAM(modelID string, runtime string, parameterCount string) int {
-	// Heuristic:
-	// - Prefer explicit parameter count when present
-	// - Assume ~2 bytes per parameter (fp16-ish effective memory footprint)
-	// - Add baseline runtime overhead per backend
-	overheadMB := 2048
+func quantBytesPerParam(value string) float64 {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "f16", "fp16", "bf16":
+		return 2.0
+	case "q8_0", "int8":
+		return 1.05
+	case "q6_k":
+		return 0.80
+	case "q5_k_m":
+		return 0.68
+	case "q4_k_m", "q4", "int4", "awq", "gptq":
+		return 0.58
+	case "q3_k_m":
+		return 0.48
+	case "q2_k":
+		return 0.37
+	default:
+		return 1.05
+	}
+}
+
+func inferQuantFromModelID(modelID string) string {
+	lower := strings.ToLower(modelID)
+	switch {
+	case strings.Contains(lower, "q8"):
+		return "q8_0"
+	case strings.Contains(lower, "q6"):
+		return "q6_k"
+	case strings.Contains(lower, "q5"):
+		return "q5_k_m"
+	case strings.Contains(lower, "q4"):
+		return "q4_k_m"
+	case strings.Contains(lower, "q3"):
+		return "q3_k_m"
+	case strings.Contains(lower, "q2"):
+		return "q2_k"
+	default:
+		return "q8_0"
+	}
+}
+
+func runtimeOverheadMB(runtime string) int {
 	switch strings.ToLower(strings.TrimSpace(runtime)) {
 	case "vllm":
-		overheadMB = 3072
+		return 1024
 	case "tensorrt":
-		overheadMB = 4096
-	case "llamacpp":
-		overheadMB = 2048
+		return 1536
+	case "llamacpp", "quantcpp":
+		return 768
+	case "mlx":
+		return 640
 	case "ollama":
-		overheadMB = 1536
+		return 700
+	default:
+		return 700
 	}
+}
 
-	billions := parseParameterCountInBillions(parameterCount)
-	if billions <= 0 {
+func estimateKvCacheMB(paramsB float64, contextLength int) int {
+	if contextLength <= 0 {
+		contextLength = 4096
+	}
+	layers := int(paramsB * 8)
+	if layers < 16 {
+		layers = 16
+	}
+	if layers > 120 {
+		layers = 120
+	}
+	kvHeads := int(paramsB * 4)
+	if kvHeads < 8 {
+		kvHeads = 8
+	}
+	if kvHeads > 128 {
+		kvHeads = 128
+	}
+	headDim := 128
+	bytes := float64(2 * layers * kvHeads * headDim * contextLength * 2) // fp16 kv cache
+	mb := int(bytes / (1024 * 1024))
+	if mb < 128 {
+		return 128
+	}
+	return mb
+}
+
+func EstimateModelVRAM(
+	modelID string,
+	runtime string,
+	parameterCount string,
+	quantization string,
+	contextLength int,
+	isMoe bool,
+	activeParams string,
+) int {
+	denseBillions := parseParameterCountInBillions(parameterCount)
+	if denseBillions <= 0 {
 		// Conservative fallback when model size is unknown.
 		if strings.Contains(strings.ToLower(modelID), "70b") {
-			billions = 70
+			denseBillions = 70
 		} else if strings.Contains(strings.ToLower(modelID), "34b") {
-			billions = 34
+			denseBillions = 34
 		} else if strings.Contains(strings.ToLower(modelID), "13b") {
-			billions = 13
+			denseBillions = 13
 		} else if strings.Contains(strings.ToLower(modelID), "8b") {
-			billions = 8
+			denseBillions = 8
 		} else {
-			billions = 7
+			denseBillions = 7
 		}
 	}
-
-	modelMB := int(billions * 1900) // ~1.9 GB / 1B params (quantized-ish, conservative)
-	return modelMB + overheadMB
+	weightBillions := denseBillions
+	if isMoe {
+		if active := parseParameterCountInBillions(activeParams); active > 0 {
+			weightBillions = active
+		}
+	}
+	quant := strings.TrimSpace(quantization)
+	if quant == "" {
+		quant = inferQuantFromModelID(modelID)
+	}
+	weightsMB := int(weightBillions * quantBytesPerParam(quant) * 1024)
+	kvCacheMB := estimateKvCacheMB(denseBillions, contextLength)
+	return weightsMB + kvCacheMB + runtimeOverheadMB(runtime)
 }
 
 func QueryGPUUtilization() (totalMB int, usedMB int, err error) {
@@ -360,13 +447,21 @@ func PlanModelLoadingWithSnapshot(
 	headroomMB := estimateHeadroomMB(snapshot.TotalMB, snapshot.Unified)
 	reclaimableMB := 0
 	for _, modelID := range ejectModelIDs {
-		reclaimableMB += EstimateModelVRAM(modelID, "", "")
+		reclaimableMB += EstimateModelVRAM(modelID, "", "", "", 0, false, "")
 	}
 	loadRequiredMB := 0
 	maxSingleLoadMB := 0
 	for _, modelID := range loadModelIDs {
 		model := desiredModelByID[modelID]
-		estimate := EstimateModelVRAM(model.ModelID, model.Runtime, model.ParameterCount)
+		estimate := EstimateModelVRAM(
+			model.ModelID,
+			model.Runtime,
+			model.ParameterCount,
+			model.Quantization,
+			model.ContextWindow,
+			model.IsMoe,
+			model.ActiveParams,
+		)
 		loadRequiredMB += estimate
 		if estimate > maxSingleLoadMB {
 			maxSingleLoadMB = estimate

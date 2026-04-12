@@ -9,6 +9,7 @@ import (
 	"github.com/Borgels/mantlerd/internal/client"
 	"github.com/Borgels/mantlerd/internal/commands"
 	"github.com/Borgels/mantlerd/internal/runtime"
+	agenttools "github.com/Borgels/mantlerd/internal/tools"
 	"github.com/Borgels/mantlerd/internal/trainer"
 	"github.com/Borgels/mantlerd/internal/types"
 	"github.com/spf13/cobra"
@@ -46,18 +47,22 @@ func runCheckin(cmd *cobra.Command, args []string) {
 	outcomes := &outcomeBuffer{}
 	runtimeManager := runtime.NewManager()
 	trainerManager := trainer.NewManager()
+	toolManager := agenttools.NewManager()
 	runtimeManager.SetOutcomeReporter(outcomes.Add)
-	executor := commands.NewExecutor(runtimeManager, trainerManager, cfg, func(payload types.AckRequest) {
+	executor := commands.NewExecutor(runtimeManager, trainerManager, toolManager, cfg, func(payload types.AckRequest) {
 		sendInProgressAck(cl, payload)
 	}, outcomes.Add)
 	dispatcher := newCommandDispatcher(context.Background(), executor, cl, defaultLightCommandConcurrency)
 
 	// Run check-in
-	runCheckIn(context.Background(), cfg, cl, runtimeManager, trainerManager, executor, outcomes, dispatcher, time.Now(), true)
+	cycle := runCheckIn(context.Background(), cfg, cl, runtimeManager, trainerManager, toolManager, executor, outcomes, dispatcher, time.Now(), true)
 	waitCtx, waitCancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer waitCancel()
 	if !dispatcher.WaitForIdle(waitCtx) {
 		log.Fatalf("timed out waiting for command completion")
+	}
+	if !cycle.success {
+		log.Fatalf("check-in failed")
 	}
 
 	fmt.Println("Check-in completed successfully")

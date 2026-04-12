@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
+	"github.com/Borgels/mantlerd/internal/config"
 	"github.com/Borgels/mantlerd/internal/runtime"
 	"github.com/Borgels/mantlerd/internal/types"
 	"github.com/spf13/cobra"
@@ -348,6 +350,26 @@ func runModelBenchmark(cmd *cobra.Command, args []string) {
 	fmt.Printf("  P95 TTFT (small):     %.2f ms\n", results.P95TTFTMsAtSmallConcurrency)
 
 	fmt.Println()
+
+	baseFingerprint := ""
+	if cfg, err := config.Load(config.DefaultConfigPath()); err == nil && strings.TrimSpace(cfg.MachineID) != "" {
+		baseFingerprint = buildBaseFingerprint(cfg.MachineID, modelID, targetRuntime, "")
+	}
+	buffer := newOutcomeBuffer()
+	buffer.Add(types.OutcomeEvent{
+		BaseFingerprint: baseFingerprint,
+		EventType:       "task_success",
+		EvidenceKind:    "verified_benchmark",
+		Detail:          fmt.Sprintf("model benchmark profile=%s runtime=%s", profile, targetRuntime),
+		BenchmarkMetrics: &types.ModelBenchmarkMetrics{
+			TTFTMs:                      results.TTFTMs,
+			OutputTokensPerSec:          results.OutputTokensPerSec,
+			TotalLatencyMs:              results.TotalLatencyMs,
+			PromptTokensPerSec:          results.PromptTokensPerSec,
+			P95TTFTMsAtSmallConcurrency: results.P95TTFTMsAtSmallConcurrency,
+		},
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+	})
 
 	// Output JSON for scripting
 	if false { // Disabled by default, can add flag to enable

@@ -259,6 +259,12 @@ func runExplore(cmd *cobra.Command, args []string) error {
 		})
 		cancel()
 		if exploreErr != nil {
+			if shouldRetryExploreRequest(exploreErr) && recommendationAttempt < 2 {
+				if !exploreJSON {
+					fmt.Fprintf(os.Stderr, "Warning: explore request timed out or upstream unavailable (%v), retrying candidate search\n", exploreErr)
+				}
+				continue
+			}
 			if shouldForceOllamaFromExploreError(exploreErr) && !forceOllama {
 				forceOllama = true
 				runtimeConstraint = "ollama"
@@ -1037,10 +1043,36 @@ func shouldForceOllamaFromExploreError(err error) bool {
 	if err == nil {
 		return false
 	}
+	var httpErr *client.HTTPError
+	if errors.As(err, &httpErr) {
+		return httpErr.StatusCode == http.StatusGatewayTimeout || httpErr.StatusCode == http.StatusBadGateway
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
 	message := strings.ToLower(err.Error())
 	return strings.Contains(message, "cuda backend requires an available gpu") ||
 		strings.Contains(message, "no compatible recommendation candidates") ||
-		strings.Contains(message, "unable to resolve a fully compatible explore candidate")
+		strings.Contains(message, "unable to resolve a fully compatible explore candidate") ||
+		strings.Contains(message, "timed out") ||
+		strings.Contains(message, "timeout")
+}
+
+func shouldRetryExploreRequest(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var httpErr *client.HTTPError
+	if errors.As(err, &httpErr) {
+		return httpErr.StatusCode == http.StatusGatewayTimeout
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "timed out") ||
+		strings.Contains(message, "timeout") ||
+		strings.Contains(message, "client.timeout exceeded")
 }
 
 func runtimeHealthBaseURL(runtimeName string) string {

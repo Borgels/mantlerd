@@ -20,6 +20,7 @@ import (
 	"github.com/Borgels/mantlerd/internal/config"
 	"github.com/Borgels/mantlerd/internal/discovery"
 	runtimeagent "github.com/Borgels/mantlerd/internal/runtime"
+	agenttools "github.com/Borgels/mantlerd/internal/tools"
 	"github.com/Borgels/mantlerd/internal/trainer"
 	"github.com/Borgels/mantlerd/internal/types"
 	"github.com/spf13/cobra"
@@ -31,7 +32,8 @@ const (
 	maxDegradedInterval            = 5 * time.Minute
 )
 
-var outcomeBufferPath = "/var/lib/mantler/outcome-buffer.json"
+var jitterRNG = rand.New(rand.NewSource(time.Now().UnixNano()))
+var outcomeBufferPath = resolveWritableStatePath("/var/lib/mantler/outcome-buffer.json", ".mantler/outcome-buffer.json")
 
 var startCmd = &cobra.Command{
 	Use:   "start",
@@ -61,8 +63,9 @@ func runStart(cmd *cobra.Command, args []string) {
 	// Create runtime manager and executor
 	runtimeManager := runtimeagent.NewManager()
 	trainerManager := trainer.NewManager()
+	toolManager := agenttools.NewManager()
 	runtimeManager.SetOutcomeReporter(outcomes.Add)
-	executor := commands.NewExecutor(runtimeManager, trainerManager, cfg, func(payload types.AckRequest) {
+	executor := commands.NewExecutor(runtimeManager, trainerManager, toolManager, cfg, func(payload types.AckRequest) {
 		sendInProgressAck(cl, payload)
 	}, outcomes.Add)
 
@@ -74,7 +77,7 @@ func runStart(cmd *cobra.Command, args []string) {
 	// Run initial check-in
 	startedAt := time.Now()
 	consecutiveFailures := 0
-	cycle := runCheckIn(ctx, cfg, cl, runtimeManager, trainerManager, executor, outcomes, dispatcher, startedAt, consecutiveFailures == 0)
+	cycle := runCheckIn(ctx, cfg, cl, runtimeManager, trainerManager, toolManager, executor, outcomes, dispatcher, startedAt, consecutiveFailures == 0)
 	if cycle.success {
 		consecutiveFailures = 0
 	} else {
@@ -89,7 +92,7 @@ func runStart(cmd *cobra.Command, args []string) {
 			log.Println("Shutting down agent...")
 			return
 		case <-timer.C:
-			cycle = runCheckIn(ctx, cfg, cl, runtimeManager, trainerManager, executor, outcomes, dispatcher, startedAt, consecutiveFailures == 0)
+			cycle = runCheckIn(ctx, cfg, cl, runtimeManager, trainerManager, toolManager, executor, outcomes, dispatcher, startedAt, consecutiveFailures == 0)
 			if cycle.success {
 				consecutiveFailures = 0
 			} else {
@@ -349,17 +352,13 @@ func (b *outcomeBuffer) load() {
 
 func (b *outcomeBuffer) persistLocked() {
 	if err := os.MkdirAll(filepath.Dir(outcomeBufferPath), 0o755); err != nil {
-		log.Printf("failed to create outcome buffer directory: %v", err)
 		return
 	}
 	raw, err := json.Marshal(b.events)
 	if err != nil {
-		log.Printf("failed to marshal outcome buffer: %v", err)
 		return
 	}
-	if err := os.WriteFile(outcomeBufferPath, raw, 0o600); err != nil {
-		log.Printf("failed to persist outcome buffer: %v", err)
-	}
+	_ = os.WriteFile(outcomeBufferPath, raw, 0o600)
 }
 
 func runCheckIn(
@@ -368,6 +367,7 @@ func runCheckIn(
 	cl *client.Client,
 	runtimeManager *runtimeagent.Manager,
 	trainerManager *trainer.Manager,
+	toolManager *agenttools.Manager,
 	executor *commands.Executor,
 	outcomes *outcomeBuffer,
 	dispatcher *commandDispatcher,
@@ -378,6 +378,12 @@ func runCheckIn(
 	cachedDesired := loadCachedDesiredConfig()
 
 	report := discovery.Collect()
+	for idx := range report.GPUs {
+		bandwidth, source := toolManager.MeasureGPUBandwidth(report.GPUVendor, report.GPUs[idx].Name)
+		report.GPUs[idx].MemoryBandwidthGBps = bandwidth
+		report.GPUs[idx].BandwidthSource = source
+	}
+	installedTools := toolManager.InstalledTools(report.GPUVendor)
 	installedRuntimeNames := runtimeManager.InstalledRuntimes()
 	installedRuntimeTypes := toRuntimeTypes(installedRuntimeNames)
 	readyRuntimeNames := runtimeManager.ReadyRuntimes()
@@ -410,6 +416,8 @@ func runCheckIn(
 		RAMTotalMB:             report.RAMTotalMB,
 		GPUs:                   toProtocolGPUInfo(report.GPUs),
 		Interconnect:           report.Interconnect,
+		GPUInterconnect:        report.GPUInterconnect,
+		AcceleratorStack:       report.AcceleratorStack,
 		AgentVersion:           agentVersion,
 		AgentHealth:            computeAgentHealth(installedModels),
 		RuntimeStatus:          runtimeStatus,
@@ -420,6 +428,7 @@ func runCheckIn(
 		RuntimeConfigs:         runtimeManager.RuntimeConfigs(),
 		InstalledRuntimeTypes:  installedRuntimeTypes,
 		InstalledTrainers:      trainerManager.InstalledTrainers(),
+		InstalledTools:         installedTools,
 		InstalledModels:        installedModels,
 		InstalledHarnesses:     toInstalledHarnesses(cachedDesired),
 		InstalledOrchestrators: toInstalledOrchestrators(cachedDesired),
@@ -551,13 +560,18 @@ func toProtocolGPUInfo(values []discovery.GPUInfo) []types.GPUInfo {
 			continue
 		}
 		result = append(result, types.GPUInfo{
-			Name:              name,
-			MemoryTotalMB:     value.MemoryTotalMB,
-			MemoryUsedMB:      value.MemoryUsedMB,
-			MemoryFreeMB:      value.MemoryFreeMB,
-			Architecture:      strings.TrimSpace(value.Architecture),
-			ComputeCapability: strings.TrimSpace(value.ComputeCapability),
-			UnifiedMemory:     value.UnifiedMemory,
+			Name:                name,
+			Index:               value.Index,
+			UUID:                strings.TrimSpace(value.UUID),
+			PCIBusID:            strings.TrimSpace(value.PCIBusID),
+			MemoryTotalMB:       value.MemoryTotalMB,
+			MemoryUsedMB:        value.MemoryUsedMB,
+			MemoryFreeMB:        value.MemoryFreeMB,
+			Architecture:        strings.TrimSpace(value.Architecture),
+			ComputeCapability:   strings.TrimSpace(value.ComputeCapability),
+			UnifiedMemory:       value.UnifiedMemory,
+			MemoryBandwidthGBps: value.MemoryBandwidthGBps,
+			BandwidthSource:     strings.TrimSpace(value.BandwidthSource),
 		})
 	}
 	if len(result) == 0 {
@@ -636,7 +650,7 @@ type checkinCycleResult struct {
 func nextCheckinInterval(idleInterval time.Duration, active bool) time.Duration {
 	interval := idleInterval
 	if active {
-		const activeInterval = 15 * time.Second
+	const activeInterval = 15 * time.Second
 		if idleInterval > activeInterval {
 			interval = activeInterval
 		}
@@ -648,7 +662,7 @@ func nextCheckinInterval(idleInterval time.Duration, active bool) time.Duration 
 	if baseJitter <= 0 {
 		return interval
 	}
-	jitter := time.Duration(rand.Int63n(baseJitter))
+	jitter := time.Duration(jitterRNG.Int63n(baseJitter))
 	return interval - interval/5 + jitter
 }
 
@@ -659,23 +673,10 @@ func computeCheckinDelay(
 	rateLimitedDelay time.Duration,
 ) time.Duration {
 	if rateLimitedDelay > 0 {
-		delay := rateLimitedDelay
-		if delay > maxDegradedInterval {
-			delay = maxDegradedInterval
+		if rateLimitedDelay > maxDegradedInterval {
+			return maxDegradedInterval
 		}
-		// Spread retries to avoid synchronized bursts after rate limits.
-		jitterWindow := int64(delay) / 5
-		if jitterWindow > 0 {
-			jitter := time.Duration(rand.Int63n(jitterWindow*2+1)) - time.Duration(jitterWindow)
-			delay += jitter
-			if delay < time.Second {
-				delay = time.Second
-			}
-			if delay > maxDegradedInterval {
-				delay = maxDegradedInterval
-			}
-		}
-		return delay
+		return rateLimitedDelay
 	}
 	interval := nextCheckinInterval(idleInterval, active)
 	if consecutiveFailures <= 0 {
@@ -684,6 +685,9 @@ func computeCheckinDelay(
 	multiplier := 1
 	for i := 0; i < consecutiveFailures && multiplier < 8; i++ {
 		multiplier *= 2
+		if multiplier > 8 {
+			multiplier = 8
+		}
 	}
 	delay := interval * time.Duration(multiplier)
 	if delay > maxDegradedInterval {

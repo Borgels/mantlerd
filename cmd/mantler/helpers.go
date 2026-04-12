@@ -18,10 +18,20 @@ import (
 	"github.com/Borgels/mantlerd/internal/types"
 )
 
-const desiredConfigCachePath = "/etc/mantler/desired-config.json"
 const llamaCppKeepWarmEnv = "MANTLER_LLAMACPP_KEEP_WARM"
+var desiredConfigCachePath = resolveWritableStatePath("/etc/mantler/desired-config.json", ".mantler/desired-config.json")
+var failedAckQueuePath = resolveWritableStatePath("/var/lib/mantler/failed-acks.json", ".mantler/failed-acks.json")
 
-var failedAckQueuePath = "/var/lib/mantler/failed-acks.json"
+func resolveWritableStatePath(systemPath string, userRelativePath string) string {
+	if os.Geteuid() == 0 {
+		return systemPath
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		return systemPath
+	}
+	return filepath.Join(home, userRelativePath)
+}
 
 func enforceDesiredConfig(runtimeManager *runtime.Manager, desired types.DesiredConfig) {
 	ejectLlamaCpp := shouldAutoEjectLlamaCpp(desired)

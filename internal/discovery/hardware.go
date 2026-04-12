@@ -15,25 +15,32 @@ import (
 )
 
 type HardwareReport struct {
-	Hostname        string
-	Addresses       []string
-	OS              string
-	CPUArch         string
-	GPUVendor       string
-	HardwareSummary string
-	RAMTotalMB      int
-	GPUs            []GPUInfo
-	Interconnect    *types.InterconnectReport
+	Hostname         string
+	Addresses        []string
+	OS               string
+	CPUArch          string
+	GPUVendor        string
+	HardwareSummary  string
+	RAMTotalMB       int
+	GPUs             []GPUInfo
+	Interconnect     *types.InterconnectReport
+	GPUInterconnect  *types.GPUInterconnectReport
+	AcceleratorStack *types.AcceleratorStackReport
 }
 
 type GPUInfo struct {
-	Name              string
-	MemoryTotalMB     int
-	MemoryUsedMB      int
-	MemoryFreeMB      int
-	Architecture      string
-	ComputeCapability string
-	UnifiedMemory     *bool
+	Index               int
+	UUID                string
+	PCIBusID            string
+	Name                string
+	MemoryTotalMB       int
+	MemoryUsedMB        int
+	MemoryFreeMB        int
+	Architecture        string
+	ComputeCapability   string
+	UnifiedMemory       *bool
+	MemoryBandwidthGBps float64
+	BandwidthSource     string
 }
 
 // DetectUnifiedMemory checks for unified CPU/GPU memory architecture (e.g., DGX Spark / Grace-Blackwell).
@@ -87,18 +94,21 @@ func Collect() HardwareReport {
 	cpu := runtime.NumCPU()
 	ramTotalMB := readRAMMiB()
 	gpuSummary, gpus := readGPUInfo()
+	gpuVendor := inferGPUVendor(gpus)
 	ramGiB := ramTotalMB / 1024
 
 	return HardwareReport{
-		Hostname:        hostname,
-		Addresses:       addresses,
-		OS:              runtime.GOOS,
-		CPUArch:         normalizeArch(runtime.GOARCH),
-		GPUVendor:       inferGPUVendor(gpus),
-		HardwareSummary: fmt.Sprintf("%d vCPU / %d GB / %s", cpu, ramGiB, gpuSummary),
-		RAMTotalMB:      ramTotalMB,
-		GPUs:            gpus,
-		Interconnect:    CollectInterconnect(),
+		Hostname:         hostname,
+		Addresses:        addresses,
+		OS:               runtime.GOOS,
+		CPUArch:          normalizeArch(runtime.GOARCH),
+		GPUVendor:        gpuVendor,
+		HardwareSummary:  fmt.Sprintf("%d vCPU / %d GB / %s", cpu, ramGiB, gpuSummary),
+		RAMTotalMB:       ramTotalMB,
+		GPUs:             gpus,
+		Interconnect:     CollectInterconnect(),
+		GPUInterconnect:  CollectGPUInterconnect(gpuVendor, gpus),
+		AcceleratorStack: CollectAcceleratorStack(gpuVendor),
 	}
 }
 
@@ -114,13 +124,38 @@ func normalizeArch(value string) string {
 }
 
 func inferGPUVendor(gpus []GPUInfo) string {
-	if len(gpus) > 0 {
+	if len(gpus) == 0 {
+		if runtime.GOOS == "darwin" {
+			return "apple"
+		}
+		return "none"
+	}
+	hasNvidia := false
+	hasAMD := false
+	hasApple := false
+	for _, gpu := range gpus {
+		lower := strings.ToLower(strings.TrimSpace(gpu.Name))
+		switch {
+		case strings.Contains(lower, "nvidia"):
+			hasNvidia = true
+		case strings.Contains(lower, "amd"), strings.Contains(lower, "radeon"), strings.Contains(lower, "ati"):
+			hasAMD = true
+		case strings.Contains(lower, "apple"), strings.Contains(lower, "metal"):
+			hasApple = true
+		}
+	}
+	switch {
+	case hasNvidia && hasAMD:
+		return "mixed"
+	case hasNvidia:
 		return "nvidia"
-	}
-	if runtime.GOOS == "darwin" {
+	case hasAMD:
+		return "amd"
+	case hasApple:
 		return "apple"
+	default:
+		return "unknown"
 	}
-	return "none"
 }
 
 func collectAddresses() []string {
@@ -236,7 +271,7 @@ func readGPUInfo() (string, []GPUInfo) {
 
 	cmd := exec.Command(
 		"nvidia-smi",
-		"--query-gpu=name,memory.total,memory.used,compute_cap",
+		"--query-gpu=index,uuid,pci.bus_id,name,memory.total,memory.used,compute_cap",
 		"--format=csv,noheader",
 	)
 	out, err := cmd.Output()
@@ -246,19 +281,32 @@ func readGPUInfo() (string, []GPUInfo) {
 			lines := strings.Split(summary, "\n")
 			gpus := make([]GPUInfo, 0, len(lines))
 			labels := make([]string, 0, len(lines))
+			knownNames := make(map[string]struct{})
 			for _, rawLine := range lines {
 				line := strings.TrimSpace(rawLine)
 				if line == "" {
 					continue
 				}
 				parts := strings.Split(line, ",")
-				name := ""
+				index := 0
 				if len(parts) > 0 {
-					name = strings.TrimSpace(parts[0])
+					index, _ = strconv.Atoi(strings.TrimSpace(parts[0]))
+				}
+				uuid := ""
+				if len(parts) > 1 {
+					uuid = strings.TrimSpace(parts[1])
+				}
+				pciBusID := ""
+				if len(parts) > 2 {
+					pciBusID = strings.TrimSpace(parts[2])
+				}
+				name := ""
+				if len(parts) > 3 {
+					name = strings.TrimSpace(parts[3])
 				}
 				memoryTotalMB := 0
-				if len(parts) > 1 {
-					fields := strings.Fields(strings.TrimSpace(parts[1]))
+				if len(parts) > 4 {
+					fields := strings.Fields(strings.TrimSpace(parts[4]))
 					if len(fields) > 0 {
 						if value, parseErr := strconv.Atoi(fields[0]); parseErr == nil {
 							memoryTotalMB = value
@@ -266,8 +314,8 @@ func readGPUInfo() (string, []GPUInfo) {
 					}
 				}
 				memoryUsedMB := 0
-				if len(parts) > 2 {
-					fields := strings.Fields(strings.TrimSpace(parts[2]))
+				if len(parts) > 5 {
+					fields := strings.Fields(strings.TrimSpace(parts[5]))
 					if len(fields) > 0 {
 						if value, parseErr := strconv.Atoi(fields[0]); parseErr == nil {
 							memoryUsedMB = value
@@ -275,8 +323,8 @@ func readGPUInfo() (string, []GPUInfo) {
 					}
 				}
 				computeCapability := ""
-				if len(parts) > 3 {
-					computeCapability = strings.TrimSpace(parts[3])
+				if len(parts) > 6 {
+					computeCapability = strings.TrimSpace(parts[6])
 				}
 				memoryFreeMB := 0
 				if memoryTotalMB > 0 && memoryUsedMB >= 0 && memoryTotalMB >= memoryUsedMB {
@@ -285,6 +333,9 @@ func readGPUInfo() (string, []GPUInfo) {
 				architecture := architectureFromComputeCapability(name, computeCapability)
 				unifiedMemory := DetectUnifiedMemory()
 				gpus = append(gpus, GPUInfo{
+					Index:             index,
+					UUID:              uuid,
+					PCIBusID:          pciBusID,
 					Name:              name,
 					MemoryTotalMB:     memoryTotalMB,
 					MemoryUsedMB:      memoryUsedMB,
@@ -293,6 +344,7 @@ func readGPUInfo() (string, []GPUInfo) {
 					ComputeCapability: computeCapability,
 					UnifiedMemory:     unifiedMemory,
 				})
+				knownNames[strings.ToLower(strings.TrimSpace(name))] = struct{}{}
 				labelParts := []string{name}
 				if memoryTotalMB > 0 {
 					labelParts = append(labelParts, fmt.Sprintf("%d MiB", memoryTotalMB))
@@ -302,14 +354,71 @@ func readGPUInfo() (string, []GPUInfo) {
 				}
 				labels = append(labels, strings.Join(labelParts, ", "))
 			}
+			for _, extra := range readDisplayGPUInfoFromLSPCI() {
+				key := strings.ToLower(strings.TrimSpace(extra.Name))
+				if key == "" {
+					continue
+				}
+				if _, exists := knownNames[key]; exists {
+					continue
+				}
+				knownNames[key] = struct{}{}
+				gpus = append(gpus, extra)
+				labels = append(labels, extra.Name)
+			}
 			return strings.Join(labels, " | "), gpus
 		}
 	}
 
+	gpus := readDisplayGPUInfoFromLSPCI()
+	if len(gpus) > 0 {
+		labels := make([]string, 0, len(gpus))
+		for _, gpu := range gpus {
+			labels = append(labels, gpu.Name)
+		}
+		return strings.Join(labels, " | "), gpus
+	}
 	if _, err := os.Stat("/proc/driver/nvidia/version"); err == nil {
 		return "NVIDIA GPU (details unavailable)", nil
 	}
 	return "No GPU detected", nil
+}
+
+func readDisplayGPUInfoFromLSPCI() []GPUInfo {
+	cmd := exec.Command("lspci")
+	out, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	result := make([]GPUInfo, 0, len(lines))
+	seen := make(map[string]struct{})
+	for _, rawLine := range lines {
+		line := strings.TrimSpace(rawLine)
+		if line == "" {
+			continue
+		}
+		lower := strings.ToLower(line)
+		if !strings.Contains(lower, "vga compatible controller") &&
+			!strings.Contains(lower, "3d controller") &&
+			!strings.Contains(lower, "display controller") {
+			continue
+		}
+		colonIndex := strings.Index(line, ":")
+		if colonIndex < 0 || colonIndex+1 >= len(line) {
+			continue
+		}
+		name := strings.TrimSpace(line[colonIndex+1:])
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		result = append(result, GPUInfo{Name: name})
+	}
+	return result
 }
 
 func readAppleGPUInfo() (string, []GPUInfo) {

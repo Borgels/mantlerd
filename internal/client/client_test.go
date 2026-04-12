@@ -1,11 +1,17 @@
 package client
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/Borgels/mantlerd/internal/types"
 )
 
 func TestParseRetryAfter(t *testing.T) {
@@ -110,5 +116,93 @@ func TestRetryHonorsContextDuringBackoff(t *testing.T) {
 	}
 	if attempts != 1 {
 		t.Fatalf("expected one attempt before context cancel, got %d", attempts)
+	}
+}
+
+func TestExploreReturnsHTTPErrorEnvelope(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/agent/explore" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Retry-After", "5")
+		w.WriteHeader(http.StatusGatewayTimeout)
+		_, _ = w.Write([]byte(`{"error":{"code":"GATEWAY_ERROR","message":"timed out"}}`))
+	}))
+	defer server.Close()
+
+	cl, err := New(server.URL, "token", true)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_, err = cl.Explore(ctx, types.ExploreQuery{MaxAttempts: 1})
+	if err == nil {
+		t.Fatal("expected explore error")
+	}
+	var httpErr *HTTPError
+	if !errors.As(err, &httpErr) {
+		t.Fatalf("expected HTTPError, got %T (%v)", err, err)
+	}
+	if httpErr.StatusCode != http.StatusGatewayTimeout {
+		t.Fatalf("expected 504 status, got %d", httpErr.StatusCode)
+	}
+	if httpErr.RetryAfter != 5*time.Second {
+		t.Fatalf("expected retry-after 5s, got %v", httpErr.RetryAfter)
+	}
+}
+
+func TestExploreParsesSuccessEnvelope(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/agent/explore" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		response := map[string]any{
+			"data": map[string]any{
+				"selection": map[string]any{
+					"machineId": "m1",
+					"modelId":   "model",
+					"runtime":   "ollama",
+				},
+				"plan": map[string]any{
+					"id":                "p1",
+					"status":            "ready",
+					"confidence":        "high",
+					"baseFingerprint":   "base",
+					"mantleFingerprint": "mantle",
+					"compatibility": map[string]any{
+						"allowed":  true,
+						"blockers": []string{},
+					},
+					"resolvedLayers": map[string]any{
+						"machineId": "m1",
+						"modelId":   "model",
+						"runtime":   "ollama",
+					},
+					"runtimePlan": map[string]any{},
+					"createdAt":   time.Now().UTC().Format(time.RFC3339),
+				},
+				"attempts": 1,
+			},
+		}
+		payload, _ := json.Marshal(response)
+		_, _ = io.Copy(w, bytes.NewReader(payload))
+	}))
+	defer server.Close()
+
+	cl, err := New(server.URL, "token", true)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	resp, err := cl.Explore(ctx, types.ExploreQuery{MaxAttempts: 1})
+	if err != nil {
+		t.Fatalf("expected success, got %v", err)
+	}
+	if resp.Selection.Runtime != "ollama" {
+		t.Fatalf("expected runtime ollama, got %s", resp.Selection.Runtime)
 	}
 }

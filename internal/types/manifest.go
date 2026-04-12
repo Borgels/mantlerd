@@ -12,6 +12,7 @@ type ManifestModel struct {
 	ModelID        string                    `json:"modelId"`
 	Endpoint       string                    `json:"endpoint"`
 	Runtime        string                    `json:"runtime,omitempty"`
+	Quantization   string                    `json:"quantizationFormat,omitempty"`
 	MachineID      string                    `json:"machineId"`
 	MachineName    string                    `json:"machineName"`
 	Source         string                    `json:"source"`
@@ -20,6 +21,8 @@ type ManifestModel struct {
 	Capabilities   ManifestModelCapabilities `json:"capabilities"`
 	ContextWindow  int                       `json:"contextWindow,omitempty"`
 	ParameterCount string                    `json:"parameterCount,omitempty"`
+	IsMoe          bool                      `json:"isMoe,omitempty"`
+	ActiveParams   string                    `json:"activeParameters,omitempty"`
 }
 
 type ManifestHarness struct {
