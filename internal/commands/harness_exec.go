@@ -122,6 +122,8 @@ func (e *Executor) runHarnessExec(command types.AgentCommand) (ExecutionResult, 
 		switch params.HarnessType {
 		case "codex_cli":
 			return e.runCodexExec(command.ID, params)
+		case "opencode", "aider", "claude_code":
+			return e.runGenericCLIHarnessExec(command.ID, params)
 		default:
 			return ExecutionResult{}, fmt.Errorf("unsupported CLI harness type: %s", params.HarnessType)
 		}
@@ -138,6 +140,176 @@ func (e *Executor) runHarnessExec(command types.AgentCommand) (ExecutionResult, 
 			params.TransportKind,
 			params.HarnessType,
 		)
+	}
+}
+
+func (e *Executor) runGenericCLIHarnessExec(commandID string, params harnessExecParams) (ExecutionResult, error) {
+	startedAt := time.Now()
+	commandName := strings.TrimSpace(params.TransportCommand)
+	if commandName == "" {
+		commandName = defaultCLIHarnessCommand(params.HarnessType)
+	}
+	if commandName == "" {
+		return ExecutionResult{}, fmt.Errorf("missing CLI command for harness type %s", params.HarnessType)
+	}
+
+	workingDir := resolveHarnessWorkingDir(params.PreferredRepo)
+	prompt := buildGenericHarnessPrompt(params.Messages)
+	args, promptIncluded := buildGenericHarnessArgs(params.HarnessType, params.TransportArgs, prompt)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, commandName, args...)
+	if workingDir != "" {
+		cmd.Dir = workingDir
+	}
+	if !promptIncluded {
+		cmd.Stdin = strings.NewReader(prompt)
+	}
+	if len(params.CredentialEnv) > 0 {
+		cmd.Env = withCredentialEnv(os.Environ(), params.CredentialEnv)
+	}
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return ExecutionResult{}, fmt.Errorf("open %s stdout: %w", commandName, err)
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return ExecutionResult{}, fmt.Errorf("open %s stderr: %w", commandName, err)
+	}
+
+	if err := cmd.Start(); err != nil {
+		return ExecutionResult{}, fmt.Errorf("start %s exec: %w", commandName, err)
+	}
+
+	secretValues := credentialSecretValues(params.CredentialEnv)
+	lastContent := ""
+	var contentMu sync.Mutex
+	var stderrLines []string
+	var stderrMu sync.Mutex
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		scanner := bufio.NewScanner(stdout)
+		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line == "" {
+				continue
+			}
+			line = redactSecrets(line, secretValues)
+			contentMu.Lock()
+			lastContent = line
+			contentMu.Unlock()
+			e.emitHarnessProgress(commandID, line, &types.CommandStreamEvent{
+				ID:        fmt.Sprintf("evt-%d", time.Now().UnixNano()),
+				Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
+				Type:      "content",
+				Content:   line,
+			})
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		stderrLines = readCommandStderr(stderr, &stderrMu, secretValues)
+	}()
+
+	waitErr := cmd.Wait()
+	wg.Wait()
+
+	contentMu.Lock()
+	detail := lastContent
+	contentMu.Unlock()
+	if detail == "" && len(stderrLines) > 0 {
+		detail = strings.TrimSpace(strings.Join(stderrLines, "\n"))
+	}
+	if detail == "" {
+		detail = fmt.Sprintf("%s execution completed.", params.HarnessType)
+	}
+
+	result := ExecutionResult{
+		Details: detail,
+		ResultPayload: map[string]any{
+			"harnessId":      params.HarnessID,
+			"harnessType":    params.HarnessType,
+			"directTargetId": params.DirectTargetID,
+			"workingDir":     workingDir,
+			"command":        commandName,
+		},
+	}
+	if len(stderrLines) > 0 {
+		result.ResultPayload.(map[string]any)["stderr"] = stderrLines
+	}
+
+	eventType := "task_success"
+	if waitErr != nil {
+		eventType = "task_failure"
+	}
+	e.emitOutcome(types.OutcomeEvent{
+		TaskID:            params.TaskID,
+		PlanID:            params.CompatibilityPlanID,
+		MantleFingerprint: params.MantleFingerprint,
+		BaseFingerprint:   params.BaseFingerprint,
+		EventType:         eventType,
+		DurationMs:        time.Since(startedAt).Milliseconds(),
+		Detail:            detail,
+		Timestamp:         time.Now().UTC().Format(time.RFC3339),
+	})
+	if waitErr != nil {
+		return result, fmt.Errorf("%s exec failed: %w", params.HarnessType, waitErr)
+	}
+	return result, nil
+}
+
+func buildGenericHarnessPrompt(messages []harnessExecMessage) string {
+	var builder strings.Builder
+	builder.WriteString("Continue this conversation and provide the next assistant response.\n\n")
+	for _, message := range messages {
+		role := strings.ToUpper(strings.TrimSpace(message.Role))
+		content := strings.TrimSpace(message.Content)
+		if role == "" {
+			continue
+		}
+		builder.WriteString("[")
+		builder.WriteString(role)
+		builder.WriteString("]\n")
+		if content == "" {
+			builder.WriteString("(empty)\n\n")
+			continue
+		}
+		builder.WriteString(content)
+		builder.WriteString("\n\n")
+	}
+	return strings.TrimSpace(builder.String())
+}
+
+func buildGenericHarnessArgs(harnessType string, transportArgs []string, prompt string) ([]string, bool) {
+	if len(transportArgs) > 0 {
+		args := make([]string, 0, len(transportArgs))
+		promptIncluded := false
+		for _, arg := range transportArgs {
+			if strings.Contains(arg, "{{prompt}}") {
+				args = append(args, strings.ReplaceAll(arg, "{{prompt}}", prompt))
+				promptIncluded = true
+				continue
+			}
+			args = append(args, arg)
+		}
+		return args, promptIncluded
+	}
+	switch harnessType {
+	case "claude_code":
+		return []string{"-p", prompt}, true
+	case "aider":
+		return []string{"--message", prompt}, true
+	case "opencode":
+		return []string{"run", prompt}, true
+	default:
+		return []string{prompt}, true
 	}
 }
 

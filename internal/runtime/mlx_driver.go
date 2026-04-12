@@ -26,7 +26,7 @@ func newMLXDriver() Driver {
 	return &mlxDriver{}
 }
 
-func (d *mlxDriver) Name() string { return "mlxserver" }
+func (d *mlxDriver) Name() string { return "mlx" }
 
 func (d *mlxDriver) Install() error {
 	return fmt.Errorf("automatic MLX-server install is not supported; install and start MLX-server manually")

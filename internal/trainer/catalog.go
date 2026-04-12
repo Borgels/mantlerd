@@ -20,19 +20,19 @@ var trainerCatalog = []TrainerSpec{
 		Name:         "axolotl",
 		DisplayName:  "Axolotl",
 		Description:  "Config-driven fine-tuning toolkit",
-		CreateDriver: func() Driver { return newStubDriver("axolotl") },
+		CreateDriver: func() Driver { return newPythonPackageDriver("axolotl", "axolotl", "Axolotl") },
 	},
 	{
 		Name:         "trl",
 		DisplayName:  "TRL",
 		Description:  "Transformer reinforcement learning and SFT trainer",
-		CreateDriver: func() Driver { return newStubDriver("trl") },
+		CreateDriver: func() Driver { return newPythonPackageDriver("trl", "trl", "TRL") },
 	},
 	{
 		Name:         "llamafactory",
 		DisplayName:  "LLaMA-Factory",
 		Description:  "Unified training toolkit for adapter and full finetune jobs",
-		CreateDriver: func() Driver { return newStubDriver("llamafactory") },
+		CreateDriver: func() Driver { return newPythonPackageDriver("llamafactory", "llamafactory", "LLaMA-Factory") },
 	},
 }
 

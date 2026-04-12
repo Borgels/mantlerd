@@ -258,8 +258,19 @@ func (m *Manager) PrepareModelWithRuntime(modelID string, runtimeName string, fl
 
 // PrepareModelWithRuntimeCtx prepares a model with cancellation support.
 func (m *Manager) PrepareModelWithRuntimeCtx(ctx context.Context, modelID string, runtimeName string, flags *types.ModelFeatureFlags) error {
+	return m.PrepareModelWithRuntimeProgressCtx(ctx, modelID, runtimeName, flags, nil)
+}
+
+// PrepareModelWithRuntimeProgressCtx prepares a model and optionally emits pull progress.
+func (m *Manager) PrepareModelWithRuntimeProgressCtx(
+	ctx context.Context,
+	modelID string,
+	runtimeName string,
+	flags *types.ModelFeatureFlags,
+	onProgress func(PullProgress),
+) error {
 	if strings.TrimSpace(runtimeName) == "" {
-		return m.PrepareModelWithFlagsCtx(ctx, modelID, flags)
+		return m.PrepareModelWithFlagsProgressCtx(ctx, modelID, flags, onProgress)
 	}
 	normalizedRuntime := strings.ToLower(strings.TrimSpace(runtimeName))
 	if err := m.EnsureRuntime(normalizedRuntime); err != nil {
@@ -269,7 +280,21 @@ func (m *Manager) PrepareModelWithRuntimeCtx(ctx context.Context, modelID string
 	if err != nil {
 		return err
 	}
-	// Use context-aware method if available
+	return m.prepareWithDriverProgressCtx(ctx, driver, modelID, flags, onProgress)
+}
+
+func (m *Manager) prepareWithDriverProgressCtx(
+	ctx context.Context,
+	driver Driver,
+	modelID string,
+	flags *types.ModelFeatureFlags,
+	onProgress func(PullProgress),
+) error {
+	if onProgress != nil {
+		if progressDriver, ok := driver.(ProgressCapableDriver); ok {
+			return progressDriver.PrepareModelWithFlagsCtxAndProgress(ctx, modelID, flags, onProgress)
+		}
+	}
 	if cancellable, ok := driver.(CancellableDriver); ok {
 		return cancellable.PrepareModelWithFlagsCtx(ctx, modelID, flags)
 	}
@@ -278,6 +303,16 @@ func (m *Manager) PrepareModelWithRuntimeCtx(ctx context.Context, modelID string
 
 // PrepareModelWithFlagsCtx prepares a model with cancellation support (no explicit runtime).
 func (m *Manager) PrepareModelWithFlagsCtx(ctx context.Context, modelID string, flags *types.ModelFeatureFlags) error {
+	return m.PrepareModelWithFlagsProgressCtx(ctx, modelID, flags, nil)
+}
+
+// PrepareModelWithFlagsProgressCtx prepares a model and optionally emits pull progress.
+func (m *Manager) PrepareModelWithFlagsProgressCtx(
+	ctx context.Context,
+	modelID string,
+	flags *types.ModelFeatureFlags,
+	onProgress func(PullProgress),
+) error {
 	trimmedModel := strings.TrimSpace(modelID)
 	if trimmedModel == "" {
 		return fmt.Errorf("model ID is required")
@@ -291,19 +326,13 @@ func (m *Manager) PrepareModelWithFlagsCtx(ctx context.Context, modelID string, 
 		if err != nil {
 			return err
 		}
-		if cancellable, ok := driver.(CancellableDriver); ok {
-			return cancellable.PrepareModelWithFlagsCtx(ctx, trimmedModel, flags)
-		}
-		return driver.PrepareModelWithFlags(trimmedModel, flags)
+		return m.prepareWithDriverProgressCtx(ctx, driver, trimmedModel, flags, onProgress)
 	}
 	if strings.Contains(trimmedModel, ":") {
 		if err := m.EnsureRuntime("ollama"); err == nil {
 			driver, drvErr := m.driverFor("ollama")
 			if drvErr == nil {
-				if cancellable, ok := driver.(CancellableDriver); ok {
-					return cancellable.PrepareModelWithFlagsCtx(ctx, trimmedModel, flags)
-				}
-				return driver.PrepareModelWithFlags(trimmedModel, flags)
+				return m.prepareWithDriverProgressCtx(ctx, driver, trimmedModel, flags, onProgress)
 			}
 		}
 	}
@@ -312,10 +341,7 @@ func (m *Manager) PrepareModelWithFlagsCtx(ctx context.Context, modelID string, 
 	if err != nil {
 		return err
 	}
-	if cancellable, ok := driver.(CancellableDriver); ok {
-		return cancellable.PrepareModelWithFlagsCtx(ctx, trimmedModel, flags)
-	}
-	return driver.PrepareModelWithFlags(trimmedModel, flags)
+	return m.prepareWithDriverProgressCtx(ctx, driver, trimmedModel, flags, onProgress)
 }
 
 func (m *Manager) StartModelWithFlags(modelID string, flags *types.ModelFeatureFlags) error {
