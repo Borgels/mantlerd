@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -58,6 +59,13 @@ type exploreOutput struct {
 	Recommendation *types.ExploreResponse `json:"recommendation,omitempty"`
 	EvalSummary    *types.EvalRunSummary  `json:"evalSummary,omitempty"`
 	Score          *types.ScoreResponse   `json:"score,omitempty"`
+}
+
+const compatCatalogSyncStatePath = "/var/lib/mantler/compat-catalog-sync.json"
+
+type compatCatalogSyncState struct {
+	LastSyncedAt    string `json:"lastSyncedAt"`
+	LastCatalogHash string `json:"lastCatalogHash"`
 }
 
 func runExplore(cmd *cobra.Command, args []string) error {
@@ -282,17 +290,17 @@ func runExplore(cmd *cobra.Command, args []string) error {
 				prompts = make([]agenteval.Prompt, 0, len(challengeStart.Prompts))
 				for _, prompt := range challengeStart.Prompts {
 					prompts = append(prompts, agenteval.Prompt{
-						ID: prompt.ID,
-						Category: prompt.Category,
-						Workload: prompt.Workload,
-						Prompt: prompt.Prompt,
-						SystemPrompt: prompt.SystemPrompt,
-						MaxTokens: prompt.MaxTokens,
+						ID:            prompt.ID,
+						Category:      prompt.Category,
+						Workload:      prompt.Workload,
+						Prompt:        prompt.Prompt,
+						SystemPrompt:  prompt.SystemPrompt,
+						MaxTokens:     prompt.MaxTokens,
 						ContextLength: prompt.ContextLength,
-						SuiteID: prompt.SuiteID,
-						SuiteVersion: prompt.SuiteVersion,
-						Choices: prompt.Choices,
-						Subject: prompt.Subject,
+						SuiteID:       prompt.SuiteID,
+						SuiteVersion:  prompt.SuiteVersion,
+						Choices:       prompt.Choices,
+						Subject:       prompt.Subject,
 					})
 				}
 			}
@@ -389,6 +397,9 @@ func runExplore(cmd *cobra.Command, args []string) error {
 				max(1, score.FormulaVersion),
 			)
 		}
+		if syncErr := syncCompatCatalogDelta(cl); syncErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to sync compat catalog delta: %v\n", syncErr)
+		}
 
 		if exploreJSON {
 			redactedSummary := redactEvalSummary(summary)
@@ -409,6 +420,56 @@ func runExplore(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 	return fmt.Errorf("explore retries exhausted")
+}
+
+func loadCompatCatalogSyncState() compatCatalogSyncState {
+	raw, err := os.ReadFile(compatCatalogSyncStatePath)
+	if err != nil {
+		return compatCatalogSyncState{}
+	}
+	var state compatCatalogSyncState
+	if err := json.Unmarshal(raw, &state); err != nil {
+		return compatCatalogSyncState{}
+	}
+	return state
+}
+
+func saveCompatCatalogSyncState(state compatCatalogSyncState) error {
+	if err := os.MkdirAll(filepath.Dir(compatCatalogSyncStatePath), 0o755); err != nil {
+		return err
+	}
+	raw, err := json.Marshal(state)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(compatCatalogSyncStatePath, raw, 0o600)
+}
+
+func syncCompatCatalogDelta(cl *client.Client) error {
+	state := loadCompatCatalogSyncState()
+	var since *time.Time
+	if parsed, err := time.Parse(time.RFC3339, strings.TrimSpace(state.LastSyncedAt)); err == nil {
+		since = &parsed
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	catalog, err := cl.GetCompatCatalog(
+		ctx,
+		[]string{"models", "runtime_rules", "gpu_capabilities", "curated_recipes"},
+		since,
+	)
+	if err != nil {
+		return err
+	}
+	rawCatalog, err := json.Marshal(catalog)
+	if err != nil {
+		return err
+	}
+	hash := fmt.Sprintf("%x", sha256.Sum256(rawCatalog))
+	return saveCompatCatalogSyncState(compatCatalogSyncState{
+		LastSyncedAt:    time.Now().UTC().Format(time.RFC3339),
+		LastCatalogHash: hash,
+	})
 }
 
 func waitForScore(cl *client.Client, fingerprint string, timeout time.Duration) (*types.ScoreResponse, error) {
@@ -903,9 +964,9 @@ func recordFailedFingerprint(resp *types.ExploreResponse, target map[string]stru
 
 func filterRuntimePlanArgs(runtimeName string, args []string) []string {
 	allowedPrefixes := map[string][]string{
-		"vllm": {"--model", "--tensor-parallel-size", "--max-model-len", "--gpu-memory-utilization", "--dtype"},
+		"vllm":     {"--model", "--tensor-parallel-size", "--max-model-len", "--gpu-memory-utilization", "--dtype"},
 		"tensorrt": {"--model", "--max_batch_size", "--max_input_len", "--max_output_len", "--max_beam_width"},
-		"ollama": {"--num-gpu", "--num-ctx", "--temperature", "--top-p"},
+		"ollama":   {"--num-gpu", "--num-ctx", "--temperature", "--top-p"},
 	}
 	prefixes := allowedPrefixes[runtimeName]
 	if len(prefixes) == 0 {
@@ -932,9 +993,9 @@ func filterRuntimePlanEnv(runtimeName string, env map[string]string) map[string]
 		return map[string]string{}
 	}
 	allowedPrefixes := map[string][]string{
-		"vllm": {"VLLM_", "HF_", "HUGGINGFACE_", "NVIDIA_", "CUDA_"},
+		"vllm":     {"VLLM_", "HF_", "HUGGINGFACE_", "NVIDIA_", "CUDA_"},
 		"tensorrt": {"TENSORRT_", "HF_", "HUGGINGFACE_", "NVIDIA_", "CUDA_"},
-		"ollama": {"OLLAMA_", "HF_", "HUGGINGFACE_"},
+		"ollama":   {"OLLAMA_", "HF_", "HUGGINGFACE_"},
 	}
 	prefixes := allowedPrefixes[runtimeName]
 	if len(prefixes) == 0 {
