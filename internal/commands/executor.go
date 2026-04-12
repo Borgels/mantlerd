@@ -34,6 +34,7 @@ type Executor struct {
 	runtimeManager *agentruntime.Manager
 	trainerManager *agenttrainer.Manager
 	cfg            config.Config
+	processStarted time.Time
 	progress       func(payload types.AckRequest)
 	outcome        func(event types.OutcomeEvent)
 
@@ -87,6 +88,7 @@ func NewExecutor(
 		runtimeManager:  runtimeManager,
 		trainerManager:  trainerManager,
 		cfg:             cfg,
+		processStarted:  time.Now(),
 		progress:        progress,
 		outcome:         outcome,
 		activeCancel:    make(map[string]context.CancelFunc),
@@ -379,7 +381,21 @@ func (e *Executor) ExecuteWithContext(ctx context.Context, command types.AgentCo
 		}
 		return ExecutionResult{Details: "engine built successfully"}, nil
 	case "health_check":
-		return ExecutionResult{}, nil
+		result, err := e.runHealthCheck()
+		if err != nil {
+			return ExecutionResult{}, err
+		}
+		serialized, marshalErr := json.Marshal(result)
+		if marshalErr != nil {
+			return ExecutionResult{
+				Details:       "health check completed",
+				ResultPayload: result,
+			}, nil
+		}
+		return ExecutionResult{
+			Details:       string(serialized),
+			ResultPayload: result,
+		}, nil
 	case "model_eval":
 		modelID, err := stringParam(command.Params, "modelId")
 		if err != nil {
@@ -1751,7 +1767,9 @@ func supportsAgentHarnessExecution(harnessType string) bool {
 		harnessType == "goose" ||
 		harnessType == "opencode" ||
 		harnessType == "aider" ||
-		harnessType == "claude_code"
+		harnessType == "claude_code" ||
+		harnessType == "open_interpreter" ||
+		harnessType == "openharness"
 }
 
 func (e *Executor) prepareHarnessesForSync(desired []types.DesiredHarness, commandID string) {

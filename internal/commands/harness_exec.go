@@ -122,11 +122,26 @@ func (e *Executor) runHarnessExec(command types.AgentCommand) (ExecutionResult, 
 		switch params.HarnessType {
 		case "codex_cli":
 			return e.runCodexExec(command.ID, params)
-		case "opencode", "aider", "claude_code":
+		case "opencode", "aider", "claude_code", "open_interpreter", "openharness":
 			return e.runGenericCLIHarnessExec(command.ID, params)
 		default:
 			return ExecutionResult{}, fmt.Errorf("unsupported CLI harness type: %s", params.HarnessType)
 		}
+	case "openai_http":
+		if params.HarnessType != "custom_openai" {
+			return ExecutionResult{}, fmt.Errorf(
+				"unsupported OpenAI-compatible harness type: %s",
+				params.HarnessType,
+			)
+		}
+		return ExecutionResult{
+			Details: "custom_openai harness uses server-managed OpenAI-compatible transport; no local agent execution required",
+			ResultPayload: map[string]any{
+				"mode":         "server_managed",
+				"transport":    "openai_http",
+				"harness_type": params.HarnessType,
+			},
+		}, nil
 	case "daemon", "session_http":
 		switch params.HarnessType {
 		case "goose":

@@ -63,14 +63,17 @@ const (
 )
 
 type InstalledModel struct {
-	ModelID         string             `json:"modelId"`
-	Runtime         RuntimeType        `json:"runtime,omitempty"`
-	Digest          string             `json:"digest,omitempty"`
-	UpdateAvailable *bool              `json:"updateAvailable,omitempty"`
-	Status          ModelInstallStatus `json:"status"`
-	StatusTimestamp string             `json:"statusTimestamp,omitempty"`
-	FailReason      string             `json:"failReason,omitempty"`
-	Capabilities    *ModelCapabilities `json:"capabilities,omitempty"`
+	ModelID            string             `json:"modelId"`
+	Runtime            RuntimeType        `json:"runtime,omitempty"`
+	Digest             string             `json:"digest,omitempty"`
+	UpdateAvailable    *bool              `json:"updateAvailable,omitempty"`
+	Status             ModelInstallStatus `json:"status"`
+	StatusTimestamp    string             `json:"statusTimestamp,omitempty"`
+	FailReason         string             `json:"failReason,omitempty"`
+	Capabilities       *ModelCapabilities `json:"capabilities,omitempty"`
+	QuantizationFormat string             `json:"quantizationFormat,omitempty"`
+	ArchitectureFamily string             `json:"architectureFamily,omitempty"`
+	ModelSizeBytes     int64              `json:"modelSizeBytes,omitempty"`
 }
 
 type AgentHealth string

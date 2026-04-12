@@ -15,6 +15,8 @@ type TrainingRequest struct {
 }
 
 type TrainingProgress struct {
+	Status          string  `json:"status,omitempty"`
+	Detail          string  `json:"detail,omitempty"`
 	CurrentStep     int     `json:"currentStep,omitempty"`
 	TotalSteps      int     `json:"totalSteps,omitempty"`
 	CurrentEpoch    float64 `json:"currentEpoch,omitempty"`
@@ -32,7 +34,8 @@ type TrainingProgress struct {
 }
 
 type TrainingResult struct {
-	Detail string `json:"detail,omitempty"`
+	Detail    string           `json:"detail,omitempty"`
+	Artifacts []ExportArtifact `json:"artifacts,omitempty"`
 }
 
 type ExportArtifact struct {
@@ -40,6 +43,9 @@ type ExportArtifact struct {
 	OutputPath string `json:"outputPath"`
 	ModelID    string `json:"modelId"`
 	Runtime    string `json:"runtime,omitempty"`
+	SizeBytes  int64  `json:"sizeBytes,omitempty"`
+	SHA256     string `json:"sha256,omitempty"`
+	CreatedAt  string `json:"createdAt,omitempty"`
 }
 
 type ExportResult struct {

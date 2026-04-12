@@ -225,3 +225,45 @@ func TestBuildGenericHarnessArgsFallsBackToStdinWhenCustomArgsOmitPrompt(t *test
 		t.Fatalf("expected args to remain unchanged, got %v", args)
 	}
 }
+
+func TestSupportsAgentHarnessExecutionIncludesExpandedCliSet(t *testing.T) {
+	supported := []string{
+		"codex_cli",
+		"goose",
+		"opencode",
+		"aider",
+		"claude_code",
+		"open_interpreter",
+		"openharness",
+	}
+	for _, harnessType := range supported {
+		if !supportsAgentHarnessExecution(harnessType) {
+			t.Fatalf("expected %s to be supported", harnessType)
+		}
+	}
+}
+
+func TestRunHarnessExecTreatsCustomOpenAIAsServerManaged(t *testing.T) {
+	executor := &Executor{}
+	result, err := executor.runHarnessExec(types.AgentCommand{
+		ID:   "cmd-1",
+		Type: "run_harness_exec",
+		Params: map[string]interface{}{
+			"harnessId":     "h-custom",
+			"harnessType":   "custom_openai",
+			"transportKind": "openai_http",
+			"messages": []interface{}{
+				map[string]interface{}{
+					"role":    "user",
+					"content": "hello",
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("expected custom_openai openai_http to be handled, got error: %v", err)
+	}
+	if !strings.Contains(result.Details, "server-managed") {
+		t.Fatalf("expected server-managed details, got %q", result.Details)
+	}
+}

@@ -434,7 +434,13 @@ func defaultCLIHarnessCommand(harnessType string) string {
 }
 
 func supportsAgentHarnessExecution(harnessType string) bool {
-	return harnessType == "codex_cli" || harnessType == "goose"
+	return harnessType == "codex_cli" ||
+		harnessType == "goose" ||
+		harnessType == "opencode" ||
+		harnessType == "aider" ||
+		harnessType == "claude_code" ||
+		harnessType == "open_interpreter" ||
+		harnessType == "openharness"
 }
 
 func gooseDaemonReachable(baseURL string) bool {
