@@ -452,13 +452,33 @@ type ExploreResponse struct {
 	Attempts  int              `json:"attempts"`
 }
 
+type CompatCatalog struct {
+	Models          []map[string]any `json:"models"`
+	RuntimeRules    []map[string]any `json:"runtimeRules"`
+	GPUCapabilities []map[string]any `json:"gpuCapabilities"`
+	CuratedRecipes  []map[string]any `json:"curatedRecipes"`
+}
+
+type ScoreRawSignals struct {
+	Compatibility *float64 `json:"compatibility"`
+	Reliability   *float64 `json:"reliability"`
+	Performance   *float64 `json:"performance"`
+	Throughput    *float64 `json:"throughput"`
+	TaskQuality   *float64 `json:"taskQuality"`
+	Efficiency    *float64 `json:"efficiency"`
+	Cost          *float64 `json:"cost"`
+}
+
 type ScoreResponse struct {
-	MantleFingerprint string  `json:"mantleFingerprint"`
-	Overall           float64 `json:"overall"`
-	ProfileID         string  `json:"profileId"`
-	ConfidenceTier    string  `json:"confidenceTier"`
-	EvidenceSignals   int     `json:"evidenceSignals"`
-	UpdatedAt         string  `json:"updatedAt"`
+	MantleFingerprint string          `json:"mantleFingerprint"`
+	Overall           float64         `json:"overall"`
+	ProfileID         string          `json:"profileId"`
+	FormulaVersion    int             `json:"formulaVersion"`
+	ConfidenceTier    string          `json:"confidenceTier"`
+	EvidenceSignals   int             `json:"evidenceSignals"`
+	EvidenceCount     int             `json:"evidenceCount"`
+	RawSignals        ScoreRawSignals `json:"rawSignals"`
+	UpdatedAt         string          `json:"updatedAt"`
 }
 
 type ModelFeatureFlags struct {
