@@ -64,7 +64,7 @@ var runtimeCatalog = []RuntimeSpec{
 		CreateDriver:    newQuantCppDriver,
 	},
 	{
-		Name:            "mlxserver",
+		Name:            "mlx",
 		DisplayName:     "MLX Server",
 		Family:          FamilyMLX,
 		Description:     "Apple Silicon runtime via MLX server",

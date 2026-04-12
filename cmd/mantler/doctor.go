@@ -204,7 +204,7 @@ func runDoctor(cmd *cobra.Command, args []string) {
 		fmt.Println("✗")
 		fmt.Println("  No runtimes installed")
 		fmt.Println("  Install a runtime: mantler runtime install <runtime>")
-		fmt.Println("  Supported: ollama, llamacpp, vllm, tensorrt, quantcpp, mlxserver")
+		fmt.Println("  Supported: ollama, llamacpp, vllm, tensorrt, quantcpp, mlx")
 		allPassed = false
 	} else {
 		fmt.Println("✓")

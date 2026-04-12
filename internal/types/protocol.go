@@ -16,6 +16,8 @@ const (
 	RuntimeOllama   RuntimeType = "ollama"
 	RuntimeLlamaCpp RuntimeType = "llamacpp"
 	RuntimeTensorRT RuntimeType = "tensorrt"
+	RuntimeQuantCPP RuntimeType = "quantcpp"
+	RuntimeMLX      RuntimeType = "mlx"
 )
 
 type TrainerType string
@@ -383,14 +385,17 @@ type RecommendQuery struct {
 }
 
 type ExploreQuery struct {
-	Runtime      string               `json:"runtime,omitempty"`
-	ModelID      string               `json:"modelId,omitempty"`
-	Workload     string               `json:"workload,omitempty"`
-	Harness      string               `json:"harness,omitempty"`
-	Orchestrator string               `json:"orchestrator,omitempty"`
-	MaxAttempts  int                  `json:"maxAttempts,omitempty"`
-	Capabilities *ExploreCapabilities `json:"capabilities,omitempty"`
-	ExcludeFingerprints []string      `json:"excludeFingerprints,omitempty"`
+	Runtime             string                    `json:"runtime,omitempty"`
+	ModelID             string                    `json:"modelId,omitempty"`
+	Workload            string                    `json:"workload,omitempty"`
+	Priority            string                    `json:"priority,omitempty"`
+	ModelType           string                    `json:"modelType,omitempty"`
+	Harness             string                    `json:"harness,omitempty"`
+	Orchestrator        string                    `json:"orchestrator,omitempty"`
+	MaxAttempts         int                       `json:"maxAttempts,omitempty"`
+	Capabilities        *ExploreCapabilities      `json:"capabilities,omitempty"`
+	ModelMetadata       map[string]map[string]any `json:"modelMetadata,omitempty"`
+	ExcludeFingerprints []string                  `json:"excludeFingerprints,omitempty"`
 }
 
 type ExploreCapabilities struct {
@@ -412,11 +417,11 @@ type ExploreSelection struct {
 }
 
 type ExplorePlan struct {
-	ID                string   `json:"id"`
-	Status            string   `json:"status"`
-	Confidence        string   `json:"confidence"`
-	BaseFingerprint   string   `json:"baseFingerprint"`
-	MantleFingerprint string   `json:"mantleFingerprint"`
+	ID                string `json:"id"`
+	Status            string `json:"status"`
+	Confidence        string `json:"confidence"`
+	BaseFingerprint   string `json:"baseFingerprint"`
+	MantleFingerprint string `json:"mantleFingerprint"`
 	Compatibility     struct {
 		Allowed  bool     `json:"allowed"`
 		Blockers []string `json:"blockers"`
@@ -439,11 +444,11 @@ type ExplorePlan struct {
 		InstallMode  string            `json:"installMode,omitempty"`
 		HealthChecks []string          `json:"healthChecks,omitempty"`
 	} `json:"runtimePlan"`
-	CreatedAt string `json:"createdAt"`
-	AppliedAt string `json:"appliedAt,omitempty"`
+	CreatedAt  string `json:"createdAt"`
+	AppliedAt  string `json:"appliedAt,omitempty"`
 	VerifiedAt string `json:"verifiedAt,omitempty"`
-	FailedAt string `json:"failedAt,omitempty"`
-	ScoredAt string `json:"scoredAt,omitempty"`
+	FailedAt   string `json:"failedAt,omitempty"`
+	ScoredAt   string `json:"scoredAt,omitempty"`
 }
 
 type ExploreResponse struct {
@@ -457,6 +462,7 @@ type CompatCatalog struct {
 	RuntimeRules    []map[string]any `json:"runtimeRules"`
 	GPUCapabilities []map[string]any `json:"gpuCapabilities"`
 	CuratedRecipes  []map[string]any `json:"curatedRecipes"`
+	Integrations    []map[string]any `json:"integrations"`
 }
 
 type ScoreRawSignals struct {
@@ -476,23 +482,23 @@ type EvidenceBreakdown struct {
 }
 
 type ScoreResponse struct {
-	MantleFingerprint string  `json:"mantleFingerprint"`
-	Overall           float64 `json:"overall"`
-	ProfileID         string  `json:"profileId"`
-	FormulaVersion    int     `json:"formulaVersion"`
-	ConfidenceTier    string  `json:"confidenceTier"`
-	EvidenceSignals   int     `json:"evidenceSignals"`
-	EvidenceCount     int     `json:"evidenceCount"`
+	MantleFingerprint string            `json:"mantleFingerprint"`
+	Overall           float64           `json:"overall"`
+	ProfileID         string            `json:"profileId"`
+	FormulaVersion    int               `json:"formulaVersion"`
+	ConfidenceTier    string            `json:"confidenceTier"`
+	EvidenceSignals   int               `json:"evidenceSignals"`
+	EvidenceCount     int               `json:"evidenceCount"`
 	EvidenceBreakdown EvidenceBreakdown `json:"evidenceBreakdown"`
-	RawSignals        ScoreRawSignals `json:"rawSignals"`
-	UpdatedAt         string  `json:"updatedAt"`
+	RawSignals        ScoreRawSignals   `json:"rawSignals"`
+	UpdatedAt         string            `json:"updatedAt"`
 }
 
 type EvalChallengeSessionStartResponse struct {
-	SessionID             string `json:"sessionId"`
-	BenchmarkSuiteID      string `json:"benchmarkSuiteId"`
-	BenchmarkSuiteVersion string `json:"benchmarkSuiteVersion"`
-	NextPromptID          string `json:"nextPromptId,omitempty"`
+	SessionID             string                `json:"sessionId"`
+	BenchmarkSuiteID      string                `json:"benchmarkSuiteId"`
+	BenchmarkSuiteVersion string                `json:"benchmarkSuiteVersion"`
+	NextPromptID          string                `json:"nextPromptId,omitempty"`
 	Prompts               []EvalChallengePrompt `json:"prompts,omitempty"`
 }
 
@@ -511,18 +517,18 @@ type EvalChallengePrompt struct {
 }
 
 type EvalChallengeResponseResult struct {
-	SessionID   string `json:"sessionId"`
-	Done        bool   `json:"done"`
+	SessionID    string `json:"sessionId"`
+	Done         bool   `json:"done"`
 	NextPromptID string `json:"nextPromptId,omitempty"`
-	ScoreCount  int    `json:"scoreCount,omitempty"`
+	ScoreCount   int    `json:"scoreCount,omitempty"`
 }
 
 type EvalChallengeStatus struct {
-	SessionID   string `json:"sessionId"`
-	Done        bool   `json:"done"`
-	Cursor      int    `json:"cursor"`
-	TotalPrompts int   `json:"totalPrompts"`
-	ScoreCount  int    `json:"scoreCount,omitempty"`
+	SessionID    string `json:"sessionId"`
+	Done         bool   `json:"done"`
+	Cursor       int    `json:"cursor"`
+	TotalPrompts int    `json:"totalPrompts"`
+	ScoreCount   int    `json:"scoreCount,omitempty"`
 }
 
 type ModelFeatureFlags struct {

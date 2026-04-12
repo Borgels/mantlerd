@@ -51,6 +51,30 @@ type CancellableDriver interface {
 	PrepareModelWithFlagsCtx(ctx context.Context, modelID string, flags *types.ModelFeatureFlags) error
 }
 
+type PullProgress struct {
+	Status    string
+	Completed int64
+	Total     int64
+	Percent   float64
+}
+
+// ProgressCapableDriver optionally reports model pull progress.
+type ProgressCapableDriver interface {
+	Driver
+	PrepareModelWithFlagsCtxAndProgress(
+		ctx context.Context,
+		modelID string,
+		flags *types.ModelFeatureFlags,
+		onProgress func(PullProgress),
+	) error
+}
+
+// ModelMetadataDriver optionally exposes runtime-native model metadata.
+type ModelMetadataDriver interface {
+	Driver
+	ShowModel(ctx context.Context, modelID string) (map[string]any, error)
+}
+
 // ConfigurableDriver exposes runtime-specific configuration for check-in reporting.
 type ConfigurableDriver interface {
 	Driver

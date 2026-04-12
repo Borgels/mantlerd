@@ -4,7 +4,7 @@ import "testing"
 
 func TestSupportedRuntimeNames(t *testing.T) {
 	names := SupportedRuntimeNames()
-	want := []string{"llamacpp", "mlxserver", "ollama", "quantcpp", "tensorrt", "vllm"}
+	want := []string{"llamacpp", "mlx", "ollama", "quantcpp", "tensorrt", "vllm"}
 	if len(names) != len(want) {
 		t.Fatalf("SupportedRuntimeNames length = %d, want %d", len(names), len(want))
 	}

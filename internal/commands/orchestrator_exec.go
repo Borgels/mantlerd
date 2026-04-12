@@ -57,6 +57,12 @@ func (e *Executor) runOrchestratorExec(command types.AgentCommand) (ExecutionRes
 			cmdArgs = append(cmdArgs, "dev")
 		case "autogen", "ag2":
 			cmdName = "ag2"
+		case "semantic_kernel":
+			cmdName = "semantic-kernel"
+		case "haystack":
+			cmdName = "haystack"
+		case "mastra":
+			cmdName = "mastra"
 		default:
 			return ExecutionResult{}, fmt.Errorf("missing orchestrator command for type %s", params.OrchestratorType)
 		}
@@ -353,6 +359,12 @@ func defaultOrchestratorCommand(orchestratorType string) string {
 		return "langgraph"
 	case "autogen", "ag2":
 		return "ag2"
+	case "semantic_kernel":
+		return "semantic-kernel"
+	case "haystack":
+		return "haystack"
+	case "mastra":
+		return "mastra"
 	default:
 		return ""
 	}
@@ -379,6 +391,13 @@ func orchestratorCommandCandidates(orchestratorType string, commandName string) 
 	case "autogen", "ag2":
 		add("ag2")
 		add("autogen")
+	case "semantic_kernel":
+		add("semantic-kernel")
+		add("semantic_kernel")
+	case "haystack":
+		add("haystack")
+	case "mastra":
+		add("mastra")
 	}
 	return result
 }
@@ -391,6 +410,12 @@ func orchestratorPackageCandidates(orchestratorType string) []string {
 		return []string{"langgraph-cli"}
 	case "autogen", "ag2":
 		return []string{"ag2", "pyautogen"}
+	case "semantic_kernel":
+		return []string{"semantic-kernel"}
+	case "haystack":
+		return []string{"haystack-ai", "haystack"}
+	case "mastra":
+		return []string{"mastra"}
 	default:
 		return nil
 	}
@@ -415,6 +440,13 @@ func autoInstallOrchestratorBinary(orchestratorType string) error {
 
 	var lastErr error
 	for _, pkg := range packages {
+		if strings.EqualFold(strings.TrimSpace(orchestratorType), "mastra") {
+			if err := installOrchestratorViaNode(ctx, pkg, commandCandidates); err == nil {
+				return nil
+			} else {
+				lastErr = err
+			}
+		}
 		steps := []installStep{
 			{binary: "pipx", args: []string{"install", "--force", pkg}},
 			{binary: "uv", args: []string{"tool", "install", "--force", pkg}},
@@ -451,6 +483,27 @@ func autoInstallOrchestratorBinary(orchestratorType string) error {
 		return lastErr
 	}
 	return fmt.Errorf("no installer available")
+}
+
+func installOrchestratorViaNode(ctx context.Context, pkg string, commandCandidates []string) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	if _, err := exec.LookPath("npm"); err != nil {
+		return err
+	}
+	prefixDir := filepath.Join(home, ".local")
+	cmd := exec.CommandContext(ctx, "npm", "install", "--global", "--prefix", prefixDir, pkg)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("npm install --global --prefix %s %s failed: %w (%s)", prefixDir, pkg, err, strings.TrimSpace(string(output)))
+	}
+	for _, candidate := range commandCandidates {
+		if _, err := resolveExecutableWithUserPath(candidate); err == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("node package installed but no executable detected for %s", pkg)
 }
 
 func installOrchestratorViaVenv(ctx context.Context, orchestratorType, pkg, commandName string) error {
@@ -554,10 +607,14 @@ func parseOrchestratorExecParams(params map[string]interface{}) (orchestratorExe
 
 func validateOrchestratorArgs(orchestratorType string, args []string) error {
 	allowedFlagPrefixes := map[string][]string{
-		"crewai":    {"--help", "--version", "--verbose", "--quiet", "--config", "--port", "--host"},
-		"langgraph": {"--help", "--version", "--verbose", "--quiet", "--config", "--port", "--host"},
-		"autogen":   {"--help", "--version", "--verbose", "--quiet", "--config", "--port", "--host"},
-		"ag2":       {"--help", "--version", "--verbose", "--quiet", "--config", "--port", "--host"},
+		"crewai":          {"--help", "--version", "--verbose", "--quiet", "--config", "--port", "--host"},
+		"langgraph":       {"--help", "--version", "--verbose", "--quiet", "--config", "--port", "--host"},
+		"autogen":         {"--help", "--version", "--verbose", "--quiet", "--config", "--port", "--host"},
+		"ag2":             {"--help", "--version", "--verbose", "--quiet", "--config", "--port", "--host"},
+		"semantic_kernel": {"--help", "--version", "--verbose", "--quiet", "--config", "--port", "--host"},
+		"haystack":        {"--help", "--version", "--verbose", "--quiet", "--config", "--port", "--host"},
+		"mastra":          {"--help", "--version", "--verbose", "--quiet", "--config", "--port", "--host"},
+		"custom":          {"--help", "--version", "--verbose", "--quiet", "--config", "--port", "--host"},
 	}
 	normalizedType := strings.ToLower(strings.TrimSpace(orchestratorType))
 	allowed := allowedFlagPrefixes[normalizedType]

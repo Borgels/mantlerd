@@ -205,3 +205,23 @@ func TestRunCodexExecEmitsTaskSuccessOutcome(t *testing.T) {
 		t.Fatalf("expected RFC3339 timestamp, got %q", last.Timestamp)
 	}
 }
+
+func TestBuildGenericHarnessArgsTracksPromptInclusion(t *testing.T) {
+	args, promptIncluded := buildGenericHarnessArgs("aider", []string{"--message", "{{prompt}}"}, "hello")
+	if !promptIncluded {
+		t.Fatalf("expected prompt placeholder to be detected")
+	}
+	if len(args) != 2 || args[1] != "hello" {
+		t.Fatalf("expected prompt placeholder replacement, got %v", args)
+	}
+}
+
+func TestBuildGenericHarnessArgsFallsBackToStdinWhenCustomArgsOmitPrompt(t *testing.T) {
+	args, promptIncluded := buildGenericHarnessArgs("claude_code", []string{"--print"}, "hello")
+	if promptIncluded {
+		t.Fatalf("expected custom args without placeholder to require stdin fallback")
+	}
+	if len(args) != 1 || args[0] != "--print" {
+		t.Fatalf("expected args to remain unchanged, got %v", args)
+	}
+}

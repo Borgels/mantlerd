@@ -1,7 +1,9 @@
 package runtime
 
 import (
+	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -40,6 +42,14 @@ type ollamaTagsResponse struct {
 		Name   string `json:"name"`
 		Digest string `json:"digest"`
 	} `json:"models"`
+}
+
+type ollamaPullProgressChunk struct {
+	Status    string `json:"status"`
+	Digest    string `json:"digest,omitempty"`
+	Total     int64  `json:"total,omitempty"`
+	Completed int64  `json:"completed,omitempty"`
+	Error     string `json:"error,omitempty"`
 }
 
 func (d *ollamaDriver) Name() string { return "ollama" }
@@ -115,7 +125,169 @@ func (d *ollamaDriver) PullModel(modelID string) error {
 	if modelID == "" {
 		return fmt.Errorf("model ID is required")
 	}
-	return runCommand("ollama", "pull", modelID)
+	return d.PullModelWithProgress(context.Background(), modelID, nil)
+}
+
+func (d *ollamaDriver) PullModelWithProgress(
+	ctx context.Context,
+	modelID string,
+	onProgress func(PullProgress),
+) error {
+	trimmedModelID := strings.TrimSpace(modelID)
+	if trimmedModelID == "" {
+		return fmt.Errorf("model ID is required")
+	}
+	payload := map[string]any{
+		"name":   trimmedModelID,
+		"stream": true,
+	}
+	rawPayload, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("encode ollama pull request: %w", err)
+	}
+	req, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodPost,
+		d.baseURL()+"/api/pull",
+		bytes.NewReader(rawPayload),
+	)
+	if err != nil {
+		return fmt.Errorf("create ollama pull request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/x-ndjson, application/json")
+	resp, err := (&http.Client{}).Do(req)
+	if err != nil {
+		return fmt.Errorf("ollama pull request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, ollamaMaxHTTPBodyBytes))
+		return fmt.Errorf("ollama pull failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 2*1024*1024)
+	lastEmitAt := time.Time{}
+	lastPercent := -1
+	lastStatus := ""
+	emitProgress := func(chunk ollamaPullProgressChunk, force bool) {
+		if onProgress == nil {
+			return
+		}
+		progress := PullProgress{
+			Status: strings.TrimSpace(chunk.Status),
+		}
+		if chunk.Completed > 0 {
+			progress.Completed = chunk.Completed
+		}
+		if chunk.Total > 0 {
+			progress.Total = chunk.Total
+		}
+		if chunk.Total > 0 && chunk.Completed >= 0 {
+			percent := math.Round((float64(chunk.Completed) / float64(chunk.Total)) * 100)
+			if percent < 0 {
+				percent = 0
+			}
+			if percent > 100 {
+				percent = 100
+			}
+			progress.Percent = percent
+		}
+		now := time.Now()
+		percentInt := int(progress.Percent)
+		shouldEmit := force || progress.Status != lastStatus || (percentInt >= 0 && percentInt != lastPercent)
+		if !force && !lastEmitAt.IsZero() && now.Sub(lastEmitAt) < 2*time.Second {
+			shouldEmit = false
+		}
+		if !shouldEmit {
+			return
+		}
+		lastStatus = progress.Status
+		lastPercent = percentInt
+		lastEmitAt = now
+		onProgress(progress)
+	}
+
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		var chunk ollamaPullProgressChunk
+		if err := json.Unmarshal([]byte(line), &chunk); err != nil {
+			return fmt.Errorf("decode ollama pull progress: %w", err)
+		}
+		if strings.TrimSpace(chunk.Error) != "" {
+			return fmt.Errorf("ollama pull error: %s", strings.TrimSpace(chunk.Error))
+		}
+		emitProgress(chunk, strings.EqualFold(strings.TrimSpace(chunk.Status), "success"))
+	}
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("read ollama pull progress: %w", err)
+	}
+	return nil
+}
+
+func (d *ollamaDriver) PrepareModelWithFlagsCtx(ctx context.Context, modelID string, flags *types.ModelFeatureFlags) error {
+	return d.PrepareModelWithFlagsCtxAndProgress(ctx, modelID, flags, nil)
+}
+
+func (d *ollamaDriver) PrepareModelWithFlagsCtxAndProgress(
+	ctx context.Context,
+	modelID string,
+	flags *types.ModelFeatureFlags,
+	onProgress func(PullProgress),
+) error {
+	if modelID == "" {
+		return fmt.Errorf("model ID is required")
+	}
+	if err := d.PullModelWithProgress(ctx, modelID, onProgress); err != nil {
+		return err
+	}
+	if flags == nil {
+		return nil
+	}
+	return d.upsertModelFlags(modelID, *flags)
+}
+
+func (d *ollamaDriver) ShowModel(ctx context.Context, modelID string) (map[string]any, error) {
+	trimmedModelID := strings.TrimSpace(modelID)
+	if trimmedModelID == "" {
+		return nil, fmt.Errorf("model ID is required")
+	}
+	payload := map[string]any{
+		"name": trimmedModelID,
+	}
+	rawPayload, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("encode ollama show request: %w", err)
+	}
+	req, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodPost,
+		d.baseURL()+"/api/show",
+		bytes.NewReader(rawPayload),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create ollama show request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	resp, err := (&http.Client{Timeout: 12 * time.Second}).Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("ollama show request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, ollamaMaxHTTPBodyBytes))
+		return nil, fmt.Errorf("ollama show failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var parsed map[string]any
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4*ollamaMaxHTTPBodyBytes)).Decode(&parsed); err != nil {
+		return nil, fmt.Errorf("decode ollama show response: %w", err)
+	}
+	return parsed, nil
 }
 
 func (d *ollamaDriver) ListModels() []string {
@@ -549,16 +721,7 @@ func (d *ollamaDriver) baseURL() string {
 }
 
 func (d *ollamaDriver) PrepareModelWithFlags(modelID string, flags *types.ModelFeatureFlags) error {
-	if modelID == "" {
-		return fmt.Errorf("model ID is required")
-	}
-	if err := d.PullModel(modelID); err != nil {
-		return err
-	}
-	if flags == nil {
-		return nil
-	}
-	return d.upsertModelFlags(modelID, *flags)
+	return d.PrepareModelWithFlagsCtxAndProgress(context.Background(), modelID, flags, nil)
 }
 
 func (d *ollamaDriver) StartModelWithFlags(modelID string, flags *types.ModelFeatureFlags) error {

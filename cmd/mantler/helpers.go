@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -15,14 +14,12 @@ import (
 	"time"
 
 	"github.com/Borgels/mantlerd/internal/client"
-	"github.com/Borgels/mantlerd/internal/netutil"
 	"github.com/Borgels/mantlerd/internal/runtime"
 	"github.com/Borgels/mantlerd/internal/types"
 )
 
 const desiredConfigCachePath = "/etc/mantler/desired-config.json"
 const llamaCppKeepWarmEnv = "MANTLER_LLAMACPP_KEEP_WARM"
-const failedAckFlushBatchSize = 50
 
 var failedAckQueuePath = "/var/lib/mantler/failed-acks.json"
 
@@ -448,7 +445,7 @@ func gooseDaemonReachable(baseURL string) bool {
 	client := &http.Client{
 		Timeout: 3 * time.Second,
 		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: netutil.ShouldSkipTLSVerifyForURL(baseURL)},
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 		},
 	}
 	resp, err := client.Get(baseURL + "/status")
@@ -509,11 +506,16 @@ func toInstalledOrchestrators(desired types.DesiredConfig) []types.InstalledOrch
 			}
 			item.Status = "ready"
 			item.Detail = "Built-in orchestrator is managed by Mantler."
-		case "crewai", "langgraph", "autogen", "ag2":
+		case "crewai", "langgraph", "autogen", "ag2", "semantic_kernel", "haystack", "mastra", "custom":
 			if item.Capabilities == nil {
 				item.Capabilities = defaultOrchestratorCapabilities(orchestrator.Type)
 			}
 			commandName := firstNonEmpty(orchestrator.Command, defaultOrchestratorCommand(orchestrator.Type))
+			if commandName == "" {
+				item.Status = "offline"
+				item.Detail = "No orchestrator command configured."
+				break
+			}
 			path, detail, err := ensureOrchestratorExecutable(orchestrator.Type, commandName)
 			if err != nil {
 				item.Status = "offline"
@@ -546,7 +548,7 @@ func defaultOrchestratorCapabilities(orchestratorType string) *types.Orchestrato
 			SupportsSubTasks:         boolPtr(true),
 			SupportsConcurrentAgents: boolPtr(false),
 		}
-	case "crewai", "langgraph", "autogen", "ag2":
+	case "crewai", "langgraph", "autogen", "ag2", "semantic_kernel", "haystack", "mastra", "custom":
 		return &types.OrchestratorCapabilities{
 			SupportsQualityGates:     boolPtr(true),
 			SupportsSkillInjection:   boolPtr(true),
@@ -580,6 +582,12 @@ func defaultOrchestratorCommand(orchestratorType string) string {
 		return "langgraph"
 	case "autogen", "ag2":
 		return "ag2"
+	case "semantic_kernel":
+		return "semantic-kernel"
+	case "haystack":
+		return "haystack"
+	case "mastra":
+		return "mastra"
 	default:
 		return ""
 	}
@@ -606,6 +614,13 @@ func orchestratorCommandCandidates(orchestratorType string, commandName string) 
 	case "autogen", "ag2":
 		add("ag2")
 		add("autogen")
+	case "semantic_kernel":
+		add("semantic-kernel")
+		add("semantic_kernel")
+	case "haystack":
+		add("haystack")
+	case "mastra":
+		add("mastra")
 	}
 	return result
 }
@@ -619,6 +634,12 @@ func orchestratorPackageCandidates(orchestratorType string) []string {
 	case "autogen", "ag2":
 		// AG2 is the modern package name. Keep pyautogen fallback for compatibility.
 		return []string{"ag2", "pyautogen"}
+	case "semantic_kernel":
+		return []string{"semantic-kernel"}
+	case "haystack":
+		return []string{"haystack-ai", "haystack"}
+	case "mastra":
+		return []string{"mastra"}
 	default:
 		return nil
 	}
@@ -679,6 +700,13 @@ func autoInstallOrchestrator(orchestratorType string) error {
 
 	var lastErr error
 	for _, pkg := range packages {
+		if strings.EqualFold(strings.TrimSpace(orchestratorType), "mastra") {
+			if err := installOrchestratorViaNode(ctx, pkg, commandCandidates); err == nil {
+				return nil
+			} else {
+				lastErr = err
+			}
+		}
 		steps := []installStep{
 			{binary: "pipx", args: []string{"install", "--force", pkg}},
 			{binary: "uv", args: []string{"tool", "install", "--force", pkg}},
@@ -716,6 +744,27 @@ func autoInstallOrchestrator(orchestratorType string) error {
 		return lastErr
 	}
 	return fmt.Errorf("no installer available")
+}
+
+func installOrchestratorViaNode(ctx context.Context, pkg string, commandCandidates []string) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	if _, err := exec.LookPath("npm"); err != nil {
+		return err
+	}
+	prefixDir := filepath.Join(home, ".local")
+	cmd := exec.CommandContext(ctx, "npm", "install", "--global", "--prefix", prefixDir, pkg)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("npm install --global --prefix %s %s: %w (%s)", prefixDir, pkg, err, strings.TrimSpace(string(output)))
+	}
+	for _, candidate := range commandCandidates {
+		if _, err := resolveExecutableWithUserPath(candidate); err == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("node package installed but executable is still missing for %s", pkg)
 }
 
 func installOrchestratorViaVenv(ctx context.Context, orchestratorType, pkg, command string) error {
@@ -887,9 +936,6 @@ func ackCommandWithRetry(ctx context.Context, cl *client.Client, payload types.A
 		ctx = context.Background()
 	}
 	for attempt := 0; attempt < 3; attempt++ {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
 		ackCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		err := cl.Ack(ackCtx, payload)
 		cancel()
@@ -897,8 +943,7 @@ func ackCommandWithRetry(ctx context.Context, cl *client.Client, payload types.A
 			return nil
 		}
 		lastErr = err
-		var httpErr *client.HTTPError
-		if errors.As(err, &httpErr) {
+		if httpErr, ok := err.(*client.HTTPError); ok {
 			if httpErr.StatusCode == 429 {
 				wait := httpErr.RetryAfter
 				if wait <= 0 {
@@ -907,22 +952,14 @@ func ackCommandWithRetry(ctx context.Context, cl *client.Client, payload types.A
 				if wait > 60*time.Second {
 					wait = 60 * time.Second
 				}
-				select {
-				case <-ctx.Done():
-					return ctx.Err()
-				case <-time.After(wait):
-				}
+				time.Sleep(wait)
 				continue
 			}
 			if httpErr.StatusCode >= 400 && httpErr.StatusCode < 500 {
 				return err
 			}
 		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(300 * time.Millisecond):
-		}
+		time.Sleep(300 * time.Millisecond)
 	}
 	_ = enqueueFailedAck(payload)
 	return lastErr
@@ -938,31 +975,18 @@ func flushFailedAcks(cl *client.Client) {
 		return
 	}
 	remaining := make([]types.AckRequest, 0, len(queued))
-	batchEnd := failedAckFlushBatchSize
-	if batchEnd > len(queued) {
-		batchEnd = len(queued)
-	}
-	flushCtx, flushCancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer flushCancel()
-	for i, payload := range queued[:batchEnd] {
-		if flushCtx.Err() != nil {
-			remaining = append(remaining, queued[i:batchEnd]...)
-			break
-		}
-		ackCtx, cancel := context.WithTimeout(flushCtx, 5*time.Second)
+	for idx, payload := range queued {
+		ackCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		err := cl.Ack(ackCtx, payload)
 		cancel()
 		if err != nil {
-			if client.IsRateLimited(err) {
-				remaining = append(remaining, queued[i:batchEnd]...)
+			remaining = append(remaining, payload)
+			if httpErr, ok := err.(*client.HTTPError); ok && httpErr.StatusCode == 429 {
+				remaining = append(remaining, queued[idx+1:]...)
 				break
 			}
-			remaining = append(remaining, payload)
-			remaining = append(remaining, queued[i+1:batchEnd]...)
-			break
 		}
 	}
-	remaining = append(remaining, queued[batchEnd:]...)
 	if err := saveFailedAcks(remaining); err != nil {
 		log.Printf("failed to persist queued acks: %v", err)
 	}

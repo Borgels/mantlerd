@@ -37,12 +37,14 @@ var exploreCmd = &cobra.Command{
 }
 
 var (
-	exploreRuntime  string
-	exploreModel    string
-	exploreWorkload string
-	exploreYes      bool
-	exploreEval     bool
-	exploreJSON     bool
+	exploreRuntime   string
+	exploreModel     string
+	exploreWorkload  string
+	explorePriority  string
+	exploreModelType string
+	exploreYes       bool
+	exploreEval      bool
+	exploreJSON      bool
 )
 
 func init() {
@@ -50,6 +52,8 @@ func init() {
 	exploreCmd.Flags().StringVar(&exploreRuntime, "runtime", "", "Runtime constraint (llamacpp, ollama, vllm, tensorrt)")
 	exploreCmd.Flags().StringVar(&exploreModel, "model", "", "Model ID constraint")
 	exploreCmd.Flags().StringVar(&exploreWorkload, "workload", "coding", "Workload (coding, chat, creative, reasoning, agents, vision)")
+	exploreCmd.Flags().StringVar(&explorePriority, "priority", "balanced", "Preference priority (light, balanced, powerful)")
+	exploreCmd.Flags().StringVar(&exploreModelType, "model-type", "any", "Model type preference (any, dense, quantized)")
 	exploreCmd.Flags().BoolVar(&exploreYes, "yes", false, "Skip confirmation prompt")
 	exploreCmd.Flags().BoolVar(&exploreEval, "eval", false, "Run full quick eval prompts (default runs smoke eval)")
 	exploreCmd.Flags().BoolVar(&exploreJSON, "json", false, "Print machine-readable JSON output")
@@ -62,10 +66,141 @@ type exploreOutput struct {
 }
 
 const compatCatalogSyncStatePath = "/var/lib/mantler/compat-catalog-sync.json"
+const compatCatalogCachePath = "/var/lib/mantler/compat-catalog.json"
 
 type compatCatalogSyncState struct {
 	LastSyncedAt    string `json:"lastSyncedAt"`
 	LastCatalogHash string `json:"lastCatalogHash"`
+}
+
+func loadCompatCatalogCache() types.CompatCatalog {
+	raw, err := os.ReadFile(compatCatalogCachePath)
+	if err != nil {
+		return types.CompatCatalog{}
+	}
+	var catalog types.CompatCatalog
+	if err := json.Unmarshal(raw, &catalog); err != nil {
+		return types.CompatCatalog{}
+	}
+	return catalog
+}
+
+func saveCompatCatalogCache(catalog types.CompatCatalog) error {
+	if err := os.MkdirAll(filepath.Dir(compatCatalogCachePath), 0o755); err != nil {
+		return err
+	}
+	raw, err := json.MarshalIndent(catalog, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(compatCatalogCachePath, append(raw, '\n'), 0o600)
+}
+
+func mergeCompatCatalog(base types.CompatCatalog, delta types.CompatCatalog) types.CompatCatalog {
+	base.Models = mergeCompatCatalogEntries(base.Models, delta.Models, "id")
+	base.RuntimeRules = mergeCompatCatalogEntries(base.RuntimeRules, delta.RuntimeRules, "id")
+	base.GPUCapabilities = mergeCompatCatalogEntries(base.GPUCapabilities, delta.GPUCapabilities, "namePattern")
+	base.CuratedRecipes = mergeCompatCatalogEntries(base.CuratedRecipes, delta.CuratedRecipes, "id")
+	base.Integrations = mergeCompatCatalogEntries(base.Integrations, delta.Integrations, "key")
+	return base
+}
+
+func mergeCompatCatalogEntries(base []map[string]any, delta []map[string]any, key string) []map[string]any {
+	if len(delta) == 0 {
+		return base
+	}
+	merged := make([]map[string]any, 0, len(base)+len(delta))
+	indexByKey := make(map[string]int, len(base)+len(delta))
+
+	appendEntry := func(entry map[string]any) {
+		if entry == nil {
+			return
+		}
+		entryKey, _ := entry[key].(string)
+		if strings.TrimSpace(entryKey) == "" {
+			merged = append(merged, entry)
+			return
+		}
+		if idx, ok := indexByKey[entryKey]; ok {
+			merged[idx] = entry
+			return
+		}
+		indexByKey[entryKey] = len(merged)
+		merged = append(merged, entry)
+	}
+
+	for _, entry := range base {
+		appendEntry(entry)
+	}
+	for _, entry := range delta {
+		appendEntry(entry)
+	}
+	return merged
+}
+
+func compactOllamaModelMetadata(raw map[string]any) map[string]any {
+	if len(raw) == 0 {
+		return nil
+	}
+	compact := map[string]any{}
+	if details, ok := raw["details"]; ok {
+		compact["details"] = details
+	}
+	if capabilities, ok := raw["capabilities"]; ok {
+		compact["capabilities"] = capabilities
+	}
+	if modelInfo, ok := raw["model_info"]; ok {
+		compact["model_info"] = modelInfo
+	}
+	if parameters, ok := raw["parameters"]; ok {
+		compact["parameters"] = parameters
+	}
+	if modelfile, ok := raw["modelfile"]; ok {
+		compact["modelfile"] = modelfile
+	}
+	return compact
+}
+
+func collectExploreModelMetadata() map[string]map[string]any {
+	manager := runtime.NewManager()
+	driver, err := manager.DriverFor("ollama")
+	if err != nil || !driver.IsInstalled() {
+		return nil
+	}
+	metadataDriver, ok := driver.(runtime.ModelMetadataDriver)
+	if !ok {
+		return nil
+	}
+	modelIDs := driver.ListModels()
+	if len(modelIDs) == 0 {
+		return nil
+	}
+	sort.Strings(modelIDs)
+	if len(modelIDs) > 64 {
+		modelIDs = modelIDs[:64]
+	}
+	metadataByModel := make(map[string]map[string]any, len(modelIDs))
+	for _, modelID := range modelIDs {
+		trimmed := strings.TrimSpace(modelID)
+		if trimmed == "" {
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+		raw, showErr := metadataDriver.ShowModel(ctx, trimmed)
+		cancel()
+		if showErr != nil {
+			continue
+		}
+		compact := compactOllamaModelMetadata(raw)
+		if len(compact) == 0 {
+			continue
+		}
+		metadataByModel[trimmed] = compact
+	}
+	if len(metadataByModel) == 0 {
+		return nil
+	}
+	return metadataByModel
 }
 
 func runExplore(cmd *cobra.Command, args []string) error {
@@ -77,11 +212,30 @@ func runExplore(cmd *cobra.Command, args []string) error {
 	if _, ok := allowedEvalWorkloads[workload]; !ok {
 		return fmt.Errorf("invalid workload; use coding, chat, creative, reasoning, agents, or vision")
 	}
+	priority := strings.ToLower(strings.TrimSpace(explorePriority))
+	if priority == "" {
+		priority = "balanced"
+	}
+	switch priority {
+	case "light", "balanced", "powerful":
+	default:
+		return fmt.Errorf("invalid priority; use light, balanced, or powerful")
+	}
+	modelType := strings.ToLower(strings.TrimSpace(exploreModelType))
+	if modelType == "" {
+		modelType = "any"
+	}
+	switch modelType {
+	case "any", "dense", "quantized":
+	default:
+		return fmt.Errorf("invalid model-type; use any, dense, or quantized")
+	}
 
 	cl, err := client.New(cfg.ServerURL, cfg.Token, cfg.Insecure)
 	if err != nil {
 		return fmt.Errorf("error creating API client: %w", err)
 	}
+	modelMetadata := collectExploreModelMetadata()
 	capabilities := probeExploreCapabilities()
 	runtimeConstraint := strings.TrimSpace(exploreRuntime)
 	excludedFingerprints := map[string]struct{}{}
@@ -96,8 +250,11 @@ func runExplore(cmd *cobra.Command, args []string) error {
 			Runtime:             queryRuntime,
 			ModelID:             strings.TrimSpace(exploreModel),
 			Workload:            workload,
+			Priority:            priority,
+			ModelType:           modelType,
 			MaxAttempts:         5,
 			Capabilities:        &capabilities,
+			ModelMetadata:       modelMetadata,
 			ExcludeFingerprints: mapKeys(excludedFingerprints),
 		})
 		cancel()
@@ -447,6 +604,7 @@ func saveCompatCatalogSyncState(state compatCatalogSyncState) error {
 
 func syncCompatCatalogDelta(cl *client.Client) error {
 	state := loadCompatCatalogSyncState()
+	cachedCatalog := loadCompatCatalogCache()
 	var since *time.Time
 	if parsed, err := time.Parse(time.RFC3339, strings.TrimSpace(state.LastSyncedAt)); err == nil {
 		since = &parsed
@@ -455,13 +613,17 @@ func syncCompatCatalogDelta(cl *client.Client) error {
 	defer cancel()
 	catalog, err := cl.GetCompatCatalog(
 		ctx,
-		[]string{"models", "runtime_rules", "gpu_capabilities", "curated_recipes"},
+		[]string{"models", "runtime_rules", "gpu_capabilities", "curated_recipes", "integrations"},
 		since,
 	)
 	if err != nil {
 		return err
 	}
-	rawCatalog, err := json.Marshal(catalog)
+	mergedCatalog := mergeCompatCatalog(cachedCatalog, *catalog)
+	if err := saveCompatCatalogCache(mergedCatalog); err != nil {
+		return err
+	}
+	rawCatalog, err := json.Marshal(mergedCatalog)
 	if err != nil {
 		return err
 	}

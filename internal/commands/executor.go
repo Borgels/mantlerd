@@ -22,7 +22,6 @@ import (
 
 	"github.com/Borgels/mantlerd/internal/config"
 	agenteval "github.com/Borgels/mantlerd/internal/eval"
-	"github.com/Borgels/mantlerd/internal/netutil"
 	agentruntime "github.com/Borgels/mantlerd/internal/runtime"
 	agenttrainer "github.com/Borgels/mantlerd/internal/trainer"
 	"github.com/Borgels/mantlerd/internal/types"
@@ -277,7 +276,40 @@ func (e *Executor) ExecuteWithContext(ctx context.Context, command types.AgentCo
 		if err := applyRuntimeProfileOverrides(command.Params, runtimeName); err != nil {
 			return ExecutionResult{}, err
 		}
-		if err := e.runtimeManager.PrepareModelWithRuntimeCtx(cmdCtx, modelID, runtimeName, flags); err != nil {
+		if err := e.runtimeManager.PrepareModelWithRuntimeProgressCtx(
+			cmdCtx,
+			modelID,
+			runtimeName,
+			flags,
+			func(progress agentruntime.PullProgress) {
+				if e.progress == nil {
+					return
+				}
+				payload := map[string]any{
+					"progress": map[string]any{
+						"status": progress.Status,
+					},
+				}
+				if progress.Total > 0 {
+					payload["progress"].(map[string]any)["percent"] = progress.Percent
+				}
+				if progress.Completed > 0 {
+					payload["progress"].(map[string]any)["completed"] = progress.Completed
+				}
+				if progress.Total > 0 {
+					payload["progress"].(map[string]any)["total"] = progress.Total
+				}
+				raw, marshalErr := json.Marshal(payload)
+				if marshalErr != nil {
+					return
+				}
+				e.progress(types.AckRequest{
+					CommandID: command.ID,
+					Status:    "in_progress",
+					Details:   string(raw),
+				})
+			},
+		); err != nil {
 			if errors.Is(err, context.Canceled) {
 				return ExecutionResult{}, ErrCommandCancelled
 			}
@@ -570,13 +602,13 @@ func (e *Executor) ExecuteWithContext(ctx context.Context, command types.AgentCo
 		return ExecutionResult{
 			Details: fmt.Sprintf("self shutdown scheduled in %d seconds (haltMachine=%t)", delaySeconds, halt),
 		}, nil
-	case "stop_agent", "uninstall_agent":
+	case "uninstall_agent":
 		delaySeconds := intParam(command.Params, "delaySeconds", 5)
 		if err := scheduleSelfShutdown(delaySeconds, false); err != nil {
 			return ExecutionResult{}, err
 		}
 		return ExecutionResult{
-			Details: fmt.Sprintf("agent shutdown scheduled in %d seconds", delaySeconds),
+			Details: fmt.Sprintf("agent uninstall/shutdown scheduled in %d seconds", delaySeconds),
 		}, nil
 	case "run_harness_exec":
 		return e.runHarnessExec(command)
@@ -999,7 +1031,6 @@ func downloadProfileFile(source string, destination string) error {
 	if !strings.EqualFold(parsed.Scheme, "https") {
 		return fmt.Errorf("required profile file source must use https: %s", source)
 	}
-
 	resp, err := profileDownloadHTTPClient.Get(source)
 	if err != nil {
 		return fmt.Errorf("download required profile file %s: %w", source, err)
@@ -1008,22 +1039,19 @@ func downloadProfileFile(source string, destination string) error {
 	if resp.StatusCode >= 400 {
 		return fmt.Errorf("download required profile file %s failed with status %d", source, resp.StatusCode)
 	}
-	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
-		return fmt.Errorf("create required profile file directory: %w", err)
-	}
-	dst, err := os.OpenFile(destination, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
-	if err != nil {
-		return fmt.Errorf("write required profile file: %w", err)
-	}
-	defer dst.Close()
-
 	limitedReader := io.LimitReader(resp.Body, maxRuntimeProfileFileSize+1)
-	written, err := io.Copy(dst, limitedReader)
+	body, err := io.ReadAll(limitedReader)
 	if err != nil {
 		return fmt.Errorf("read required profile file %s: %w", source, err)
 	}
-	if written > maxRuntimeProfileFileSize {
+	if int64(len(body)) > maxRuntimeProfileFileSize {
 		return fmt.Errorf("required profile file %s exceeds %d bytes", source, maxRuntimeProfileFileSize)
+	}
+	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
+		return fmt.Errorf("create required profile file directory: %w", err)
+	}
+	if err := os.WriteFile(destination, body, 0o600); err != nil {
+		return fmt.Errorf("write required profile file: %w", err)
 	}
 	return nil
 }
@@ -1036,31 +1064,39 @@ func sanitizeRuntimeProfileDestination(destination string) (string, error) {
 	cleanRoot := filepath.Clean(runtimeProfileStateRoot)
 	prefix := cleanRoot + string(os.PathSeparator)
 	if cleanDest != cleanRoot && !strings.HasPrefix(cleanDest, prefix) {
-		return "", fmt.Errorf("required profile destination %q must be under %q", destination, runtimeProfileStateRoot)
+		return "", fmt.Errorf("required profile destination must stay under %s", cleanRoot)
 	}
 	return cleanDest, nil
 }
 
-func filterRuntimeProfileEnv(runtimeName string, env map[string]string) map[string]string {
-	allowedPrefixes := map[string][]string{
-		"vllm":     {"VLLM_", "HF_", "HUGGINGFACE_", "HUGGING_FACE_", "NVIDIA_", "CUDA_"},
-		"tensorrt": {"TENSORRT_", "TRT_", "NVIDIA_", "CUDA_"},
+func filterRuntimeProfileEnv(runtimeName string, environment map[string]string) map[string]string {
+	filtered := make(map[string]string, len(environment))
+	prefix := strings.ToUpper(strings.TrimSpace(runtimeName))
+	allowedPrefixes := []string{
+		prefix + "_",
 	}
-	result := map[string]string{}
-	prefixes := allowedPrefixes[strings.ToLower(strings.TrimSpace(runtimeName))]
-	for key, value := range env {
+	for key, value := range environment {
 		trimmedKey := strings.TrimSpace(key)
 		if trimmedKey == "" {
 			continue
 		}
-		for _, prefix := range prefixes {
-			if strings.HasPrefix(trimmedKey, prefix) {
-				result[trimmedKey] = strings.TrimSpace(value)
+		upper := strings.ToUpper(trimmedKey)
+		if upper == "LD_PRELOAD" {
+			continue
+		}
+		allowed := false
+		for _, allowedPrefix := range allowedPrefixes {
+			if strings.HasPrefix(upper, allowedPrefix) {
+				allowed = true
 				break
 			}
 		}
+		if !allowed {
+			continue
+		}
+		filtered[trimmedKey] = strings.TrimSpace(value)
 	}
-	return result
+	return filtered
 }
 
 func readEnvFile(path string) map[string]string {
@@ -1415,6 +1451,7 @@ func (e *Executor) startAgentUpdate(version string) (string, error) {
 	installer := "https://raw.githubusercontent.com/Borgels/mantlerd/master/scripts/install.sh"
 	commandParts := []string{
 		"curl", "-fsSL", shellQuote(installer), "|", "sh", "-s", "--",
+		"--token", "\"$MANTLER_TOKEN\"",
 		"--machine", shellQuote(e.cfg.MachineID),
 		"--server", shellQuote(e.cfg.ServerURL),
 		"--version", shellQuote(version),
@@ -1431,6 +1468,7 @@ func (e *Executor) startAgentUpdate(version string) (string, error) {
 	cmd.Env = append(
 		os.Environ(),
 		"MANTLERD_SELF_UPDATE=true",
+		"CLAWCONTROL_AGENT_SELF_UPDATE=true",
 		"MANTLER_TOKEN="+e.cfg.Token,
 	)
 	output, err := cmd.CombinedOutput()
@@ -1476,18 +1514,10 @@ func scheduleSelfShutdown(delaySeconds int, haltMachine bool) error {
 		delaySeconds = 1
 	}
 	command := fmt.Sprintf("sleep %d; ", delaySeconds)
-	if stdruntime.GOOS == "darwin" {
-		if haltMachine {
-			command += "(sudo -n shutdown -h now || shutdown -h now || sudo -n halt || halt)"
-		} else {
-			command += "(pkill -f \"mantler start\" || true)"
-		}
+	if haltMachine {
+		command += "(sudo -n systemctl poweroff || sudo -n shutdown -h now || sudo -n halt || sudo -n poweroff || systemctl poweroff || shutdown -h now || halt || poweroff)"
 	} else {
-		if haltMachine {
-			command += "(sudo -n systemctl poweroff || sudo -n shutdown -h now || sudo -n halt || sudo -n poweroff || systemctl poweroff || shutdown -h now || halt || poweroff)"
-		} else {
-			command += "(sudo -n systemctl stop mantlerd || systemctl stop mantlerd || pkill -f \"mantler start\" || true)"
-		}
+		command += "(sudo -n systemctl stop mantlerd || systemctl stop mantlerd || pkill -f \"mantler start\" || true)"
 	}
 	cmd := exec.Command("sh", "-c", command)
 	if err := cmd.Start(); err != nil {
@@ -1717,7 +1747,11 @@ func defaultCLIHarnessCommand(harnessType string) string {
 }
 
 func supportsAgentHarnessExecution(harnessType string) bool {
-	return harnessType == "codex_cli" || harnessType == "goose"
+	return harnessType == "codex_cli" ||
+		harnessType == "goose" ||
+		harnessType == "opencode" ||
+		harnessType == "aider" ||
+		harnessType == "claude_code"
 }
 
 func (e *Executor) prepareHarnessesForSync(desired []types.DesiredHarness, commandID string) {
@@ -1819,7 +1853,7 @@ func gooseDaemonReachable(baseURL string) bool {
 	client := &http.Client{
 		Timeout: 3 * time.Second,
 		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: netutil.ShouldSkipTLSVerifyForURL(baseURL)},
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 		},
 	}
 	resp, err := client.Get(baseURL + "/status")
