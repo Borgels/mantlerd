@@ -364,6 +364,18 @@ func (c *Client) GetScore(ctx context.Context, fingerprint string) (*types.Score
 	if envelope.Data.Score.FormulaVersion <= 0 {
 		envelope.Data.Score.FormulaVersion = 1
 	}
+	if envelope.Data.Score.EvidenceBreakdown.Verified < 0 {
+		envelope.Data.Score.EvidenceBreakdown.Verified = 0
+	}
+	if envelope.Data.Score.EvidenceBreakdown.Observed < 0 {
+		envelope.Data.Score.EvidenceBreakdown.Observed = 0
+	}
+	if envelope.Data.Score.EvidenceBreakdown.SelfReported < 0 {
+		envelope.Data.Score.EvidenceBreakdown.SelfReported = 0
+	}
+	if envelope.Data.Score.EvidenceBreakdown.Verified+envelope.Data.Score.EvidenceBreakdown.Observed+envelope.Data.Score.EvidenceBreakdown.SelfReported == 0 {
+		envelope.Data.Score.EvidenceBreakdown.SelfReported = envelope.Data.Score.EvidenceCount
+	}
 	return envelope.Data.Score, nil
 }
 
@@ -414,6 +426,125 @@ func (c *Client) GetEvalPrompts(
 		return nil, "", fmt.Errorf("eval prompts response was empty")
 	}
 	return envelope.Data.Prompts, strings.TrimSpace(envelope.Data.EvalSessionToken), nil
+}
+
+func (c *Client) StartEvalSession(
+	ctx context.Context,
+	workload string,
+	profile string,
+	benchmarkSuiteID string,
+) (*types.EvalChallengeSessionStartResponse, error) {
+	body := map[string]string{
+		"workload": workload,
+		"profile": profile,
+		"benchmarkSuiteId": benchmarkSuiteID,
+	}
+	reqBody, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("marshal eval session start payload: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/api/eval/session", bytes.NewReader(reqBody))
+	if err != nil {
+		return nil, fmt.Errorf("create eval session start request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("eval session start request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("eval session start failed (%d): %s", resp.StatusCode, compactHTTPErrorBody(body))
+	}
+	var envelope struct {
+		Data types.EvalChallengeSessionStartResponse `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		return nil, fmt.Errorf("decode eval session start response: %w", err)
+	}
+	return &envelope.Data, nil
+}
+
+func (c *Client) RespondToChallenge(
+	ctx context.Context,
+	sessionID string,
+	promptID string,
+	output string,
+	latencyMs float64,
+	ttftMs float64,
+	tokensPerSec float64,
+	outputTokens int,
+) (*types.EvalChallengeResponseResult, error) {
+	body := map[string]any{
+		"promptId": promptID,
+		"output": output,
+		"latencyMs": latencyMs,
+		"ttftMs": ttftMs,
+		"tokensPerSec": tokensPerSec,
+		"outputTokens": outputTokens,
+	}
+	reqBody, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("marshal challenge response payload: %w", err)
+	}
+	req, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodPost,
+		c.baseURL+"/api/eval/session/"+url.PathEscape(strings.TrimSpace(sessionID))+"/respond",
+		bytes.NewReader(reqBody),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create challenge response request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("challenge response request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("challenge response failed (%d): %s", resp.StatusCode, compactHTTPErrorBody(body))
+	}
+	var envelope struct {
+		Data types.EvalChallengeResponseResult `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		return nil, fmt.Errorf("decode challenge response result: %w", err)
+	}
+	return &envelope.Data, nil
+}
+
+func (c *Client) GetEvalSessionResult(ctx context.Context, sessionID string) (*types.EvalChallengeStatus, error) {
+	req, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodGet,
+		c.baseURL+"/api/eval/session/"+url.PathEscape(strings.TrimSpace(sessionID))+"/status",
+		nil,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create eval session status request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("eval session status request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("eval session status failed (%d): %s", resp.StatusCode, compactHTTPErrorBody(body))
+	}
+	var envelope struct {
+		Data types.EvalChallengeStatus `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		return nil, fmt.Errorf("decode eval session status response: %w", err)
+	}
+	return &envelope.Data, nil
 }
 
 func Retry[T any](ctx context.Context, attempts int, fn func() (T, error)) (T, error) {
