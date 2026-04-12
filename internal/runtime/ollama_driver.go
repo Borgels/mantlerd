@@ -41,6 +41,7 @@ type ollamaTagsResponse struct {
 		Model  string `json:"model"`
 		Name   string `json:"name"`
 		Digest string `json:"digest"`
+		Size   int64  `json:"size"`
 	} `json:"models"`
 }
 
@@ -341,6 +342,7 @@ func (d *ollamaDriver) InstalledModels() []types.InstalledModel {
 		return models
 	}
 
+	localSizes, _ := d.fetchLocalTagSizes()
 	remoteDigests := fetchRemoteOllamaTagDigests()
 	knownModelIDs := make([]string, 0, len(localDigests))
 	for modelID := range localDigests {
@@ -357,6 +359,10 @@ func (d *ollamaDriver) InstalledModels() []types.InstalledModel {
 			Digest:  digest,
 			Status:  types.ModelReady,
 		}
+		if size := localSizes[modelID]; size > 0 {
+			entry.ModelSizeBytes = size
+		}
+		d.enrichInstalledModelMetadata(&entry)
 		remoteDigest := strings.TrimSpace(remoteDigests[modelID])
 		if digest != "" && remoteDigest != "" {
 			updateAvailable := !digestsMatch(digest, remoteDigest)
@@ -365,6 +371,50 @@ func (d *ollamaDriver) InstalledModels() []types.InstalledModel {
 		models = append(models, entry)
 	}
 	return models
+}
+
+func (d *ollamaDriver) enrichInstalledModelMetadata(entry *types.InstalledModel) {
+	if entry == nil {
+		return
+	}
+	modelID := strings.TrimSpace(entry.ModelID)
+	if modelID == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	raw, err := d.ShowModel(ctx, modelID)
+	if err != nil {
+		return
+	}
+	quantization, architecture := parseOllamaShowDetails(raw)
+	if quantization != "" {
+		entry.QuantizationFormat = quantization
+	}
+	if architecture != "" {
+		entry.ArchitectureFamily = architecture
+	}
+}
+
+func parseOllamaShowDetails(raw map[string]any) (quantization string, architecture string) {
+	details, ok := raw["details"].(map[string]any)
+	if !ok {
+		return "", ""
+	}
+	quantization = strings.TrimSpace(asString(details["quantization_level"]))
+	architecture = strings.TrimSpace(asString(details["family"]))
+	return quantization, architecture
+}
+
+func asString(value any) string {
+	switch typed := value.(type) {
+	case string:
+		return typed
+	case fmt.Stringer:
+		return typed.String()
+	default:
+		return ""
+	}
 }
 
 func (d *ollamaDriver) fetchLocalTagDigests() (map[string]string, error) {
@@ -396,6 +446,39 @@ func (d *ollamaDriver) fetchLocalTagDigests() (map[string]string, error) {
 			continue
 		}
 		result[modelID] = strings.TrimSpace(model.Digest)
+	}
+	return result, nil
+}
+
+func (d *ollamaDriver) fetchLocalTagSizes() (map[string]int64, error) {
+	req, err := http.NewRequest(http.MethodGet, d.baseURL()+"/api/tags", nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := (&http.Client{Timeout: 4 * time.Second}).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, ollamaMaxHTTPBodyBytes))
+		return nil, fmt.Errorf("ollama local tags failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	var parsed ollamaTagsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+		return nil, err
+	}
+	result := make(map[string]int64, len(parsed.Models))
+	for _, model := range parsed.Models {
+		modelID := strings.TrimSpace(model.Model)
+		if modelID == "" {
+			modelID = strings.TrimSpace(model.Name)
+		}
+		if modelID == "" || model.Size <= 0 {
+			continue
+		}
+		result[modelID] = model.Size
 	}
 	return result, nil
 }
