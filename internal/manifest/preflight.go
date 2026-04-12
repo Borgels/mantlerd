@@ -99,7 +99,15 @@ func RunPreflight(
 
 	requiredMB := 0
 	for _, model := range localModels {
-		requiredMB += EstimateModelVRAM(model.ModelID, model.Runtime, model.ParameterCount)
+		requiredMB += EstimateModelVRAM(
+			model.ModelID,
+			model.Runtime,
+			model.ParameterCount,
+			model.Quantization,
+			model.ContextWindow,
+			model.IsMoe,
+			model.ActiveParams,
+		)
 	}
 	availableMB := snapshot.TotalMB - snapshot.UsedMB - loadPlan.HeadroomMB
 	if availableMB < 0 {

@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -387,23 +388,129 @@ func (d *ollamaDriver) enrichInstalledModelMetadata(entry *types.InstalledModel)
 	if err != nil {
 		return
 	}
-	quantization, architecture := parseOllamaShowDetails(raw)
-	if quantization != "" {
-		entry.QuantizationFormat = quantization
+	metadata := parseOllamaShowDetails(raw, modelID)
+	if metadata.Quantization != "" {
+		entry.QuantizationFormat = metadata.Quantization
 	}
-	if architecture != "" {
-		entry.ArchitectureFamily = architecture
+	if metadata.Architecture != "" {
+		entry.ArchitectureFamily = metadata.Architecture
 	}
+	if metadata.ParameterCount != "" {
+		entry.ParameterCount = metadata.ParameterCount
+	}
+	if metadata.NumExperts > 0 {
+		entry.NumExperts = metadata.NumExperts
+	}
+	if metadata.ActiveExperts > 0 {
+		entry.ActiveExperts = metadata.ActiveExperts
+	}
+	if metadata.ContextLength > 0 {
+		entry.ContextLength = metadata.ContextLength
+	}
+	entry.IsMoe = metadata.IsMoe
 }
 
-func parseOllamaShowDetails(raw map[string]any) (quantization string, architecture string) {
+type ollamaModelMetadata struct {
+	Quantization   string
+	Architecture   string
+	ParameterCount string
+	IsMoe          bool
+	NumExperts     int
+	ActiveExperts  int
+	ContextLength  int
+}
+
+func parseOllamaShowDetails(raw map[string]any, modelID string) ollamaModelMetadata {
 	details, ok := raw["details"].(map[string]any)
 	if !ok {
-		return "", ""
+		return ollamaModelMetadata{}
 	}
-	quantization = strings.TrimSpace(asString(details["quantization_level"]))
-	architecture = strings.TrimSpace(asString(details["family"]))
-	return quantization, architecture
+	metadata := ollamaModelMetadata{
+		Quantization:   strings.TrimSpace(asString(details["quantization_level"])),
+		Architecture:   strings.TrimSpace(asString(details["family"])),
+		ParameterCount: strings.TrimSpace(asString(details["parameter_size"])),
+		NumExperts:     asPositiveInt(details["num_experts"]),
+		ActiveExperts:  asPositiveInt(details["num_experts_per_tok"]),
+	}
+	if metadata.Architecture == "" {
+		metadata.Architecture = inferArchitectureFromModelID(modelID)
+	}
+	metadata.ContextLength = extractContextLength(raw)
+	metadata.IsMoe = metadata.NumExperts > 1 || detectMoeFamily(metadata.Architecture, modelID)
+	return metadata
+}
+
+func asPositiveInt(value any) int {
+	switch typed := value.(type) {
+	case int:
+		if typed > 0 {
+			return typed
+		}
+	case float64:
+		parsed := int(typed)
+		if parsed > 0 {
+			return parsed
+		}
+	case string:
+		if parsed, err := strconv.Atoi(strings.TrimSpace(typed)); err == nil && parsed > 0 {
+			return parsed
+		}
+	}
+	return 0
+}
+
+func extractContextLength(raw map[string]any) int {
+	details, _ := raw["details"].(map[string]any)
+	if context := asPositiveInt(details["context_length"]); context > 0 {
+		return context
+	}
+	if context := asPositiveInt(details["num_ctx"]); context > 0 {
+		return context
+	}
+	if parameters := strings.TrimSpace(asString(raw["parameters"])); parameters != "" {
+		for _, line := range strings.Split(parameters, "\n") {
+			trimmed := strings.TrimSpace(line)
+			if !strings.HasPrefix(trimmed, "num_ctx") {
+				continue
+			}
+			fields := strings.Fields(trimmed)
+			if len(fields) >= 2 {
+				if parsed, err := strconv.Atoi(fields[1]); err == nil && parsed > 0 {
+					return parsed
+				}
+			}
+		}
+	}
+	return 0
+}
+
+func detectMoeFamily(architecture string, modelID string) bool {
+	text := strings.ToLower(strings.TrimSpace(architecture + " " + modelID))
+	return strings.Contains(text, "mixtral") ||
+		strings.Contains(text, "dbrx") ||
+		strings.Contains(text, "deepseek-v2") ||
+		strings.Contains(text, "deepseek-v3") ||
+		strings.Contains(text, "moe")
+}
+
+func inferArchitectureFromModelID(modelID string) string {
+	lower := strings.ToLower(strings.TrimSpace(modelID))
+	switch {
+	case strings.Contains(lower, "llama"):
+		return "llama"
+	case strings.Contains(lower, "qwen"):
+		return "qwen"
+	case strings.Contains(lower, "mixtral"), strings.Contains(lower, "mistral"):
+		return "mistral"
+	case strings.Contains(lower, "gemma"):
+		return "gemma"
+	case strings.Contains(lower, "phi"):
+		return "phi"
+	case strings.Contains(lower, "deepseek"):
+		return "deepseek"
+	default:
+		return ""
+	}
 }
 
 func asString(value any) string {
@@ -851,15 +958,14 @@ func (d *ollamaDriver) RestartRuntime() error {
 }
 
 func (d *ollamaDriver) modelFlagsPath() string {
-	if runtime.GOOS == "darwin" {
+	if runtime.GOOS == "darwin" || os.Geteuid() != 0 {
 		home, err := os.UserHomeDir()
 		if err != nil || strings.TrimSpace(home) == "" {
 			return filepath.Join(".", ".mantler", "model-flags.json")
 		}
 		return filepath.Join(home, ".mantler", "model-flags.json")
 	}
-	// Service-safe linux path: avoid relying on $HOME when systemd hardening
-	// restricts /root access (e.g. ProtectHome=true).
+	// Root-managed Linux services should persist under /etc/mantler.
 	return filepath.Join("/etc", "mantler", "model-flags.json")
 }
 

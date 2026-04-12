@@ -23,6 +23,7 @@ import (
 	"github.com/Borgels/mantlerd/internal/config"
 	agenteval "github.com/Borgels/mantlerd/internal/eval"
 	agentruntime "github.com/Borgels/mantlerd/internal/runtime"
+	agenttools "github.com/Borgels/mantlerd/internal/tools"
 	agenttrainer "github.com/Borgels/mantlerd/internal/trainer"
 	"github.com/Borgels/mantlerd/internal/types"
 )
@@ -33,6 +34,7 @@ var ErrCommandCancelled = errors.New("command cancelled")
 type Executor struct {
 	runtimeManager *agentruntime.Manager
 	trainerManager *agenttrainer.Manager
+	toolManager    *agenttools.Manager
 	cfg            config.Config
 	processStarted time.Time
 	progress       func(payload types.AckRequest)
@@ -80,6 +82,7 @@ const gooseInstallScriptURL = "https://github.com/block/goose/raw/main/download_
 func NewExecutor(
 	runtimeManager *agentruntime.Manager,
 	trainerManager *agenttrainer.Manager,
+	toolManager *agenttools.Manager,
 	cfg config.Config,
 	progress func(payload types.AckRequest),
 	outcome func(event types.OutcomeEvent),
@@ -87,6 +90,7 @@ func NewExecutor(
 	return &Executor{
 		runtimeManager:  runtimeManager,
 		trainerManager:  trainerManager,
+		toolManager:     toolManager,
 		cfg:             cfg,
 		processStarted:  time.Now(),
 		progress:        progress,
@@ -228,6 +232,52 @@ func (e *Executor) ExecuteWithContext(ctx context.Context, command types.AgentCo
 			})
 		}
 		return ExecutionResult{}, e.runtimeManager.InstallRuntime(runtimeName)
+	case "install_tool":
+		if e.toolManager == nil {
+			return ExecutionResult{}, fmt.Errorf("tool manager unavailable")
+		}
+		toolName := optionalStringParam(command.Params, "tool")
+		if toolName == "" {
+			toolName = optionalStringParam(command.Params, "toolType")
+		}
+		if toolName == "" {
+			return ExecutionResult{}, fmt.Errorf("missing tool param")
+		}
+		err := e.toolManager.Install(types.ToolType(toolName))
+		if err != nil {
+			if errors.Is(err, agenttools.ErrNotImplemented) {
+				return ExecutionResult{
+					Details: fmt.Sprintf("install_tool for %s is not implemented on this host: %v", toolName, err),
+				}, err
+			}
+			return ExecutionResult{}, err
+		}
+		return ExecutionResult{
+			Details: fmt.Sprintf("tool %s installed", toolName),
+		}, nil
+	case "uninstall_tool":
+		if e.toolManager == nil {
+			return ExecutionResult{}, fmt.Errorf("tool manager unavailable")
+		}
+		toolName := optionalStringParam(command.Params, "tool")
+		if toolName == "" {
+			toolName = optionalStringParam(command.Params, "toolType")
+		}
+		if toolName == "" {
+			return ExecutionResult{}, fmt.Errorf("missing tool param")
+		}
+		err := e.toolManager.Uninstall(types.ToolType(toolName))
+		if err != nil {
+			if errors.Is(err, agenttools.ErrNotImplemented) {
+				return ExecutionResult{
+					Details: fmt.Sprintf("uninstall_tool for %s is not implemented on this host: %v", toolName, err),
+				}, err
+			}
+			return ExecutionResult{}, err
+		}
+		return ExecutionResult{
+			Details: fmt.Sprintf("tool %s uninstalled", toolName),
+		}, nil
 	case "install_trainer":
 		if e.trainerManager == nil {
 			return ExecutionResult{}, fmt.Errorf("trainer manager unavailable")

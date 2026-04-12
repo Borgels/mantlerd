@@ -48,6 +48,36 @@ type InstalledTrainer struct {
 	Detail  string        `json:"detail,omitempty"`
 }
 
+type ToolType string
+
+const (
+	ToolDCGM                   ToolType = "dcgm"
+	ToolNvBandwidth            ToolType = "nvbandwidth"
+	ToolRocmBandwidthTest      ToolType = "rocm_bandwidth_test"
+	ToolDocker                 ToolType = "docker"
+	ToolNvidiaContainerToolkit ToolType = "nvidia_container_toolkit"
+)
+
+type ToolStatus string
+
+const (
+	ToolNotInstalled ToolStatus = "not_installed"
+	ToolInstalling   ToolStatus = "installing"
+	ToolReady        ToolStatus = "ready"
+	ToolFailed       ToolStatus = "failed"
+	ToolUnsupported  ToolStatus = "unsupported"
+)
+
+type InstalledTool struct {
+	ID              string     `json:"id"`
+	Type            ToolType   `json:"type"`
+	Name            string     `json:"name,omitempty"`
+	Status          ToolStatus `json:"status"`
+	Version         string     `json:"version,omitempty"`
+	Detail          string     `json:"detail,omitempty"`
+	DiagnosticError string     `json:"diagnosticError,omitempty"`
+}
+
 type ModelInstallStatus string
 
 const (
@@ -74,6 +104,11 @@ type InstalledModel struct {
 	QuantizationFormat string             `json:"quantizationFormat,omitempty"`
 	ArchitectureFamily string             `json:"architectureFamily,omitempty"`
 	ModelSizeBytes     int64              `json:"modelSizeBytes,omitempty"`
+	ParameterCount     string             `json:"parameterCount,omitempty"`
+	IsMoe              bool               `json:"isMoe,omitempty"`
+	NumExperts         int                `json:"numExperts,omitempty"`
+	ActiveExperts      int                `json:"activeExperts,omitempty"`
+	ContextLength      int                `json:"contextLength,omitempty"`
 }
 
 type AgentHealth string
@@ -85,13 +120,18 @@ const (
 )
 
 type GPUInfo struct {
-	Name              string `json:"name"`
-	MemoryTotalMB     int    `json:"memoryTotalMb,omitempty"`
-	MemoryUsedMB      int    `json:"memoryUsedMb,omitempty"`
-	MemoryFreeMB      int    `json:"memoryFreeMb,omitempty"`
-	Architecture      string `json:"architecture,omitempty"`
-	ComputeCapability string `json:"computeCapability,omitempty"`
-	UnifiedMemory     *bool  `json:"unifiedMemory,omitempty"`
+	Name                string  `json:"name"`
+	Index               int     `json:"index,omitempty"`
+	UUID                string  `json:"uuid,omitempty"`
+	PCIBusID            string  `json:"pciBusId,omitempty"`
+	MemoryTotalMB       int     `json:"memoryTotalMb,omitempty"`
+	MemoryUsedMB        int     `json:"memoryUsedMb,omitempty"`
+	MemoryFreeMB        int     `json:"memoryFreeMb,omitempty"`
+	Architecture        string  `json:"architecture,omitempty"`
+	ComputeCapability   string  `json:"computeCapability,omitempty"`
+	UnifiedMemory       *bool   `json:"unifiedMemory,omitempty"`
+	MemoryBandwidthGBps float64 `json:"memoryBandwidthGBps,omitempty"`
+	BandwidthSource     string  `json:"bandwidthSource,omitempty"`
 }
 
 type NetworkLink struct {
@@ -117,6 +157,43 @@ type InterconnectReport struct {
 	RdmaDevices   []RdmaDevice  `json:"rdmaDevices,omitempty"`
 	PeerHostnames []string      `json:"peerHostnames,omitempty"`
 	FabricID      string        `json:"fabricId,omitempty"`
+}
+
+type GPUInterconnectEdge struct {
+	FromIndex int    `json:"fromIndex"`
+	ToIndex   int    `json:"toIndex"`
+	LinkType  string `json:"linkType"`
+	Path      string `json:"path,omitempty"`
+	LinkCount int    `json:"linkCount,omitempty"`
+}
+
+type GPUBandwidthMatrixEntry struct {
+	FromIndex     int     `json:"fromIndex"`
+	ToIndex       int     `json:"toIndex"`
+	BandwidthGBps float64 `json:"bandwidthGbps"`
+	Direction     string  `json:"direction,omitempty"`
+}
+
+type GPUInterconnectReport struct {
+	Edges             []GPUInterconnectEdge     `json:"edges,omitempty"`
+	BandwidthMatrix   []GPUBandwidthMatrixEntry `json:"bandwidthMatrix,omitempty"`
+	MeasurementSource string                    `json:"measurementSource,omitempty"`
+	MeasuredAt        string                    `json:"measuredAt,omitempty"`
+	Detail            string                    `json:"detail,omitempty"`
+}
+
+type AcceleratorStackReport struct {
+	NvidiaDriverVersion string `json:"nvidiaDriverVersion,omitempty"`
+	CudaToolkitVersion  string `json:"cudaToolkitVersion,omitempty"`
+	CudaRuntimeVersion  string `json:"cudaRuntimeVersion,omitempty"`
+	CudnnVersion        string `json:"cudnnVersion,omitempty"`
+	NcclVersion         string `json:"ncclVersion,omitempty"`
+	RocmVersion         string `json:"rocmVersion,omitempty"`
+	HipRuntimeVersion   string `json:"hipRuntimeVersion,omitempty"`
+	MiopenVersion       string `json:"miopenVersion,omitempty"`
+	RcclVersion         string `json:"rcclVersion,omitempty"`
+	ContainerRuntime    string `json:"containerRuntime,omitempty"`
+	NvidiaToolkit       string `json:"nvidiaToolkit,omitempty"`
 }
 
 type ModelCapabilities struct {
@@ -190,6 +267,8 @@ type CheckinRequest struct {
 	Origin                 *MachineOrigin                 `json:"origin,omitempty"`
 	GPUs                   []GPUInfo                      `json:"gpus,omitempty"`
 	Interconnect           *InterconnectReport            `json:"interconnect,omitempty"`
+	GPUInterconnect        *GPUInterconnectReport         `json:"gpuInterconnect,omitempty"`
+	AcceleratorStack       *AcceleratorStackReport        `json:"acceleratorStack,omitempty"`
 	AgentVersion           string                         `json:"agentVersion,omitempty"`
 	AgentHealth            AgentHealth                    `json:"agentHealth,omitempty"`
 	RuntimeStatus          RuntimeStatus                  `json:"runtimeStatus,omitempty"`
@@ -200,6 +279,7 @@ type CheckinRequest struct {
 	RuntimeVersions        map[RuntimeType]string         `json:"runtimeVersions,omitempty"`
 	RuntimeConfigs         map[RuntimeType]map[string]any `json:"runtimeConfigs,omitempty"`
 	InstalledTrainers      []InstalledTrainer             `json:"installedTrainers,omitempty"`
+	InstalledTools         []InstalledTool                `json:"installedTools,omitempty"`
 	InstalledModels        []InstalledModel               `json:"installedModels,omitempty"`
 	InstalledHarnesses     []InstalledHarness             `json:"installedHarnesses,omitempty"`
 	InstalledOrchestrators []InstalledOrchestrator        `json:"installedOrchestrators,omitempty"`
@@ -209,29 +289,30 @@ type CheckinRequest struct {
 }
 
 type OutcomeEvent struct {
-	PlanID                string             `json:"planId,omitempty"`
-	TaskID                string             `json:"taskId,omitempty"`
-	MantleFingerprint     string             `json:"mantleFingerprint,omitempty"`
-	BaseFingerprint       string             `json:"baseFingerprint,omitempty"`
-	EventType             string             `json:"eventType"`
-	EvidenceKind          string             `json:"evidenceKind,omitempty"`
-	Workload              string             `json:"workload,omitempty"`
-	GradedByServer        bool               `json:"gradedByServer,omitempty"`
-	EvalPromptID          string             `json:"evalPromptId,omitempty"`
-	EvalOutput            string             `json:"evalOutput,omitempty"`
-	EvalSessionToken      string             `json:"evalSessionToken,omitempty"`
-	SessionIssuedAtMs     int64              `json:"sessionIssuedAtMs,omitempty"`
-	BenchmarkSuiteID      string             `json:"benchmarkSuiteId,omitempty"`
-	BenchmarkSuiteVersion string             `json:"benchmarkSuiteVersion,omitempty"`
-	RuntimeImage          string             `json:"runtimeImage,omitempty"`
-	DurationMs            int64              `json:"durationMs,omitempty"`
-	TokenUsage            *OutcomeTokenUsage `json:"tokenUsage,omitempty"`
-	QualityScore          *float64           `json:"qualityScore,omitempty"`
-	CostUSD               *float64           `json:"costUsd,omitempty"`
-	ExitCode              int                `json:"exitCode,omitempty"`
-	CrashSignature        string             `json:"crashSignature,omitempty"`
-	Detail                string             `json:"detail,omitempty"`
-	Timestamp             string             `json:"timestamp"`
+	PlanID                string                 `json:"planId,omitempty"`
+	TaskID                string                 `json:"taskId,omitempty"`
+	MantleFingerprint     string                 `json:"mantleFingerprint,omitempty"`
+	BaseFingerprint       string                 `json:"baseFingerprint,omitempty"`
+	EventType             string                 `json:"eventType"`
+	EvidenceKind          string                 `json:"evidenceKind,omitempty"`
+	Workload              string                 `json:"workload,omitempty"`
+	GradedByServer        bool                   `json:"gradedByServer,omitempty"`
+	EvalPromptID          string                 `json:"evalPromptId,omitempty"`
+	EvalOutput            string                 `json:"evalOutput,omitempty"`
+	EvalSessionToken      string                 `json:"evalSessionToken,omitempty"`
+	SessionIssuedAtMs     int64                  `json:"sessionIssuedAtMs,omitempty"`
+	BenchmarkSuiteID      string                 `json:"benchmarkSuiteId,omitempty"`
+	BenchmarkSuiteVersion string                 `json:"benchmarkSuiteVersion,omitempty"`
+	RuntimeImage          string                 `json:"runtimeImage,omitempty"`
+	DurationMs            int64                  `json:"durationMs,omitempty"`
+	TokenUsage            *OutcomeTokenUsage     `json:"tokenUsage,omitempty"`
+	BenchmarkMetrics      *ModelBenchmarkMetrics `json:"benchmarkMetrics,omitempty"`
+	QualityScore          *float64               `json:"qualityScore,omitempty"`
+	CostUSD               *float64               `json:"costUsd,omitempty"`
+	ExitCode              int                    `json:"exitCode,omitempty"`
+	CrashSignature        string                 `json:"crashSignature,omitempty"`
+	Detail                string                 `json:"detail,omitempty"`
+	Timestamp             string                 `json:"timestamp"`
 }
 
 type OutcomeTokenUsage struct {
@@ -545,8 +626,17 @@ type ModelTarget struct {
 	FeatureFlags ModelFeatureFlags `json:"featureFlags"`
 }
 
+type DesiredToolTarget struct {
+	Tool           ToolType `json:"tool"`
+	TargetVersion  string   `json:"targetVersion,omitempty"`
+	PackageVariant string   `json:"packageVariant,omitempty"`
+	InstallHint    string   `json:"installHint,omitempty"`
+}
+
 type DesiredConfig struct {
 	Runtimes      []RuntimeType         `json:"runtimes"`
+	Tools         []ToolType            `json:"tools,omitempty"`
+	ToolTargets   []DesiredToolTarget   `json:"toolTargets,omitempty"`
 	Models        []string              `json:"models"`
 	ModelTargets  []ModelTarget         `json:"modelTargets,omitempty"`
 	Harnesses     []DesiredHarness      `json:"harnesses,omitempty"`
