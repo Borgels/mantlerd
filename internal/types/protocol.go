@@ -111,6 +111,17 @@ type InstalledModel struct {
 	ContextLength      int                `json:"contextLength,omitempty"`
 }
 
+type DeployedMantle struct {
+	MantleFingerprint string  `json:"mantleFingerprint"`
+	BaseFingerprint   string  `json:"baseFingerprint,omitempty"`
+	Slug              string  `json:"slug,omitempty"`
+	EndpointPath      string  `json:"endpointPath,omitempty"`
+	EndpointHealth    string  `json:"endpointHealth,omitempty"`
+	Status            string  `json:"status"`
+	CPUPercent        float64 `json:"cpuPercent,omitempty"`
+	MemoryMB          int     `json:"memoryMb,omitempty"`
+}
+
 type AgentHealth string
 
 const (
@@ -281,6 +292,7 @@ type CheckinRequest struct {
 	InstalledTrainers      []InstalledTrainer             `json:"installedTrainers,omitempty"`
 	InstalledTools         []InstalledTool                `json:"installedTools,omitempty"`
 	InstalledModels        []InstalledModel               `json:"installedModels,omitempty"`
+	DeployedMantles        []DeployedMantle               `json:"deployedMantles,omitempty"`
 	InstalledHarnesses     []InstalledHarness             `json:"installedHarnesses,omitempty"`
 	InstalledOrchestrators []InstalledOrchestrator        `json:"installedOrchestrators,omitempty"`
 	OutcomeEvents          []OutcomeEvent                 `json:"outcomeEvents,omitempty"`

@@ -389,6 +389,7 @@ func runCheckIn(
 	readyRuntimeNames := runtimeManager.ReadyRuntimes()
 	runtimeStatuses := buildRuntimeStatuses(installedRuntimeNames, readyRuntimeNames)
 	installedModels := toInstalledModels(runtimeManager)
+	deployedMantles := toDeployedMantles(installedModels)
 	hasActiveWork := hasActiveOperations(runtimeStatuses, installedModels, trainerManager.HasActiveJobs())
 	runtimeStatus := types.RuntimeNotInstalled
 	runtimeType := types.RuntimeType("")
@@ -430,6 +431,7 @@ func runCheckIn(
 		InstalledTrainers:      trainerManager.InstalledTrainers(),
 		InstalledTools:         installedTools,
 		InstalledModels:        installedModels,
+		DeployedMantles:        deployedMantles,
 		InstalledHarnesses:     toInstalledHarnesses(cachedDesired),
 		InstalledOrchestrators: toInstalledOrchestrators(cachedDesired),
 		OutcomeEvents:          pendingOutcomes,

@@ -246,6 +246,45 @@ func toInstalledModels(runtimeManager *runtime.Manager) []types.InstalledModel {
 	return result
 }
 
+func toDeployedMantles(installedModels []types.InstalledModel) []types.DeployedMantle {
+	result := make([]types.DeployedMantle, 0, len(installedModels))
+	seen := map[string]struct{}{}
+	for _, model := range installedModels {
+		modelID := strings.TrimSpace(model.ModelID)
+		if modelID == "" {
+			continue
+		}
+		runtime := strings.TrimSpace(string(model.Runtime))
+		if runtime == "" {
+			runtime = "runtime"
+		}
+		fingerprint := fmt.Sprintf("%s:%s", runtime, modelID)
+		if _, exists := seen[fingerprint]; exists {
+			continue
+		}
+		seen[fingerprint] = struct{}{}
+
+		status := "stopped"
+		switch model.Status {
+		case types.ModelReady:
+			status = "running"
+		case types.ModelStarting, types.ModelBuilding, types.ModelInstalling, types.ModelDownloading, types.ModelDownloaded, types.ModelBuilt:
+			status = "starting"
+		case types.ModelFailed:
+			status = "failed"
+		}
+
+		result = append(result, types.DeployedMantle{
+			MantleFingerprint: fingerprint,
+			BaseFingerprint:   fingerprint,
+			Status:            status,
+			EndpointPath:      fmt.Sprintf("/api/v1/%s/chat/completions", modelID),
+			EndpointHealth:    map[string]string{"running": "healthy", "starting": "degraded", "failed": "down"}[status],
+		})
+	}
+	return result
+}
+
 func toInstalledHarnesses(desired types.DesiredConfig) []types.InstalledHarness {
 	result := make([]types.InstalledHarness, 0, len(desired.Harnesses))
 	statusTimestamp := time.Now().UTC().Format(time.RFC3339)
