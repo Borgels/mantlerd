@@ -430,16 +430,23 @@ if [ "$OS" = "linux" ]; then
 fi
 
 log "Installing binary to ${BINARY_INSTALL_DIR}/${BINARY_NAME}"
+# macOS: install under $HOME without sudo so config/logs/plist remain user-writable.
+# Using sudo here root-owns ~/.mantler and breaks non-sudo agent.json + launchd paths.
 if [ "$OS" = "darwin" ]; then
-  $SUDO install -d -m 0755 "$BINARY_INSTALL_DIR"
+  install -d -m 0755 "$BINARY_INSTALL_DIR"
+  install -d -m 0755 "$CLI_LINK_DIR"
+  install -m 0775 "$BIN_TMP" "${BINARY_INSTALL_DIR}/${BINARY_NAME}"
+  log "Linking CLI command ${CLI_NAME} -> ${BINARY_NAME}"
+  ln -sf "${BINARY_INSTALL_DIR}/${BINARY_NAME}" "${CLI_LINK_DIR}/${CLI_NAME}"
+else
+  $SUDO install -d -m 0755 "$CLI_LINK_DIR"
+  $SUDO install -m 0775 "$BIN_TMP" "${BINARY_INSTALL_DIR}/${BINARY_NAME}"
+  if [ "$OS" = "linux" ]; then
+    $SUDO chown root:"$AGENT_GROUP" "${BINARY_INSTALL_DIR}/${BINARY_NAME}"
+  fi
+  log "Linking CLI command ${CLI_NAME} -> ${BINARY_NAME}"
+  $SUDO ln -sf "${BINARY_INSTALL_DIR}/${BINARY_NAME}" "${CLI_LINK_DIR}/${CLI_NAME}"
 fi
-$SUDO install -d -m 0755 "$CLI_LINK_DIR"
-$SUDO install -m 0775 "$BIN_TMP" "${BINARY_INSTALL_DIR}/${BINARY_NAME}"
-if [ "$OS" = "linux" ]; then
-  $SUDO chown root:"$AGENT_GROUP" "${BINARY_INSTALL_DIR}/${BINARY_NAME}"
-fi
-log "Linking CLI command ${CLI_NAME} -> ${BINARY_NAME}"
-$SUDO ln -sf "${BINARY_INSTALL_DIR}/${BINARY_NAME}" "${CLI_LINK_DIR}/${CLI_NAME}"
 
 HEALTH_URL="${SERVER_URL%/}/api/health"
 log "Preflight: checking server reachability at ${HEALTH_URL}"

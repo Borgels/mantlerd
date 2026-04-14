@@ -33,6 +33,8 @@ var configSetCmd = &cobra.Command{
 
 Valid keys:
   server     - Mantler server URL
+  relay-url  - Relay WebSocket URL override
+  cloudflare-tunnel-hostname - Cloudflare tunnel hostname for encrypted ingress
   token      - Machine registration token
   machine    - Machine ID
   interval   - Check-in interval (e.g., 30s, 1m, 5m)
@@ -41,6 +43,8 @@ Valid keys:
 
 Examples:
   mantler config set server https://control.example.com
+  mantler config set relay-url wss://relay.example.com/ws
+  mantler config set cloudflare-tunnel-hostname abcdefg.trycloudflare.com
   mantler config set interval 1m
   mantler config set insecure true`,
 	Args: cobra.ExactArgs(2),
@@ -90,6 +94,8 @@ func runConfigShow(cmd *cobra.Command, args []string) {
 
 	// Display config values
 	fmt.Printf("Server URL:    %s\n", cfg.ServerURL)
+	fmt.Printf("Relay URL:     %s\n", cfg.RelayURL)
+	fmt.Printf("CF Tunnel:     %s\n", cfg.CloudflareTunnelHostname)
 	fmt.Printf("Machine ID:    %s\n", cfg.MachineID)
 	fmt.Printf("Token:         %s\n", maskToken(cfg.Token))
 	fmt.Printf("Interval:      %s\n", cfg.Interval)
@@ -118,6 +124,10 @@ func runConfigSet(cmd *cobra.Command, args []string) {
 	switch key {
 	case "server":
 		cfg.ServerURL = value
+	case "relay-url", "relay_url", "relay":
+		cfg.RelayURL = value
+	case "cloudflare-tunnel-hostname", "cloudflare_tunnel_hostname", "cftunnel":
+		cfg.CloudflareTunnelHostname = value
 	case "token":
 		cfg.Token = value
 	case "machine":
@@ -148,7 +158,7 @@ func runConfigSet(cmd *cobra.Command, args []string) {
 		cfg.LogLevel = value
 	default:
 		fmt.Fprintf(os.Stderr, "Error: unknown configuration key: %s\n", key)
-		fmt.Fprintln(os.Stderr, "Valid keys: server, token, machine, interval, insecure, log-level")
+		fmt.Fprintln(os.Stderr, "Valid keys: server, relay-url, cloudflare-tunnel-hostname, token, machine, interval, insecure, log-level")
 		os.Exit(1)
 	}
 

@@ -53,9 +53,25 @@ func runCheckin(cmd *cobra.Command, args []string) {
 		sendInProgressAck(cl, payload)
 	}, outcomes.Add)
 	dispatcher := newCommandDispatcher(context.Background(), executor, cl, defaultLightCommandConcurrency)
+	connectivityDetector := newConnectivityDetector()
+	connectivityDetector.SetCloudflareTunnelHostname(cfg.CloudflareTunnelHostname)
 
 	// Run check-in
-	cycle := runCheckIn(context.Background(), cfg, cl, runtimeManager, trainerManager, toolManager, executor, outcomes, dispatcher, time.Now(), true)
+	cycle := runCheckIn(
+		context.Background(),
+		cfg,
+		cl,
+		runtimeManager,
+		trainerManager,
+		toolManager,
+		executor,
+		outcomes,
+		dispatcher,
+		nil,
+		connectivityDetector,
+		time.Now(),
+		true,
+	)
 	waitCtx, waitCancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer waitCancel()
 	if !dispatcher.WaitForIdle(waitCtx) {

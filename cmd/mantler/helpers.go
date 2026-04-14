@@ -246,7 +246,10 @@ func toInstalledModels(runtimeManager *runtime.Manager) []types.InstalledModel {
 	return result
 }
 
-func toDeployedMantles(installedModels []types.InstalledModel) []types.DeployedMantle {
+func toDeployedMantles(
+	installedModels []types.InstalledModel,
+	runtimeEndpointHealth map[types.RuntimeType]string,
+) []types.DeployedMantle {
 	result := make([]types.DeployedMantle, 0, len(installedModels))
 	seen := map[string]struct{}{}
 	for _, model := range installedModels {
@@ -279,10 +282,58 @@ func toDeployedMantles(installedModels []types.InstalledModel) []types.DeployedM
 			BaseFingerprint:   fingerprint,
 			Status:            status,
 			EndpointPath:      fmt.Sprintf("/api/v1/%s/chat/completions", modelID),
-			EndpointHealth:    map[string]string{"running": "healthy", "starting": "degraded", "failed": "down"}[status],
+			EndpointHealth: func() string {
+				if status == "failed" {
+					return "down"
+				}
+				if status == "starting" {
+					return "degraded"
+				}
+				if runtimeHealth, ok := runtimeEndpointHealth[model.Runtime]; ok {
+					return runtimeHealth
+				}
+				return map[string]string{"running": "healthy", "starting": "degraded", "failed": "down"}[status]
+			}(),
 		})
 	}
 	return result
+}
+
+func probeRuntimeEndpointHealth(readyRuntimes []string) map[types.RuntimeType]string {
+	results := make(map[types.RuntimeType]string, len(readyRuntimes))
+	for _, runtimeName := range readyRuntimes {
+		runtimeType := types.RuntimeType(strings.TrimSpace(runtimeName))
+		if runtimeType == "" {
+			continue
+		}
+		results[runtimeType] = probeSingleRuntimeEndpoint(runtimeType)
+	}
+	return results
+}
+
+func probeSingleRuntimeEndpoint(runtimeType types.RuntimeType) string {
+	path := "/v1/models"
+	switch runtimeType {
+	case types.RuntimeOllama:
+		path = "/api/tags"
+	}
+	url := fmt.Sprintf("http://127.0.0.1:%d%s", runtimeDefaultPort(runtimeType), path)
+	ctx, cancel := context.WithTimeout(context.Background(), 1200*time.Millisecond)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "down"
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "down"
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return "healthy"
+	}
+	return "degraded"
 }
 
 func toInstalledHarnesses(desired types.DesiredConfig) []types.InstalledHarness {

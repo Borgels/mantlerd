@@ -18,7 +18,9 @@ import (
 	"github.com/Borgels/mantlerd/internal/client"
 	"github.com/Borgels/mantlerd/internal/commands"
 	"github.com/Borgels/mantlerd/internal/config"
+	stagecrypto "github.com/Borgels/mantlerd/internal/crypto"
 	"github.com/Borgels/mantlerd/internal/discovery"
+	"github.com/Borgels/mantlerd/internal/relay"
 	runtimeagent "github.com/Borgels/mantlerd/internal/runtime"
 	agenttools "github.com/Borgels/mantlerd/internal/tools"
 	"github.com/Borgels/mantlerd/internal/trainer"
@@ -59,6 +61,11 @@ func runStart(cmd *cobra.Command, args []string) {
 	}
 
 	outcomes := newOutcomeBuffer()
+	stageKeys, err := stagecrypto.EnsureStageKeys()
+	stageKeysReady := err == nil
+	if err != nil {
+		log.Printf("stage key initialization failed: %v", err)
+	}
 
 	// Create runtime manager and executor
 	runtimeManager := runtimeagent.NewManager()
@@ -69,15 +76,31 @@ func runStart(cmd *cobra.Command, args []string) {
 		sendInProgressAck(cl, payload)
 	}, outcomes.Add)
 
+	relayClient, err := relay.New(relay.Config{
+		ServerURL: cfg.ServerURL,
+		RelayURL:  cfg.RelayURL,
+		Token:     cfg.Token,
+		MachineID: cfg.MachineID,
+		Insecure:  cfg.Insecure,
+	}, runtimeManager)
+	if err != nil {
+		log.Printf("relay initialization failed: %v", err)
+	}
+
 	// Set up signal handling
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+	if relayClient != nil {
+		go relayClient.Run(ctx)
+	}
+	connectivityDetector := newConnectivityDetector()
+	connectivityDetector.SetCloudflareTunnelHostname(cfg.CloudflareTunnelHostname)
 	dispatcher := newCommandDispatcher(ctx, executor, cl, defaultLightCommandConcurrency)
 
 	// Run initial check-in
 	startedAt := time.Now()
 	consecutiveFailures := 0
-	cycle := runCheckIn(ctx, cfg, cl, runtimeManager, trainerManager, toolManager, executor, outcomes, dispatcher, startedAt, consecutiveFailures == 0)
+	cycle := runCheckIn(ctx, cfg, cl, runtimeManager, trainerManager, toolManager, executor, outcomes, dispatcher, relayClient, connectivityDetector, startedAt, consecutiveFailures == 0, stageKeys)
 	if cycle.success {
 		consecutiveFailures = 0
 	} else {
@@ -92,7 +115,7 @@ func runStart(cmd *cobra.Command, args []string) {
 			log.Println("Shutting down agent...")
 			return
 		case <-timer.C:
-			cycle = runCheckIn(ctx, cfg, cl, runtimeManager, trainerManager, toolManager, executor, outcomes, dispatcher, startedAt, consecutiveFailures == 0)
+			cycle = runCheckIn(ctx, cfg, cl, runtimeManager, trainerManager, toolManager, executor, outcomes, dispatcher, relayClient, connectivityDetector, startedAt, consecutiveFailures == 0, stageKeys)
 			if cycle.success {
 				consecutiveFailures = 0
 			} else {
@@ -120,6 +143,12 @@ func loadConfig(cmd *cobra.Command) config.Config {
 	flagsCfg := config.Config{}
 	if cmd.Flags().Changed("server") {
 		flagsCfg.ServerURL = serverURL
+	}
+	if cmd.Flags().Changed("relay-url") {
+		flagsCfg.RelayURL = relayURL
+	}
+	if cmd.Flags().Changed("cloudflare-tunnel-hostname") {
+		flagsCfg.CloudflareTunnelHostname = cloudflareTunnelHostname
 	}
 	if cmd.Flags().Changed("token") {
 		flagsCfg.Token = token
@@ -158,6 +187,8 @@ func loadConfig(cmd *cobra.Command) config.Config {
 	}
 
 	shouldPersist := cmd.Flags().Changed("server") ||
+		cmd.Flags().Changed("relay-url") ||
+		cmd.Flags().Changed("cloudflare-tunnel-hostname") ||
 		cmd.Flags().Changed("token") ||
 		cmd.Flags().Changed("machine") ||
 		cmd.Flags().Changed("interval") ||
@@ -371,8 +402,11 @@ func runCheckIn(
 	executor *commands.Executor,
 	outcomes *outcomeBuffer,
 	dispatcher *commandDispatcher,
+	relayClient *relay.Client,
+	connectivityDetector *ConnectivityDetector,
 	startedAt time.Time,
 	allowFollowup bool,
+	stageKeys stagecrypto.StageKeys,
 ) checkinCycleResult {
 	flushFailedAcks(cl)
 	cachedDesired := loadCachedDesiredConfig()
@@ -389,7 +423,7 @@ func runCheckIn(
 	readyRuntimeNames := runtimeManager.ReadyRuntimes()
 	runtimeStatuses := buildRuntimeStatuses(installedRuntimeNames, readyRuntimeNames)
 	installedModels := toInstalledModels(runtimeManager)
-	deployedMantles := toDeployedMantles(installedModels)
+	deployedMantles := toDeployedMantles(installedModels, probeRuntimeEndpointHealth(runtimeManager.ReadyRuntimes()))
 	hasActiveWork := hasActiveOperations(runtimeStatuses, installedModels, trainerManager.HasActiveJobs())
 	runtimeStatus := types.RuntimeNotInstalled
 	runtimeType := types.RuntimeType("")
@@ -438,8 +472,16 @@ func runCheckIn(
 		Uptime:                 int64(time.Since(startedAt).Seconds()),
 		LoadAvg:                readLoadAvg(),
 	}
+	if connectivityDetector != nil {
+		payload.Connectivity = connectivityDetector.Detect(ctx, runtimeType, relayClient)
+	}
 	if origin := configOrigin(cfg); origin != nil {
 		payload.Origin = origin
+	}
+	if stageKeysReady {
+		payload.StageEncryptionKey = stageKeys.EncryptionPublicKey
+		payload.StageSigningKey = stageKeys.SigningPublicKey
+		payload.StageKeyFingerprint = stageKeys.Fingerprint
 	}
 
 	resp, err := client.Retry(ctx, 3, func() (types.CheckinResponse, error) {

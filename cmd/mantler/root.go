@@ -11,6 +11,8 @@ import (
 var (
 	cfgFile          string
 	serverURL        string
+	relayURL         string
+	cloudflareTunnelHostname string
 	token            string
 	machineID        string
 	interval         string
@@ -34,6 +36,8 @@ func init() {
 	// Persistent flags (available to all subcommands)
 	rootCmd.PersistentFlags().StringVarP(&cfgFile, "config", "c", "", "config file (default is /etc/mantler/agent.json or ~/.mantler/agent.json)")
 	rootCmd.PersistentFlags().StringVarP(&serverURL, "server", "s", "", "Mantler server URL")
+	rootCmd.PersistentFlags().StringVar(&relayURL, "relay-url", "", "Relay WebSocket URL override")
+	rootCmd.PersistentFlags().StringVar(&cloudflareTunnelHostname, "cloudflare-tunnel-hostname", "", "Cloudflare tunnel hostname for encrypted ingress")
 	rootCmd.PersistentFlags().StringVarP(&token, "token", "t", "", "Machine registration token")
 	rootCmd.PersistentFlags().StringVarP(&machineID, "machine", "m", "", "Machine ID")
 	rootCmd.PersistentFlags().StringVarP(&interval, "interval", "i", "30s", "Check-in interval")
@@ -43,6 +47,8 @@ func init() {
 
 	// Bind flags to viper
 	viper.BindPFlag("server", rootCmd.PersistentFlags().Lookup("server"))
+	viper.BindPFlag("relay-url", rootCmd.PersistentFlags().Lookup("relay-url"))
+	viper.BindPFlag("cloudflare-tunnel-hostname", rootCmd.PersistentFlags().Lookup("cloudflare-tunnel-hostname"))
 	viper.BindPFlag("token", rootCmd.PersistentFlags().Lookup("token"))
 	viper.BindPFlag("machine", rootCmd.PersistentFlags().Lookup("machine"))
 	viper.BindPFlag("interval", rootCmd.PersistentFlags().Lookup("interval"))

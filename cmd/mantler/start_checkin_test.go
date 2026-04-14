@@ -89,7 +89,21 @@ func TestRunCheckInFollowUpDoesNotResendOutcomeEvents(t *testing.T) {
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 	})
 
-	runCheckIn(context.Background(), cfg, cl, runtimeManager, trainerManager, toolManager, executor, outcomes, dispatcher, time.Now(), true)
+	runCheckIn(
+		context.Background(),
+		cfg,
+		cl,
+		runtimeManager,
+		trainerManager,
+		toolManager,
+		executor,
+		outcomes,
+		dispatcher,
+		nil,
+		newConnectivityDetector(),
+		time.Now(),
+		true,
+	)
 	waitCtx, waitCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer waitCancel()
 	if !dispatcher.WaitForIdle(waitCtx) {

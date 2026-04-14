@@ -12,6 +12,30 @@ The daemon runs on each worker machine, checks in with Mantler, executes typed c
 - Executes allowlisted commands returned by the server
 - Acknowledges command results (`/api/agent/ack`)
 
+## Strategy pipeline execution role
+
+`mantlerd` is the stage execution agent for strategy pipelines.
+
+For pipeline stage requests, the daemon:
+
+- Decrypts inbound stage envelopes locally.
+- Executes `compress` or `infer` stage work against local runtime backends.
+- Validates compression contract structure for `CompressedContext`.
+- Emits signed `StageIntegrity` sidecars (`Ed25519`) with hash/token/runtime metadata.
+- Re-encrypts continuation payloads for the next stage target.
+
+Current runtime stage flow supports:
+
+- single infer stage
+- two-stage `compress -> infer` pipeline
+
+## Pipeline hardening notes
+
+- Stage keypair lifecycle is generated locally (`EnsureStageKeys`), reported in check-ins when available, and omitted from payloads on initialization failure.
+- Stage processing honors relay timeout budgets (`TimeoutMs`) to avoid unbounded execution.
+- Runtime port resolution is centralized to prevent drift across relay/runtime paths.
+- Request and response buffers use best-effort memory zeroing for sensitive bytes.
+
 ## Installation (Linux, recommended)
 
 Use the release installer script:

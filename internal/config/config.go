@@ -12,6 +12,8 @@ import (
 
 type Config struct {
 	ServerURL        string                 `json:"serverUrl"`
+	RelayURL         string                 `json:"relayUrl,omitempty"`
+	CloudflareTunnelHostname string         `json:"cloudflareTunnelHostname,omitempty"`
 	Token            string                 `json:"token"`
 	MachineID        string                 `json:"machineId"`
 	Interval         time.Duration          `json:"interval"`
@@ -23,6 +25,8 @@ type Config struct {
 
 type FileConfig struct {
 	ServerURL        string                 `json:"serverUrl"`
+	RelayURL         string                 `json:"relayUrl,omitempty"`
+	CloudflareTunnelHostname string         `json:"cloudflareTunnelHostname,omitempty"`
 	Token            string                 `json:"token"`
 	MachineID        string                 `json:"machineId"`
 	IntervalMS       int64                  `json:"intervalMs"`
@@ -70,6 +74,8 @@ func Load(path string) (Config, error) {
 	}
 	return Config{
 		ServerURL:        raw.ServerURL,
+		RelayURL:         raw.RelayURL,
+		CloudflareTunnelHostname: raw.CloudflareTunnelHostname,
 		Token:            raw.Token,
 		MachineID:        raw.MachineID,
 		Interval:         time.Duration(raw.IntervalMS) * time.Millisecond,
@@ -95,6 +101,8 @@ func Save(path string, cfg Config) error {
 
 	raw := FileConfig{
 		ServerURL:        cfg.ServerURL,
+		RelayURL:         cfg.RelayURL,
+		CloudflareTunnelHostname: cfg.CloudflareTunnelHostname,
 		Token:            cfg.Token,
 		MachineID:        cfg.MachineID,
 		IntervalMS:       cfg.Interval.Milliseconds(),
@@ -122,6 +130,12 @@ func Merge(fileCfg Config, flagsCfg Config) Config {
 	}
 	if flagsCfg.Token != "" {
 		merged.Token = flagsCfg.Token
+	}
+	if flagsCfg.RelayURL != "" {
+		merged.RelayURL = flagsCfg.RelayURL
+	}
+	if flagsCfg.CloudflareTunnelHostname != "" {
+		merged.CloudflareTunnelHostname = flagsCfg.CloudflareTunnelHostname
 	}
 	if flagsCfg.MachineID != "" {
 		merged.MachineID = flagsCfg.MachineID
