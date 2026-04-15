@@ -410,6 +410,34 @@ download_with_fallback() {
   return 1
 }
 
+# Like download_with_fallback but does NOT retry on HTTP errors (e.g. 404).
+# Used for small metadata files where a 404 is definitive — no point retrying.
+download_metadata_with_fallback() {
+  output_path="$1"
+  api_url="$2"
+  shift 2
+
+  for candidate_url in "$@"; do
+    [ -n "$candidate_url" ] || continue
+    log "Downloading ${candidate_url}"
+    if curl --fail --show-error --location --retry 2 --retry-delay 1 --retry-connrefused \
+      --output "$output_path" "$candidate_url"; then
+      return 0
+    fi
+    log "Download failed from ${candidate_url}; trying next source."
+  done
+
+  if [ -n "$api_url" ]; then
+    log "Downloading ${api_url} via GitHub Releases API"
+    if curl --fail --show-error --location --retry 2 --retry-delay 1 --retry-connrefused \
+      -H "Accept: application/octet-stream" --output "$output_path" "$api_url"; then
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
 TMP_DIR="$(mktemp -d)"
 BIN_TMP="${TMP_DIR}/${ASSET_NAME}"
 SHA_TMP="${TMP_DIR}/${ASSET_NAME}.sha256"
@@ -417,7 +445,7 @@ SHA_TMP="${TMP_DIR}/${ASSET_NAME}.sha256"
 download_with_fallback "$BIN_TMP" "$ARTIFACT_API_URL" "$ARTIFACT_URL" "$ARTIFACT_FALLBACK_URL" \
   || fatal "Failed to download ${ASSET_NAME} from GitHub release assets."
 
-if ! download_with_fallback "$SHA_TMP" "$CHECKSUM_API_URL" "$CHECKSUM_URL" "$CHECKSUM_FALLBACK_URL"; then
+if ! download_metadata_with_fallback "$SHA_TMP" "$CHECKSUM_API_URL" "$CHECKSUM_URL" "$CHECKSUM_FALLBACK_URL"; then
   log "Individual .sha256 not found; trying checksums.txt fallback."
   CHECKSUMS_TXT_TMP="${TMP_DIR}/checksums.txt"
   FOUND_IN_CHECKSUMS=""
@@ -532,6 +560,15 @@ fi
 if [ "$OS" = "linux" ]; then
   if command -v systemctl >/dev/null 2>&1; then
     log "Installing systemd unit ${SYSTEMD_UNIT_PATH}"
+    # Detect systemd version for conditional features
+    SYSTEMD_VERSION="$($SUDO systemctl --version 2>/dev/null | awk 'NR==1{print $2}' || echo 0)"
+    LOAD_CREDENTIAL_LINE=""
+    if [ "${SYSTEMD_VERSION}" -ge 250 ] 2>/dev/null; then
+      LOAD_CREDENTIAL_LINE="LoadCredential=agent.json:${CONFIG_PATH}"
+    fi
+
+    $SUDO install -d -m 0750 -o root -g "$AGENT_GROUP" /run/mantlerd
+
     $SUDO sh -c "cat > \"$SYSTEMD_UNIT_PATH\" <<EOF
 [Unit]
 Description=Mantler daemon
@@ -551,8 +588,15 @@ Environment=HUGGINGFACE_HUB_CACHE=${HF_CACHE_DIR}/hub
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
-ReadWritePaths=${CONFIG_DIR} ${HF_CACHE_DIR} ${RUNTIME_STATE_DIR}
+ProtectSystem=strict
+ReadWritePaths=${CONFIG_DIR} ${HF_CACHE_DIR} ${RUNTIME_STATE_DIR} /run/mantlerd /opt/mantler /var/lib/mantler /etc/systemd/system /run/systemd
+RuntimeDirectory=mantlerd
+RuntimeDirectoryMode=0750
 LimitNOFILE=65536
+CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_FOWNER CAP_SETUID CAP_SETGID CAP_KILL CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_SYS_ADMIN
+SystemCallFilter=@system-service @process @network-io @io-event @signal
+SystemCallErrorNumber=EPERM
+${LOAD_CREDENTIAL_LINE}
 
 [Install]
 WantedBy=multi-user.target
@@ -600,6 +644,26 @@ EOF"
       $SUDO install -d -m 0755 "$CONFIG_DIR"
       $SUDO install -d -m 2775 -o root -g "$AGENT_GROUP" /etc/mantler/runtimes
       $SUDO install -d -m 2775 -o root -g "$AGENT_GROUP" /etc/mantler/runtimes/vllm-models
+
+      # Pre-create all runtime config files with group-writable permissions so
+      # non-root users in the mantler group can update them via the CLI.
+      for _cfg in llamacpp.json quantcpp.json tensorrt.json model-flags.json; do
+        _p="${CONFIG_DIR}/${_cfg}"
+        if [ ! -f "$_p" ]; then
+          $SUDO sh -c "printf '{}\\n' > \"$_p\""
+          $SUDO chown root:"$AGENT_GROUP" "$_p"
+          $SUDO chmod 664 "$_p"
+        fi
+      done
+      for _env in tensorrt.env; do
+        _p="${CONFIG_DIR}/${_env}"
+        if [ ! -f "$_p" ]; then
+          $SUDO sh -c "> \"$_p\""
+          $SUDO chown root:"$AGENT_GROUP" "$_p"
+          $SUDO chmod 660 "$_p"
+        fi
+      done
+
       if [ ! -f "$VLLM_CONFIG_PATH" ]; then
         $SUDO sh -c "cat > \"$VLLM_CONFIG_PATH\" <<EOF
 {
@@ -654,13 +718,35 @@ EOF"
       $SUDO systemctl daemon-reload
       $SUDO systemctl enable vllm >/dev/null || true
 
-      # Allow mantler group members to control the vllm service without sudo
-      # password so that `mantler model pull/start/stop` work as non-root.
-      SUDOERS_FILE="/etc/sudoers.d/mantler-vllm"
-      $SUDO sh -c "cat > \"$SUDOERS_FILE\" <<'SUDOEOF'
-%mantler ALL=(root) NOPASSWD: /bin/systemctl enable vllm, /bin/systemctl disable vllm, /bin/systemctl start vllm, /bin/systemctl stop vllm, /bin/systemctl restart vllm, /bin/systemctl reset-failed vllm, /bin/systemctl daemon-reload
-SUDOEOF"
+      # Allow mantler group members to control all managed runtime services without
+      # a sudo password so that `mantler model pull/start/stop` work as non-root.
+      # !requiretty lets these commands run in non-interactive SSH sessions.
+      SUDOERS_FILE="/etc/sudoers.d/mantler-runtime-control"
+      SYSTEMCTL_BIN="$(command -v systemctl 2>/dev/null || echo /usr/bin/systemctl)"
+      $SUDO sh -c "printf '%s\n' \
+        'Defaults!${SYSTEMCTL_BIN} !requiretty' \
+        '%mantler ALL=(root) NOPASSWD: \\' \
+        '    ${SYSTEMCTL_BIN} enable vllm, ${SYSTEMCTL_BIN} disable vllm, \\' \
+        '    ${SYSTEMCTL_BIN} start vllm, ${SYSTEMCTL_BIN} stop vllm, \\' \
+        '    ${SYSTEMCTL_BIN} restart vllm, ${SYSTEMCTL_BIN} reset-failed vllm, \\' \
+        '    ${SYSTEMCTL_BIN} enable ollama, ${SYSTEMCTL_BIN} disable ollama, \\' \
+        '    ${SYSTEMCTL_BIN} start ollama, ${SYSTEMCTL_BIN} stop ollama, \\' \
+        '    ${SYSTEMCTL_BIN} restart ollama, ${SYSTEMCTL_BIN} reset-failed ollama, \\' \
+        '    ${SYSTEMCTL_BIN} enable llamacpp, ${SYSTEMCTL_BIN} disable llamacpp, \\' \
+        '    ${SYSTEMCTL_BIN} start llamacpp, ${SYSTEMCTL_BIN} stop llamacpp, \\' \
+        '    ${SYSTEMCTL_BIN} restart llamacpp, ${SYSTEMCTL_BIN} reset-failed llamacpp, \\' \
+        '    ${SYSTEMCTL_BIN} enable tensorrt-llm, ${SYSTEMCTL_BIN} disable tensorrt-llm, \\' \
+        '    ${SYSTEMCTL_BIN} start tensorrt-llm, ${SYSTEMCTL_BIN} stop tensorrt-llm, \\' \
+        '    ${SYSTEMCTL_BIN} restart tensorrt-llm, ${SYSTEMCTL_BIN} reset-failed tensorrt-llm, \\' \
+        '    ${SYSTEMCTL_BIN} enable quantcpp, ${SYSTEMCTL_BIN} disable quantcpp, \\' \
+        '    ${SYSTEMCTL_BIN} start quantcpp, ${SYSTEMCTL_BIN} stop quantcpp, \\' \
+        '    ${SYSTEMCTL_BIN} restart quantcpp, ${SYSTEMCTL_BIN} reset-failed quantcpp, \\' \
+        '    ${SYSTEMCTL_BIN} enable mantler-runtime, ${SYSTEMCTL_BIN} restart mantler-runtime, \\' \
+        '    ${SYSTEMCTL_BIN} daemon-reload' \
+        > \"$SUDOERS_FILE\""
       $SUDO chmod 440 "$SUDOERS_FILE"
+      # Remove the old vllm-only sudoers file if it exists
+      $SUDO rm -f /etc/sudoers.d/mantler-vllm
 
       VLLM_EFFECTIVE_MODE="$VLLM_RUNTIME_MODE"
       if [ "$VLLM_EFFECTIVE_MODE" = "auto" ]; then
