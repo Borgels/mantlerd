@@ -32,6 +32,7 @@ const (
 	defaultLightCommandConcurrency = 8
 	heavyCommandQueueSize          = 64
 	maxDegradedInterval            = 5 * time.Minute
+	gpuBandwidthCacheTTL           = 1 * time.Hour
 )
 
 var jitterRNG = rand.New(rand.NewSource(time.Now().UnixNano()))
@@ -100,7 +101,8 @@ func runStart(cmd *cobra.Command, args []string) {
 	// Run initial check-in
 	startedAt := time.Now()
 	consecutiveFailures := 0
-	cycle := runCheckIn(ctx, cfg, cl, runtimeManager, trainerManager, toolManager, executor, outcomes, dispatcher, relayClient, connectivityDetector, startedAt, consecutiveFailures == 0, stageKeys)
+	bandwidthCache := make(map[string]gpuBandwidthCacheEntry)
+	cycle := runCheckIn(ctx, cfg, cl, runtimeManager, trainerManager, toolManager, executor, outcomes, dispatcher, relayClient, connectivityDetector, bandwidthCache, startedAt, consecutiveFailures == 0, stageKeys)
 	if cycle.success {
 		consecutiveFailures = 0
 	} else {
@@ -115,7 +117,7 @@ func runStart(cmd *cobra.Command, args []string) {
 			log.Println("Shutting down agent...")
 			return
 		case <-timer.C:
-			cycle = runCheckIn(ctx, cfg, cl, runtimeManager, trainerManager, toolManager, executor, outcomes, dispatcher, relayClient, connectivityDetector, startedAt, consecutiveFailures == 0, stageKeys)
+			cycle = runCheckIn(ctx, cfg, cl, runtimeManager, trainerManager, toolManager, executor, outcomes, dispatcher, relayClient, connectivityDetector, bandwidthCache, startedAt, consecutiveFailures == 0, stageKeys)
 			if cycle.success {
 				consecutiveFailures = 0
 			} else {
@@ -207,6 +209,12 @@ func loadConfig(cmd *cobra.Command) config.Config {
 type outcomeBuffer struct {
 	mu     sync.Mutex
 	events []types.OutcomeEvent
+}
+
+type gpuBandwidthCacheEntry struct {
+	value      float64
+	source     string
+	measuredAt time.Time
 }
 
 func newOutcomeBuffer() *outcomeBuffer {
@@ -404,6 +412,7 @@ func runCheckIn(
 	dispatcher *commandDispatcher,
 	relayClient *relay.Client,
 	connectivityDetector *ConnectivityDetector,
+	bandwidthCache map[string]gpuBandwidthCacheEntry,
 	startedAt time.Time,
 	allowFollowup bool,
 	stageKeys stagecrypto.StageKeys,
@@ -413,9 +422,22 @@ func runCheckIn(
 
 	report := discovery.Collect()
 	for idx := range report.GPUs {
+		cacheKey := strings.ToLower(strings.TrimSpace(report.GPUVendor)) + "::" + strings.ToLower(strings.TrimSpace(report.GPUs[idx].Name))
+		if cached, ok := bandwidthCache[cacheKey]; ok && time.Since(cached.measuredAt) < gpuBandwidthCacheTTL {
+			report.GPUs[idx].MemoryBandwidthGBps = cached.value
+			report.GPUs[idx].BandwidthSource = cached.source
+			continue
+		}
 		bandwidth, source := toolManager.MeasureGPUBandwidth(report.GPUVendor, report.GPUs[idx].Name)
 		report.GPUs[idx].MemoryBandwidthGBps = bandwidth
 		report.GPUs[idx].BandwidthSource = source
+		if cacheKey != "::" && (bandwidth > 0 || strings.TrimSpace(source) != "") {
+			bandwidthCache[cacheKey] = gpuBandwidthCacheEntry{
+				value:      bandwidth,
+				source:     source,
+				measuredAt: time.Now(),
+			}
+		}
 	}
 	installedTools := toolManager.InstalledTools(report.GPUVendor)
 	installedRuntimeNames := runtimeManager.InstalledRuntimes()
@@ -694,7 +716,7 @@ type checkinCycleResult struct {
 func nextCheckinInterval(idleInterval time.Duration, active bool) time.Duration {
 	interval := idleInterval
 	if active {
-	const activeInterval = 15 * time.Second
+		const activeInterval = 15 * time.Second
 		if idleInterval > activeInterval {
 			interval = activeInterval
 		}

@@ -8,6 +8,7 @@ import (
 
 	"github.com/Borgels/mantlerd/internal/client"
 	"github.com/Borgels/mantlerd/internal/commands"
+	stagecrypto "github.com/Borgels/mantlerd/internal/crypto"
 	"github.com/Borgels/mantlerd/internal/runtime"
 	agenttools "github.com/Borgels/mantlerd/internal/tools"
 	"github.com/Borgels/mantlerd/internal/trainer"
@@ -57,6 +58,7 @@ func runCheckin(cmd *cobra.Command, args []string) {
 	connectivityDetector.SetCloudflareTunnelHostname(cfg.CloudflareTunnelHostname)
 
 	// Run check-in
+	bandwidthCache := make(map[string]gpuBandwidthCacheEntry)
 	cycle := runCheckIn(
 		context.Background(),
 		cfg,
@@ -69,8 +71,10 @@ func runCheckin(cmd *cobra.Command, args []string) {
 		dispatcher,
 		nil,
 		connectivityDetector,
+		bandwidthCache,
 		time.Now(),
 		true,
+		stagecrypto.StageKeys{},
 	)
 	waitCtx, waitCancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer waitCancel()

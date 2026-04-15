@@ -380,9 +380,14 @@ func (e *Executor) ExecuteWithContext(ctx context.Context, command types.AgentCo
 		}
 		compatibilityPlanID := optionalStringParam(command.Params, "compatibilityPlanId")
 		mantleFingerprint := optionalStringParam(command.Params, "mantleFingerprint")
+		if err := applyDistributedStartModelParams(command.Params, runtimeName); err != nil {
+			return ExecutionResult{}, err
+		}
 		e.runtimeManager.SetActiveContext(compatibilityPlanID, mantleFingerprint)
 		defer e.runtimeManager.ClearActiveContext()
 		return ExecutionResult{}, e.runtimeManager.StartModelWithRuntime(modelID, runtimeName, flags)
+	case "nccl_test":
+		return e.runNCCLTest(cmdCtx, command)
 	case "stop_model":
 		modelID, err := stringParam(command.Params, "modelId")
 		if err != nil {
@@ -780,6 +785,21 @@ func intParam(params map[string]interface{}, key string, fallback int) int {
 	}
 }
 
+func optionalIntParam(params map[string]interface{}, key string) (int, bool) {
+	raw, ok := params[key]
+	if !ok {
+		return 0, false
+	}
+	switch value := raw.(type) {
+	case float64:
+		return int(value), true
+	case int:
+		return value, true
+	default:
+		return 0, false
+	}
+}
+
 func optionalStringParam(params map[string]interface{}, key string) string {
 	raw, ok := params[key]
 	if !ok {
@@ -838,6 +858,226 @@ func optionalBoolParam(params map[string]interface{}, key string, fallback bool)
 		return fallback
 	}
 	return value
+}
+
+type clusterRunContext struct {
+	nodeCount       int
+	topology        string
+	machineIDs      []string
+	peerAddresses   []string
+	socketInterface string
+}
+
+func parseClusterRunContext(params map[string]interface{}) clusterRunContext {
+	machineIDs := optionalStringArrayParam(params, "machineIds")
+	if len(machineIDs) == 0 {
+		machineIDs = optionalStringArrayParam(params, "clusterMachineIds")
+	}
+	nodeCount, hasNodeCount := optionalIntParam(params, "clusterNodeCount")
+	if !hasNodeCount || nodeCount <= 0 {
+		nodeCount, hasNodeCount = optionalIntParam(params, "nodeCount")
+	}
+	if !hasNodeCount || nodeCount <= 0 {
+		nodeCount = len(machineIDs)
+	}
+	peerAddresses := optionalStringArrayParam(params, "peerAddresses")
+	if len(peerAddresses) == 0 {
+		peerAddresses = optionalStringArrayParam(params, "clusterPeerAddresses")
+	}
+	socketInterface := strings.TrimSpace(optionalStringParam(params, "ncclSocketInterface"))
+	if socketInterface == "" {
+		socketInterface = "enp1s0f1np1"
+	}
+	if nodeCount <= 0 {
+		nodeCount = 1
+	}
+	return clusterRunContext{
+		nodeCount:       nodeCount,
+		topology:        optionalStringParam(params, "clusterTopology"),
+		machineIDs:      machineIDs,
+		peerAddresses:   peerAddresses,
+		socketInterface: socketInterface,
+	}
+}
+
+func applyDistributedStartModelParams(params map[string]interface{}, runtimeName string) error {
+	cluster := parseClusterRunContext(params)
+	if cluster.nodeCount <= 1 {
+		return nil
+	}
+	normalizedRuntime := strings.ToLower(strings.TrimSpace(runtimeName))
+	if normalizedRuntime == "" {
+		normalizedRuntime = strings.ToLower(optionalStringParam(params, "runtime"))
+	}
+	if normalizedRuntime == "" {
+		return nil
+	}
+
+	switch normalizedRuntime {
+	case "vllm":
+		values := readEnvFile(vllmRuntimeEnvPath)
+		values["VLLM_CLUSTER_NODE_COUNT"] = strconv.Itoa(cluster.nodeCount)
+		if cluster.topology != "" {
+			values["VLLM_CLUSTER_TOPOLOGY"] = cluster.topology
+		}
+		if len(cluster.machineIDs) > 0 {
+			values["VLLM_CLUSTER_MACHINE_IDS"] = strings.Join(cluster.machineIDs, ",")
+		}
+		if cluster.topology == "qsfp_switch" {
+			values["UCX_NET_DEVICES"] = cluster.socketInterface
+			values["NCCL_SOCKET_IFNAME"] = cluster.socketInterface
+			values["OMPI_MCA_btl_tcp_if_include"] = cluster.socketInterface
+		}
+		extraArgs := strings.TrimSpace(values["VLLM_EXTRA_ARGS"])
+		if tp, ok := optionalIntParam(params, "tensorParallelSize"); ok && tp > 0 {
+			extraArgs = appendFlagArg(extraArgs, "--tensor-parallel-size", strconv.Itoa(tp))
+		}
+		if pp, ok := optionalIntParam(params, "pipelineParallelSize"); ok && pp > 0 {
+			extraArgs = appendFlagArg(extraArgs, "--pipeline-parallel-size", strconv.Itoa(pp))
+		}
+		if extraArgs != "" {
+			values["VLLM_EXTRA_ARGS"] = extraArgs
+		}
+		return writeEnvFile(vllmRuntimeEnvPath, values)
+	case "tensorrt":
+		values := readEnvFile(tensorrtRuntimeEnvPath)
+		values["TENSORRT_CLUSTER_NODE_COUNT"] = strconv.Itoa(cluster.nodeCount)
+		if cluster.topology != "" {
+			values["TENSORRT_CLUSTER_TOPOLOGY"] = cluster.topology
+		}
+		if len(cluster.machineIDs) > 0 {
+			values["TENSORRT_CLUSTER_MACHINE_IDS"] = strings.Join(cluster.machineIDs, ",")
+		}
+		if cluster.topology == "qsfp_switch" {
+			values["UCX_NET_DEVICES"] = cluster.socketInterface
+			values["NCCL_SOCKET_IFNAME"] = cluster.socketInterface
+			values["OMPI_MCA_btl_tcp_if_include"] = cluster.socketInterface
+		}
+		return writeEnvFile(tensorrtRuntimeEnvPath, values)
+	default:
+		return nil
+	}
+}
+
+func appendFlagArg(existing string, flag string, value string) string {
+	trimmed := strings.TrimSpace(existing)
+	if strings.Contains(trimmed, flag) {
+		return trimmed
+	}
+	if trimmed == "" {
+		return strings.TrimSpace(flag + " " + value)
+	}
+	return strings.TrimSpace(trimmed + " " + flag + " " + value)
+}
+
+func (e *Executor) runNCCLTest(ctx context.Context, command types.AgentCommand) (ExecutionResult, error) {
+	testBinary, err := resolveNCCLTestBinary()
+	if err != nil {
+		return ExecutionResult{}, err
+	}
+	args := optionalStringArrayParam(command.Params, "args")
+	if len(args) == 0 {
+		args = []string{"-b", "8", "-e", "128M", "-f", "2", "-g", "1"}
+	}
+	timeoutSeconds := intParam(command.Params, "timeoutSeconds", 300)
+	runCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSeconds)*time.Second)
+	defer cancel()
+	startedAt := time.Now()
+	cluster := parseClusterRunContext(command.Params)
+	usedMpiRun := false
+	cmdName := testBinary
+	cmdArgs := args
+	if cluster.topology == "qsfp_switch" && len(cluster.peerAddresses) > 0 {
+		hostSpec := strings.Join(cluster.peerAddresses, ":1,") + ":1"
+		cmdName = "mpirun"
+		cmdArgs = []string{
+			"-np", strconv.Itoa(cluster.nodeCount),
+			"-H", hostSpec,
+			"--mca", "plm_rsh_agent", "ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no",
+			"-x", "UCX_NET_DEVICES=" + cluster.socketInterface,
+			"-x", "NCCL_SOCKET_IFNAME=" + cluster.socketInterface,
+			"-x", "OMPI_MCA_btl_tcp_if_include=" + cluster.socketInterface,
+			"-x", "LD_LIBRARY_PATH",
+			testBinary,
+		}
+		cmdArgs = append(cmdArgs, args...)
+		usedMpiRun = true
+	}
+	cmd := exec.CommandContext(runCtx, cmdName, cmdArgs...)
+	output, runErr := cmd.CombinedOutput()
+	detail := strings.TrimSpace(string(output))
+	if detail == "" {
+		detail = "nccl test completed"
+	}
+	outcome := types.OutcomeEvent{
+		EventType:        "nccl_test_success",
+		Detail:           detail,
+		DurationMs:       time.Since(startedAt).Milliseconds(),
+		ClusterNodeCount: cluster.nodeCount,
+		ClusterTopology:  cluster.topology,
+	}
+	if runErr != nil {
+		outcome.EventType = "nccl_test_failure"
+		outcome.Detail = strings.TrimSpace(strings.Join([]string{
+			runErr.Error(),
+			tailText(detail, 1200),
+		}, "\n"))
+	}
+	e.emitOutcome(outcome)
+	if runErr != nil {
+		return ExecutionResult{Details: outcome.Detail}, runErr
+	}
+	maxBusBW := parseMaxNCCLBandwidth(detail)
+	return ExecutionResult{
+		Details: detail,
+		ResultPayload: map[string]any{
+			"binary":     testBinary,
+			"args":       cmdArgs,
+			"maxBusBwGb": maxBusBW,
+			"usedMpiRun": usedMpiRun,
+		},
+	}, nil
+}
+
+func resolveNCCLTestBinary() (string, error) {
+	candidates := []string{
+		"all_reduce_perf",
+		"/usr/local/bin/all_reduce_perf",
+		"/opt/nccl-tests/build/all_reduce_perf",
+	}
+	for _, candidate := range candidates {
+		if path, err := resolveCommandPath(candidate); err == nil {
+			return path, nil
+		}
+	}
+	return "", fmt.Errorf("nccl_test requires all_reduce_perf binary in PATH")
+}
+
+func parseMaxNCCLBandwidth(output string) float64 {
+	maxValue := 0.0
+	for _, line := range strings.Split(output, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		for _, token := range strings.Fields(trimmed) {
+			value, err := strconv.ParseFloat(token, 64)
+			if err != nil {
+				continue
+			}
+			if value > maxValue {
+				maxValue = value
+			}
+		}
+	}
+	return maxValue
+}
+
+func tailText(input string, maxLen int) string {
+	if maxLen <= 0 || len(input) <= maxLen {
+		return input
+	}
+	return input[len(input)-maxLen:]
 }
 
 func evalPromptsParam(params map[string]interface{}) ([]agenteval.Prompt, error) {
