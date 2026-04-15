@@ -134,7 +134,7 @@ func runUpdateApply(cmd *cobra.Command, args []string) error {
 	}
 	assetName := fmt.Sprintf("mantlerd-%s-%s", osName, archName)
 	assetURL := fmt.Sprintf("https://github.com/%s/%s/releases/download/%s/%s", updateRepoOwner, updateRepoName, targetVersion, assetName)
-	checksumURL := assetURL + ".sha256"
+	checksumURL := fmt.Sprintf("https://github.com/%s/%s/releases/download/%s/checksums.txt", updateRepoOwner, updateRepoName, targetVersion)
 
 	if !updateYes {
 		fmt.Printf("Current: %s\n", current)
@@ -150,7 +150,7 @@ func runUpdateApply(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	expectedChecksum, err := fetchChecksum(checksumURL)
+	expectedChecksum, err := fetchChecksum(checksumURL, assetName)
 	if err != nil {
 		return err
 	}
@@ -228,25 +228,31 @@ func fetchLatestRelease() (githubRelease, error) {
 	return rel, nil
 }
 
-func fetchChecksum(url string) (string, error) {
+func fetchChecksum(url string, assetName string) (string, error) {
 	resp, err := (&http.Client{Timeout: 20 * time.Second}).Get(url)
 	if err != nil {
 		return "", fmt.Errorf("download checksum: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return "", fmt.Errorf("checksum request failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1024))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 65536))
 	if err != nil {
 		return "", fmt.Errorf("read checksum response: %w", err)
 	}
-	fields := strings.Fields(string(body))
-	if len(fields) == 0 {
-		return "", fmt.Errorf("checksum file was empty")
+	for _, line := range strings.Split(string(body), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		// fields[1] may be a full path like /tmp/mantlerd-release/mantlerd-linux-arm64
+		if filepath.Base(fields[1]) == assetName {
+			return strings.TrimSpace(fields[0]), nil
+		}
 	}
-	return strings.TrimSpace(fields[0]), nil
+	return "", fmt.Errorf("checksum for %q not found in checksums.txt", assetName)
 }
 
 func downloadFile(url string, path string) error {

@@ -19,6 +19,7 @@ import (
 	"github.com/Borgels/mantlerd/internal/commands"
 	"github.com/Borgels/mantlerd/internal/config"
 	"github.com/Borgels/mantlerd/internal/discovery"
+	"github.com/Borgels/mantlerd/internal/localsocket"
 	runtimeagent "github.com/Borgels/mantlerd/internal/runtime"
 	"github.com/Borgels/mantlerd/internal/transfer"
 	agenttools "github.com/Borgels/mantlerd/internal/tools"
@@ -73,6 +74,15 @@ func runStart(cmd *cobra.Command, args []string) {
 	// Set up signal handling
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+
+	// Start the local Unix control socket so CLI commands can delegate to the
+	// daemon instead of running with their own (potentially unprivileged) context.
+	if sockSrv, err := localsocket.NewServer(runtimeManager); err != nil {
+		log.Printf("localsocket: disabled (%v)", err)
+	} else {
+		go sockSrv.Serve(ctx)
+	}
+
 	dispatcher := newCommandDispatcher(ctx, executor, cl, defaultLightCommandConcurrency)
 
 	// Run initial check-in

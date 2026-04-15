@@ -95,10 +95,10 @@ func (d *llamaCppDriver) Install() error {
 	if err := d.ensureServiceUnit(cfg); err != nil {
 		return err
 	}
-	if err := runCommand("systemctl", "enable", "llamacpp"); err != nil {
+	if err := runSystemctl( "enable", "llamacpp"); err != nil {
 		return fmt.Errorf("enable llamacpp service: %w", err)
 	}
-	if err := runCommand("systemctl", "restart", "llamacpp"); err != nil {
+	if err := runSystemctl( "restart", "llamacpp"); err != nil {
 		return fmt.Errorf("restart llamacpp service: %w", err)
 	}
 	if err := d.waitForReady(llamaCppReadyTimeout); err != nil {
@@ -115,10 +115,10 @@ func (d *llamaCppDriver) Install() error {
 }
 
 func (d *llamaCppDriver) Uninstall() error {
-	_ = runCommand("systemctl", "stop", "llamacpp")
-	_ = runCommand("systemctl", "disable", "llamacpp")
+	_ = runSystemctl( "stop", "llamacpp")
+	_ = runSystemctl( "disable", "llamacpp")
 	_ = os.Remove(llamaCppServiceUnitPath)
-	_ = runCommand("systemctl", "daemon-reload")
+	_ = runSystemctl( "daemon-reload")
 	_ = os.RemoveAll(llamaCppInstallDir)
 	_ = os.Remove(llamaCppConfigPath)
 	return nil
@@ -179,7 +179,7 @@ func (d *llamaCppDriver) PrepareModelWithFlags(modelID string, _ *types.ModelFea
 	if err := d.ensureServiceUnit(cfg); err != nil {
 		return err
 	}
-	if err := runCommand("systemctl", "restart", "llamacpp"); err != nil {
+	if err := runSystemctl( "restart", "llamacpp"); err != nil {
 		return fmt.Errorf("restart llamacpp service: %w", err)
 	}
 	return d.waitForReady(llamaCppReadyTimeout)
@@ -191,7 +191,7 @@ func (d *llamaCppDriver) StartModelWithFlags(modelID string, flags *types.ModelF
 
 func (d *llamaCppDriver) StopModel(modelID string) error {
 	_ = modelID
-	return runCommand("systemctl", "stop", "llamacpp")
+	return runSystemctl( "stop", "llamacpp")
 }
 
 func (d *llamaCppDriver) ListModels() []string {
@@ -226,7 +226,7 @@ func (d *llamaCppDriver) RemoveModel(modelID string) error {
 			return err
 		}
 	}
-	return runCommand("systemctl", "restart", "llamacpp")
+	return runSystemctl( "restart", "llamacpp")
 }
 
 func (d *llamaCppDriver) BenchmarkModel(
@@ -343,7 +343,7 @@ func (d *llamaCppDriver) RestartRuntime() error {
 	if err := d.ensureServiceUnit(cfg); err != nil {
 		return err
 	}
-	if err := runCommand("systemctl", "restart", "llamacpp"); err != nil {
+	if err := runSystemctl( "restart", "llamacpp"); err != nil {
 		return fmt.Errorf("restart llamacpp service: %w", err)
 	}
 	return d.waitForReady(llamaCppReadyTimeout)
@@ -612,6 +612,8 @@ func (d *llamaCppDriver) waitForReady(timeout time.Duration) error {
 	return fmt.Errorf("llamacpp api not ready: %s", lastErr)
 }
 
+func (d *llamaCppDriver) configFilePath() string { return runtimeConfigFile("llamacpp.json") }
+
 func (d *llamaCppDriver) readConfig() (llamaCppConfig, error) {
 	cfg := llamaCppConfig{
 		Port:        llamaCppDefaultPort,
@@ -619,7 +621,7 @@ func (d *llamaCppDriver) readConfig() (llamaCppConfig, error) {
 		NGPULayers:  -1,
 		ContextSize: 8192,
 	}
-	raw, err := os.ReadFile(llamaCppConfigPath)
+	raw, err := os.ReadFile(d.configFilePath())
 	if err != nil {
 		if os.IsNotExist(err) {
 			return cfg, nil
@@ -660,20 +662,30 @@ func (d *llamaCppDriver) writeConfig(cfg llamaCppConfig) error {
 	if cfg.NGPULayers == 0 {
 		cfg.NGPULayers = -1
 	}
-	if err := os.MkdirAll(filepath.Dir(llamaCppConfigPath), 0o755); err != nil {
+	p := d.configFilePath()
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return fmt.Errorf("create llamacpp config directory: %w", err)
 	}
 	payload, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode llamacpp config: %w", err)
 	}
-	if err := os.WriteFile(llamaCppConfigPath, append(payload, '\n'), 0o600); err != nil {
+	if err := os.WriteFile(p, append(payload, '\n'), 0o664); err != nil {
 		return fmt.Errorf("write llamacpp config: %w", err)
 	}
 	return nil
 }
 
 func (d *llamaCppDriver) ensureServiceUnit(cfg llamaCppConfig) error {
+	if _, err := exec.LookPath("systemctl"); err != nil {
+		return nil
+	}
+	if os.Geteuid() != 0 {
+		if fileExists(llamaCppServiceUnitPath) {
+			return nil
+		}
+		return fmt.Errorf("write service unit: requires root (run `mantler runtime install llamacpp` as root first)")
+	}
 	if err := os.MkdirAll(filepath.Dir(llamaCppServiceUnitPath), 0o755); err != nil {
 		return fmt.Errorf("create systemd directory: %w", err)
 	}
@@ -705,7 +717,7 @@ WantedBy=multi-user.target
 	if err := os.WriteFile(llamaCppServiceUnitPath, []byte(unit), 0o644); err != nil {
 		return fmt.Errorf("write service unit: %w", err)
 	}
-	return runCommand("systemctl", "daemon-reload")
+	return runSystemctl("daemon-reload")
 }
 
 func detectBestBackend() string {

@@ -69,10 +69,10 @@ func (d *quantCppDriver) Install() error {
 	if err := d.ensureServiceUnit(cfg); err != nil {
 		return err
 	}
-	if err := runCommand("systemctl", "enable", "quantcpp"); err != nil {
+	if err := runSystemctl( "enable", "quantcpp"); err != nil {
 		return fmt.Errorf("enable quantcpp service: %w", err)
 	}
-	if err := runCommand("systemctl", "restart", "quantcpp"); err != nil {
+	if err := runSystemctl( "restart", "quantcpp"); err != nil {
 		return fmt.Errorf("restart quantcpp service: %w", err)
 	}
 	if err := d.waitForReady(quantCppReadyTimeout); err != nil {
@@ -89,10 +89,10 @@ func (d *quantCppDriver) Install() error {
 }
 
 func (d *quantCppDriver) Uninstall() error {
-	_ = runCommand("systemctl", "stop", "quantcpp")
-	_ = runCommand("systemctl", "disable", "quantcpp")
+	_ = runSystemctl( "stop", "quantcpp")
+	_ = runSystemctl( "disable", "quantcpp")
 	_ = os.Remove(quantCppServiceUnitPath)
-	_ = runCommand("systemctl", "daemon-reload")
+	_ = runSystemctl( "daemon-reload")
 	_ = os.RemoveAll(quantCppInstallDir)
 	_ = os.Remove(quantCppConfigPath)
 	return nil
@@ -136,7 +136,7 @@ func (d *quantCppDriver) PrepareModelWithFlags(modelID string, _ *types.ModelFea
 	if err := d.ensureServiceUnit(cfg); err != nil {
 		return err
 	}
-	if err := runCommand("systemctl", "restart", "quantcpp"); err != nil {
+	if err := runSystemctl( "restart", "quantcpp"); err != nil {
 		return fmt.Errorf("restart quantcpp service: %w", err)
 	}
 	return d.waitForReady(quantCppReadyTimeout)
@@ -148,7 +148,7 @@ func (d *quantCppDriver) StartModelWithFlags(modelID string, flags *types.ModelF
 
 func (d *quantCppDriver) StopModel(modelID string) error {
 	_ = modelID
-	return runCommand("systemctl", "stop", "quantcpp")
+	return runSystemctl( "stop", "quantcpp")
 }
 
 func (d *quantCppDriver) ListModels() []string {
@@ -183,7 +183,7 @@ func (d *quantCppDriver) RemoveModel(modelID string) error {
 			return err
 		}
 	}
-	return runCommand("systemctl", "restart", "quantcpp")
+	return runSystemctl( "restart", "quantcpp")
 }
 
 func (d *quantCppDriver) BenchmarkModel(
@@ -283,7 +283,7 @@ func (d *quantCppDriver) RestartRuntime() error {
 	if err := d.ensureServiceUnit(cfg); err != nil {
 		return err
 	}
-	if err := runCommand("systemctl", "restart", "quantcpp"); err != nil {
+	if err := runSystemctl( "restart", "quantcpp"); err != nil {
 		return fmt.Errorf("restart quantcpp service: %w", err)
 	}
 	return d.waitForReady(quantCppReadyTimeout)
@@ -552,6 +552,8 @@ func (d *quantCppDriver) waitForReady(timeout time.Duration) error {
 	return fmt.Errorf("quantcpp api not ready: %s", lastErr)
 }
 
+func (d *quantCppDriver) configFilePath() string { return runtimeConfigFile("quantcpp.json") }
+
 func (d *quantCppDriver) readConfig() (quantCppConfig, error) {
 	cfg := quantCppConfig{
 		Port:           quantCppDefaultPort,
@@ -560,7 +562,7 @@ func (d *quantCppDriver) readConfig() (quantCppConfig, error) {
 		Threads:        max(1, goruntime.NumCPU()),
 		ContextSize:    8192,
 	}
-	raw, err := os.ReadFile(quantCppConfigPath)
+	raw, err := os.ReadFile(d.configFilePath())
 	if err != nil {
 		if os.IsNotExist(err) {
 			return cfg, nil
@@ -619,20 +621,30 @@ func (d *quantCppDriver) writeConfig(cfg quantCppConfig) error {
 	if cfg.ContextSize <= 0 {
 		cfg.ContextSize = 8192
 	}
-	if err := os.MkdirAll(filepath.Dir(quantCppConfigPath), 0o755); err != nil {
+	p := d.configFilePath()
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return fmt.Errorf("create quantcpp config directory: %w", err)
 	}
 	payload, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode quantcpp config: %w", err)
 	}
-	if err := os.WriteFile(quantCppConfigPath, append(payload, '\n'), 0o600); err != nil {
+	if err := os.WriteFile(p, append(payload, '\n'), 0o664); err != nil {
 		return fmt.Errorf("write quantcpp config: %w", err)
 	}
 	return nil
 }
 
 func (d *quantCppDriver) ensureServiceUnit(cfg quantCppConfig) error {
+	if _, err := exec.LookPath("systemctl"); err != nil {
+		return nil
+	}
+	if os.Geteuid() != 0 {
+		if fileExists(quantCppServiceUnitPath) {
+			return nil
+		}
+		return fmt.Errorf("write service unit: requires root (run `mantler runtime install quantcpp` as root first)")
+	}
 	if err := os.MkdirAll(filepath.Dir(quantCppServiceUnitPath), 0o755); err != nil {
 		return fmt.Errorf("create systemd directory: %w", err)
 	}
@@ -668,7 +680,7 @@ WantedBy=multi-user.target
 	if err := os.WriteFile(quantCppServiceUnitPath, []byte(unit), 0o644); err != nil {
 		return fmt.Errorf("write service unit: %w", err)
 	}
-	return runCommand("systemctl", "daemon-reload")
+	return runSystemctl("daemon-reload")
 }
 
 func resolveQuantCppReleaseAssetURL() (string, error) {

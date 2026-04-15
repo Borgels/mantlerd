@@ -78,21 +78,21 @@ func (d *tensorrtDriver) Install() error {
 }
 
 func (d *tensorrtDriver) Uninstall() error {
-	_ = runCommand("systemctl", "stop", "tensorrt-llm")
-	_ = runCommand("systemctl", "disable", "tensorrt-llm")
+	_ = runSystemctl( "stop", "tensorrt-llm")
+	_ = runSystemctl( "disable", "tensorrt-llm")
 	_ = os.Remove(tensorrtUnitPath)
-	_ = runCommand("systemctl", "daemon-reload")
+	_ = runSystemctl( "daemon-reload")
 	_ = exec.Command("docker", "rm", "-f", tensorrtContainerName).Run()
-	_ = os.Remove(tensorrtConfigPath)
-	_ = os.Remove(tensorrtEnvPath)
+	_ = os.Remove(d.configFilePath())
+	_ = os.Remove(d.envFilePath())
 	return nil
 }
 
 func (d *tensorrtDriver) IsInstalled() bool {
 	hasNativeBinary := d.hasTrtllmServe()
 	hasServiceUnit := d.fileExists(tensorrtUnitPath)
-	hasConfig := d.fileExists(tensorrtConfigPath)
-	hasEnv := d.fileExists(tensorrtEnvPath)
+	hasConfig := d.fileExists(d.configFilePath())
+	hasEnv := d.fileExists(d.envFilePath())
 	return inferTensorRTInstalled(hasNativeBinary, hasServiceUnit, hasConfig, hasEnv)
 }
 
@@ -102,8 +102,8 @@ func (d *tensorrtDriver) IsReady() bool {
 	}
 	if configuredModel, known := d.configuredModelState(); known && strings.TrimSpace(configuredModel) == "" {
 		// Installed runtime with no configured model is considered idle-ready.
-		_ = runCommand("systemctl", "stop", "tensorrt-llm")
-		_ = runCommand("systemctl", "reset-failed", "tensorrt-llm")
+		_ = runSystemctl( "stop", "tensorrt-llm")
+		_ = runSystemctl( "reset-failed", "tensorrt-llm")
 		return true
 	}
 	if _, known := d.configuredModelState(); !known && d.serviceIsInactive() {
@@ -208,8 +208,8 @@ func (d *tensorrtDriver) StopModel(modelID string) error {
 	if err == nil && strings.EqualFold(strings.TrimSpace(cfg.Model), trimmed) {
 		_ = d.writeConfig(tensorrtConfig{Port: tensorrtDefaultPort})
 	}
-	_ = runCommand("systemctl", "stop", "tensorrt-llm")
-	_ = runCommand("systemctl", "reset-failed", "tensorrt-llm")
+	_ = runSystemctl( "stop", "tensorrt-llm")
+	_ = runSystemctl( "reset-failed", "tensorrt-llm")
 	return nil
 }
 
@@ -546,16 +546,16 @@ func (d *tensorrtDriver) RestartRuntime() error {
 			return d.startOrRestartService(cfg.Model, port, true)
 		}
 		// No configured model: keep runtime idle instead of crash-looping.
-		_ = runCommand("systemctl", "stop", "tensorrt-llm")
-		_ = runCommand("systemctl", "reset-failed", "tensorrt-llm")
+		_ = runSystemctl( "stop", "tensorrt-llm")
+		_ = runSystemctl( "reset-failed", "tensorrt-llm")
 		return nil
 	}
 	if os.IsNotExist(cfgErr) {
-		_ = runCommand("systemctl", "stop", "tensorrt-llm")
-		_ = runCommand("systemctl", "reset-failed", "tensorrt-llm")
+		_ = runSystemctl( "stop", "tensorrt-llm")
+		_ = runSystemctl( "reset-failed", "tensorrt-llm")
 		return nil
 	}
-	return runCommand("systemctl", "restart", "tensorrt-llm")
+	return runSystemctl( "restart", "tensorrt-llm")
 }
 
 // -------------------------------------------------------------------------
@@ -658,6 +658,12 @@ func (d *tensorrtDriver) ensureServiceUnit() error {
 	if _, err := exec.LookPath("systemctl"); err != nil {
 		return nil
 	}
+	if os.Geteuid() != 0 {
+		if fileExists(tensorrtUnitPath) {
+			return nil
+		}
+		return fmt.Errorf("write tensorrt service unit: requires root (run `mantler runtime install tensorrt` as root first)")
+	}
 	if err := os.MkdirAll(filepath.Dir(tensorrtUnitPath), 0o755); err != nil {
 		return fmt.Errorf("create tensorrt systemd directory: %w", err)
 	}
@@ -705,14 +711,15 @@ WantedBy=multi-user.target
 	if err := os.WriteFile(tensorrtUnitPath, []byte(unit), 0o644); err != nil {
 		return fmt.Errorf("write tensorrt service unit: %w", err)
 	}
-	return runCommand("systemctl", "daemon-reload")
+	return runSystemctl("daemon-reload")
 }
 
 func (d *tensorrtDriver) startOrRestartService(modelID string, port int, force bool) error {
 	if err := d.ensureServiceUnit(); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(tensorrtEnvPath), 0o755); err != nil {
+	envPath := d.envFilePath()
+	if err := os.MkdirAll(filepath.Dir(envPath), 0o755); err != nil {
 		return fmt.Errorf("create tensorrt env directory: %w", err)
 	}
 	safeModelID := strings.ReplaceAll(strings.TrimSpace(modelID), "\n", " ")
@@ -738,10 +745,10 @@ func (d *tensorrtDriver) startOrRestartService(modelID string, port int, force b
 		extraArgs,
 		containerImage,
 	)
-	if err := os.WriteFile(tensorrtEnvPath, []byte(envContent), 0o600); err != nil {
+	if err := os.WriteFile(envPath, []byte(envContent), 0o660); err != nil {
 		return fmt.Errorf("write tensorrt env config: %w", err)
 	}
-	if err := runCommand("systemctl", "enable", "tensorrt-llm"); err != nil {
+	if err := runSystemctl( "enable", "tensorrt-llm"); err != nil {
 		return err
 	}
 
@@ -755,7 +762,7 @@ func (d *tensorrtDriver) startOrRestartService(modelID string, port int, force b
 	}
 
 	markTensorRTRestart()
-	if err := runCommand("systemctl", "restart", "tensorrt-llm"); err != nil {
+	if err := runSystemctl( "restart", "tensorrt-llm"); err != nil {
 		return err
 	}
 	if err := d.waitForAPIReady(tensorrtReadyTimeout); err != nil {
@@ -814,8 +821,11 @@ func (d *tensorrtDriver) waitForAPIReady(timeout time.Duration) error {
 	return lastErr
 }
 
+func (d *tensorrtDriver) configFilePath() string { return runtimeConfigFile("tensorrt.json") }
+func (d *tensorrtDriver) envFilePath() string    { return runtimeConfigFile("tensorrt.env") }
+
 func (d *tensorrtDriver) readConfig() (tensorrtConfig, error) {
-	raw, err := os.ReadFile(tensorrtConfigPath)
+	raw, err := os.ReadFile(d.configFilePath())
 	if err != nil {
 		if os.IsNotExist(err) {
 			return tensorrtConfig{}, nil
@@ -836,14 +846,15 @@ func (d *tensorrtDriver) writeConfig(cfg tensorrtConfig) error {
 	if cfg.Port <= 0 {
 		cfg.Port = tensorrtDefaultPort
 	}
-	if err := os.MkdirAll(filepath.Dir(tensorrtConfigPath), 0o755); err != nil {
+	p := d.configFilePath()
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err
 	}
 	payload, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(tensorrtConfigPath, append(payload, '\n'), 0o600)
+	return os.WriteFile(p, append(payload, '\n'), 0o664)
 }
 
 func tensorrtPreparedModelsDir() string {
@@ -954,7 +965,7 @@ func (d *tensorrtDriver) pullContainerImageCtx(ctx context.Context, image string
 
 func (d *tensorrtDriver) readEnvConfigMap() map[string]string {
 	values := map[string]string{}
-	raw, err := os.ReadFile(tensorrtEnvPath)
+	raw, err := os.ReadFile(d.envFilePath())
 	if err != nil {
 		return values
 	}

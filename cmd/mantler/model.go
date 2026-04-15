@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Borgels/mantlerd/internal/config"
+	"github.com/Borgels/mantlerd/internal/localsocket"
 	"github.com/Borgels/mantlerd/internal/runtime"
 	"github.com/Borgels/mantlerd/internal/types"
 	"github.com/spf13/cobra"
@@ -178,16 +179,46 @@ func runModelList(cmd *cobra.Command, args []string) {
 
 func runModelPull(cmd *cobra.Command, args []string) {
 	modelID := args[0]
+	ctx := context.Background()
 
+	// Delegate to the daemon via the control socket when it is running.
+	// This means the privileged daemon performs the pull and all config writes,
+	// so the CLI does not need write access to /etc/mantler/ itself.
+	if localsocket.Available() {
+		fmt.Printf("Pulling model: %s\n", modelID)
+		if modelRuntime != "" {
+			fmt.Printf("Runtime: %s\n", modelRuntime)
+		}
+		fmt.Println("Delegating to mantlerd via control socket...")
+		fmt.Println()
+		lastStatus := ""
+		err := localsocket.PullModel(ctx, modelID, modelRuntime, func(ev localsocket.ProgressEvent) {
+			status := strings.TrimSpace(ev.Status)
+			if status == "" || status == lastStatus {
+				return
+			}
+			lastStatus = status
+			if ev.Total > 0 {
+				fmt.Printf("  → %s (%.1f%%)\n", status, ev.Percent)
+				return
+			}
+			fmt.Printf("  → %s\n", status)
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error pulling model: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("\n✓ Model %s pulled successfully\n", modelID)
+		return
+	}
+
+	// Fallback: direct execution (daemon not running, e.g. personal home lab).
 	manager := runtime.NewManager()
 
-	// Determine which runtime to use
 	targetRuntime := modelRuntime
 	if targetRuntime == "" {
-		// Use first ready runtime
 		readyRuntimes := manager.ReadyRuntimes()
 		if len(readyRuntimes) == 0 {
-			// Fall back to first installed runtime
 			installedRuntimes := manager.InstalledRuntimes()
 			if len(installedRuntimes) == 0 {
 				fmt.Fprintln(os.Stderr, "Error: No runtimes installed")
@@ -219,7 +250,7 @@ func runModelPull(cmd *cobra.Command, args []string) {
 		fmt.Printf("  → %s\n", status)
 	}
 
-	if err := manager.PrepareModelWithRuntimeProgressCtx(context.Background(), modelID, targetRuntime, nil, reportProgress); err != nil {
+	if err := manager.PrepareModelWithRuntimeProgressCtx(ctx, modelID, targetRuntime, nil, reportProgress); err != nil {
 		fmt.Fprintf(os.Stderr, "Error pulling model: %v\n", err)
 		os.Exit(1)
 	}

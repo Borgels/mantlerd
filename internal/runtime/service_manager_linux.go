@@ -13,6 +13,12 @@ type systemdServiceManager struct{}
 
 func (m *systemdServiceManager) Install(name string, execStart string, env map[string]string) error {
 	unitPath := filepath.Join("/etc/systemd/system", name+".service")
+	if os.Geteuid() != 0 {
+		if fileExists(unitPath) {
+			return nil
+		}
+		return fmt.Errorf("write systemd unit %s: requires root (run `mantler runtime install %s` as root first)", unitPath, name)
+	}
 	lines := []string{
 		"[Unit]",
 		"Description=" + name,
@@ -39,15 +45,15 @@ func (m *systemdServiceManager) Install(name string, execStart string, env map[s
 	if err := os.WriteFile(unitPath, []byte(strings.Join(lines, "\n")), 0o644); err != nil {
 		return fmt.Errorf("write systemd unit %s: %w", unitPath, err)
 	}
-	if err := runCommand("systemctl", "daemon-reload"); err != nil {
+	if err := runSystemctl("daemon-reload"); err != nil {
 		return err
 	}
-	return runCommand("systemctl", "enable", name)
+	return runSystemctl("enable", name)
 }
 
-func (m *systemdServiceManager) Start(name string) error   { return runCommand("systemctl", "start", name) }
-func (m *systemdServiceManager) Stop(name string) error    { return runCommand("systemctl", "stop", name) }
-func (m *systemdServiceManager) Restart(name string) error { return runCommand("systemctl", "restart", name) }
+func (m *systemdServiceManager) Start(name string) error   { return runSystemctl("start", name) }
+func (m *systemdServiceManager) Stop(name string) error    { return runSystemctl("stop", name) }
+func (m *systemdServiceManager) Restart(name string) error { return runSystemctl("restart", name) }
 
 func (m *systemdServiceManager) IsActive(name string) (bool, error) {
 	cmd := exec.Command("systemctl", "is-active", name)
@@ -63,10 +69,10 @@ func (m *systemdServiceManager) IsActive(name string) (bool, error) {
 }
 
 func (m *systemdServiceManager) Uninstall(name string) error {
-	_ = runCommand("systemctl", "stop", name)
-	_ = runCommand("systemctl", "disable", name)
+	_ = runSystemctl("stop", name)
+	_ = runSystemctl("disable", name)
 	_ = os.Remove(filepath.Join("/etc/systemd/system", name+".service"))
-	return runCommand("systemctl", "daemon-reload")
+	return runSystemctl("daemon-reload")
 }
 
 func (m *systemdServiceManager) Logs(name string, lines int) (string, error) {

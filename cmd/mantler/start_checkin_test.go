@@ -101,7 +101,6 @@ func TestRunCheckInFollowUpDoesNotResendOutcomeEvents(t *testing.T) {
 		dispatcher,
 		time.Now(),
 		true,
-		nil,
 	)
 	waitCtx, waitCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer waitCancel()

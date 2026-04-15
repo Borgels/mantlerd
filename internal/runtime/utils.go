@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"runtime"
 	"strconv"
@@ -17,6 +18,16 @@ func runCommand(name string, args ...string) error {
 		return fmt.Errorf("%s %s failed: %w (%s)", name, strings.Join(args, " "), err, strings.TrimSpace(string(output)))
 	}
 	return nil
+}
+
+// runSystemctl runs a systemctl command, using sudo -n when not running as root.
+// sudo -n fails immediately if a password would be required; install.sh sets up
+// a NOPASSWD sudoers rule for the mantler group covering these operations.
+func runSystemctl(args ...string) error {
+	if os.Geteuid() == 0 {
+		return runCommand("systemctl", args...)
+	}
+	return runCommand("sudo", append([]string{"-n", "systemctl"}, args...)...)
 }
 
 func isLikelyOutOfMemoryError(err error) bool {

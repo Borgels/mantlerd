@@ -41,7 +41,28 @@ type FileConfig struct {
 	AllowModelSharing        bool                   `json:"allowModelSharing,omitempty"`
 }
 
+// CredentialPath returns the path to the agent config injected via systemd
+// LoadCredential= (available in systemd v250+). When the daemon is started with
+// LoadCredential=agent.json:/etc/mantler/agent.json the credential is available
+// under $CREDENTIALS_DIRECTORY/agent.json without the token ever being exposed
+// as a world-readable file. Returns "" when not running under systemd credentials.
+func CredentialPath() string {
+	dir := strings.TrimSpace(os.Getenv("CREDENTIALS_DIRECTORY"))
+	if dir == "" {
+		return ""
+	}
+	p := filepath.Join(dir, "agent.json")
+	if _, err := os.Stat(p); err == nil {
+		return p
+	}
+	return ""
+}
+
 func DefaultConfigPath() string {
+	// Prefer systemd credential injection when available.
+	if cp := CredentialPath(); cp != "" {
+		return cp
+	}
 	if os.Geteuid() == 0 {
 		const preferred = "/etc/mantler/agent.json"
 		if _, err := os.Stat(preferred); err == nil {

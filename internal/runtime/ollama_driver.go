@@ -70,8 +70,8 @@ func (d *ollamaDriver) Uninstall() error {
 	manager := NewServiceManager()
 	_ = manager.Stop("ollama")
 	_ = os.Remove("/etc/systemd/system/ollama.service")
-	_ = runCommand("systemctl", "disable", "ollama")
-	_ = runCommand("systemctl", "daemon-reload")
+	_ = runSystemctl( "disable", "ollama")
+	_ = runSystemctl( "daemon-reload")
 	for _, bin := range []string{"/usr/local/bin/ollama", "/usr/bin/ollama"} {
 		_ = os.Remove(bin)
 	}
@@ -989,7 +989,7 @@ func (d *ollamaDriver) upsertModelFlags(modelID string, flags types.ModelFeature
 	if err != nil {
 		return fmt.Errorf("encode model flags: %w", err)
 	}
-	if err := os.WriteFile(path, append(payload, '\n'), 0o600); err != nil {
+	if err := os.WriteFile(path, append(payload, '\n'), 0o664); err != nil {
 		return fmt.Errorf("write model flags: %w", err)
 	}
 	return nil

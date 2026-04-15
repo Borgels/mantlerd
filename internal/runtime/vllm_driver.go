@@ -132,10 +132,10 @@ func (d *vllmDriver) Install() error {
 }
 
 func (d *vllmDriver) Uninstall() error {
-	_ = runCommand("systemctl", "stop", "vllm")
-	_ = runCommand("systemctl", "disable", "vllm")
+	_ = runSystemctl( "stop", "vllm")
+	_ = runSystemctl( "disable", "vllm")
 	_ = os.Remove(vllmUnitPath)
-	_ = runCommand("systemctl", "daemon-reload")
+	_ = runSystemctl( "daemon-reload")
 	if d.shouldUseContainer() {
 		_ = exec.Command("docker", "rm", "-f", vllmContainerName).Run()
 		image := d.containerImage()
@@ -145,15 +145,15 @@ func (d *vllmDriver) Uninstall() error {
 	} else {
 		_ = os.RemoveAll(vllmVenvPath)
 	}
-	_ = os.Remove(vllmConfigPath)
-	_ = os.Remove(vllmEnvPath)
+	_ = os.Remove(d.configFilePath())
+	_ = os.Remove(d.envFilePath())
 	return nil
 }
 
 func (d *vllmDriver) IsInstalled() bool {
 	hasServiceUnit := fileExists(vllmUnitPath)
-	hasConfig := fileExists(vllmConfigPath)
-	hasEnv := fileExists(vllmEnvPath)
+	hasConfig := fileExists(d.configFilePath())
+	hasEnv := fileExists(d.envFilePath())
 	if d.shouldUseContainer() {
 		return inferVLLMInstalled(false, hasServiceUnit, hasConfig, hasEnv)
 	}
@@ -170,8 +170,8 @@ func (d *vllmDriver) IsReady() bool {
 	if configuredModel, known := d.configuredModelState(); known {
 		if strings.TrimSpace(configuredModel) == "" {
 			// Installed runtime with no configured model is considered idle-ready.
-			_ = runCommand("systemctl", "stop", "vllm")
-			_ = runCommand("systemctl", "reset-failed", "vllm")
+			_ = runSystemctl( "stop", "vllm")
+			_ = runSystemctl( "reset-failed", "vllm")
 			return true
 		}
 		if incompatibility := d.knownModelImageIncompatibility(configuredModel, d.effectiveContainerImage()); incompatibility != "" {
@@ -314,8 +314,8 @@ func (d *vllmDriver) StopModel(modelID string) error {
 	if configuredModel, known := d.configuredModelState(); known && strings.EqualFold(strings.TrimSpace(configuredModel), modelID) {
 		d.disarmConfiguredModel()
 	}
-	_ = runCommand("systemctl", "stop", "vllm")
-	_ = runCommand("systemctl", "reset-failed", "vllm")
+	_ = runSystemctl( "stop", "vllm")
+	_ = runSystemctl( "reset-failed", "vllm")
 	return nil
 }
 
@@ -679,7 +679,7 @@ func (d *vllmDriver) RestartRuntime() error {
 			if incompatibility := d.knownModelImageIncompatibility(cfg.Model, d.effectiveContainerImage()); incompatibility != "" {
 				d.disarmConfiguredModel()
 				d.stopVLLMServiceForKnownIncompatibility()
-				_ = runCommand("systemctl", "reset-failed", "vllm")
+				_ = runSystemctl( "reset-failed", "vllm")
 				return nil
 			}
 			port := cfg.Port
@@ -689,19 +689,19 @@ func (d *vllmDriver) RestartRuntime() error {
 			return d.startOrRestartService(cfg.Model, port, true)
 		}
 		// No configured model: keep runtime idle instead of crash-looping a blank service.
-		_ = runCommand("systemctl", "stop", "vllm")
-		_ = runCommand("systemctl", "reset-failed", "vllm")
+		_ = runSystemctl( "stop", "vllm")
+		_ = runSystemctl( "reset-failed", "vllm")
 		return nil
 	}
 	if os.IsNotExist(cfgErr) {
-		_ = runCommand("systemctl", "stop", "vllm")
-		_ = runCommand("systemctl", "reset-failed", "vllm")
+		_ = runSystemctl( "stop", "vllm")
+		_ = runSystemctl( "reset-failed", "vllm")
 		return nil
 	}
-	if err := runCommand("systemctl", "restart", "vllm"); err == nil {
+	if err := runSystemctl( "restart", "vllm"); err == nil {
 		return nil
 	}
-	return runCommand("systemctl", "restart", "mantler-runtime")
+	return runSystemctl( "restart", "mantler-runtime")
 }
 
 func (d *vllmDriver) baseURL() string {
@@ -731,6 +731,16 @@ func (d *vllmDriver) configuredModelState() (string, bool) {
 func (d *vllmDriver) ensureServiceUnit() error {
 	if _, err := exec.LookPath("systemctl"); err != nil {
 		return nil
+	}
+	// Non-root users cannot write systemd unit files. If the unit was already
+	// installed (by root via `mantler runtime install`), skip the rewrite and
+	// daemon-reload — they are only needed when the unit content changes, which
+	// only happens during installs/upgrades performed as root.
+	if os.Geteuid() != 0 {
+		if fileExists(vllmUnitPath) {
+			return nil
+		}
+		return fmt.Errorf("write vllm service unit: requires root (run `mantler runtime install vllm` as root first)")
 	}
 	if err := os.MkdirAll(filepath.Dir(vllmUnitPath), 0o755); err != nil {
 		return fmt.Errorf("create vllm systemd directory: %w", err)
@@ -776,7 +786,7 @@ WantedBy=multi-user.target
 	if err := os.WriteFile(vllmUnitPath, []byte(unit), 0o644); err != nil {
 		return fmt.Errorf("write vllm service unit: %w", err)
 	}
-	return runCommand("systemctl", "daemon-reload")
+	return runSystemctl("daemon-reload")
 }
 
 func (d *vllmDriver) ensureVirtualEnv() error {
@@ -816,7 +826,7 @@ func (d *vllmDriver) startOrRestartService(modelID string, port int, force bool)
 	if err := d.ensureServiceUnit(); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(vllmEnvPath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(d.envFilePath()), 0o755); err != nil {
 		return fmt.Errorf("create vllm env directory: %w", err)
 	}
 	safeModelID := strings.ReplaceAll(strings.TrimSpace(modelID), "\n", " ")
@@ -900,7 +910,7 @@ func (d *vllmDriver) startOrRestartService(modelID string, port int, force bool)
 			return fmt.Errorf("write vllm docker env config: %w", err)
 		}
 	}
-	if err := runCommand("systemctl", "enable", "vllm"); err != nil {
+	if err := runSystemctl("enable", "vllm"); err != nil {
 		return err
 	}
 	if !force {
@@ -917,14 +927,14 @@ func (d *vllmDriver) startOrRestartService(modelID string, port int, force bool)
 		}
 	}
 	markVLLMRestart()
-	if err := runCommand("systemctl", "restart", "vllm"); err != nil {
+	if err := runSystemctl("restart", "vllm"); err != nil {
 		return err
 	}
 	if err := d.waitForAPIReady(vllmRapidFailureWindow); err != nil {
 		diagnostics := d.vllmDiagnosticsTail()
 		if d.shouldAutoEnableTrustRemoteCode(diagnostics) {
 			if trustErr := d.enableTrustRemoteCodeInEnv(); trustErr == nil {
-				if restartErr := runCommand("systemctl", "restart", "vllm"); restartErr == nil {
+				if restartErr := runSystemctl( "restart", "vllm"); restartErr == nil {
 					if readyErr := d.waitForAPIReady(vllmReadyTimeout); readyErr == nil {
 						return nil
 					}
@@ -989,10 +999,10 @@ func (d *vllmDriver) knownModelImageIncompatibility(modelID string, containerIma
 }
 
 func (d *vllmDriver) stopVLLMServiceForKnownIncompatibility() {
-	if err := runCommand("systemctl", "stop", "vllm"); err != nil {
+	if err := runSystemctl( "stop", "vllm"); err != nil {
 		return
 	}
-	_ = runCommand("systemctl", "reset-failed", "vllm")
+	_ = runSystemctl( "reset-failed", "vllm")
 }
 
 func (d *vllmDriver) serviceIsInactive() bool {
@@ -1054,7 +1064,7 @@ func (d *vllmDriver) disarmConfiguredModel() {
 	if payload != "" {
 		payload += "\n"
 	}
-	_ = os.WriteFile(vllmEnvPath, []byte(payload), 0o600)
+	_ = os.WriteFile(d.envFilePath(), []byte(payload), 0o660)
 }
 
 func (d *vllmDriver) shouldAutoEnableTrustRemoteCode(diagnostics string) bool {
@@ -1111,10 +1121,10 @@ func (d *vllmDriver) enableTrustRemoteCodeInEnv() error {
 	if payload != "" {
 		payload += "\n"
 	}
-	if err := os.MkdirAll(filepath.Dir(vllmEnvPath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(d.envFilePath()), 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(vllmEnvPath, []byte(payload), 0o600)
+	return os.WriteFile(d.envFilePath(), []byte(payload), 0o660)
 }
 
 func (d *vllmDriver) pullContainerImage(image string) error {
@@ -1150,8 +1160,12 @@ func (d *vllmDriver) containerImageExists(image string) bool {
 	return cmd.Run() == nil
 }
 
+func (d *vllmDriver) configFilePath() string    { return runtimeConfigFile("vllm.json") }
+func (d *vllmDriver) envFilePath() string       { return runtimeConfigFile("vllm.env") }
+func (d *vllmDriver) dockerEnvFilePath() string { return runtimeConfigFile("vllm-docker.env") }
+
 func (d *vllmDriver) readConfig() (vllmConfig, error) {
-	raw, err := os.ReadFile(vllmConfigPath)
+	raw, err := os.ReadFile(d.configFilePath())
 	if err != nil {
 		if os.IsNotExist(err) {
 			return vllmConfig{}, nil
@@ -1172,14 +1186,15 @@ func (d *vllmDriver) writeConfig(cfg vllmConfig) error {
 	if cfg.Port <= 0 {
 		cfg.Port = 8000
 	}
-	if err := os.MkdirAll(filepath.Dir(vllmConfigPath), 0o755); err != nil {
+	p := d.configFilePath()
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err
 	}
 	payload, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(vllmConfigPath, append(payload, '\n'), 0o600)
+	return os.WriteFile(p, append(payload, '\n'), 0o664)
 }
 
 func (d *vllmDriver) fetchRemoteModels() ([]string, error) {
@@ -1323,7 +1338,7 @@ func (d *vllmDriver) detectVLLMLibraryPath() string {
 
 func (d *vllmDriver) readEnvConfigMap() map[string]string {
 	values := map[string]string{}
-	raw, err := os.ReadFile(vllmEnvPath)
+	raw, err := os.ReadFile(d.envFilePath())
 	if err != nil {
 		return values
 	}
@@ -1395,11 +1410,12 @@ func (d *vllmDriver) writeEnvConfigMap(values map[string]string) error {
 	if payload != "" {
 		payload += "\n"
 	}
-	return os.WriteFile(vllmEnvPath, []byte(payload), 0o600)
+	return os.WriteFile(d.envFilePath(), []byte(payload), 0o660)
 }
 
 func (d *vllmDriver) writeDockerEnvConfig(values map[string]string) error {
-	if err := os.MkdirAll(filepath.Dir(vllmDockerEnvPath), 0o755); err != nil {
+	dockerEnvPath := d.dockerEnvFilePath()
+	if err := os.MkdirAll(filepath.Dir(dockerEnvPath), 0o755); err != nil {
 		return err
 	}
 	excluded := map[string]struct{}{
@@ -1435,7 +1451,7 @@ func (d *vllmDriver) writeDockerEnvConfig(values map[string]string) error {
 	if payload != "" {
 		payload += "\n"
 	}
-	return os.WriteFile(vllmDockerEnvPath, []byte(payload), 0o600)
+	return os.WriteFile(dockerEnvPath, []byte(payload), 0o660)
 }
 
 func (d *vllmDriver) hasLibcudart() bool {
