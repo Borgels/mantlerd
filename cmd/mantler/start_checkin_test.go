@@ -13,7 +13,6 @@ import (
 	"github.com/Borgels/mantlerd/internal/client"
 	"github.com/Borgels/mantlerd/internal/commands"
 	"github.com/Borgels/mantlerd/internal/config"
-	stagecrypto "github.com/Borgels/mantlerd/internal/crypto"
 	"github.com/Borgels/mantlerd/internal/runtime"
 	agenttools "github.com/Borgels/mantlerd/internal/tools"
 	"github.com/Borgels/mantlerd/internal/trainer"
@@ -90,7 +89,6 @@ func TestRunCheckInFollowUpDoesNotResendOutcomeEvents(t *testing.T) {
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 	})
 
-	bandwidthCache := make(map[string]gpuBandwidthCacheEntry)
 	runCheckIn(
 		context.Background(),
 		cfg,
@@ -101,12 +99,9 @@ func TestRunCheckInFollowUpDoesNotResendOutcomeEvents(t *testing.T) {
 		executor,
 		outcomes,
 		dispatcher,
-		nil,
-		newConnectivityDetector(),
-		bandwidthCache,
 		time.Now(),
 		true,
-		stagecrypto.StageKeys{},
+		nil,
 	)
 	waitCtx, waitCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer waitCancel()

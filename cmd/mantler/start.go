@@ -18,10 +18,9 @@ import (
 	"github.com/Borgels/mantlerd/internal/client"
 	"github.com/Borgels/mantlerd/internal/commands"
 	"github.com/Borgels/mantlerd/internal/config"
-	stagecrypto "github.com/Borgels/mantlerd/internal/crypto"
 	"github.com/Borgels/mantlerd/internal/discovery"
-	"github.com/Borgels/mantlerd/internal/relay"
 	runtimeagent "github.com/Borgels/mantlerd/internal/runtime"
+	"github.com/Borgels/mantlerd/internal/transfer"
 	agenttools "github.com/Borgels/mantlerd/internal/tools"
 	"github.com/Borgels/mantlerd/internal/trainer"
 	"github.com/Borgels/mantlerd/internal/types"
@@ -32,7 +31,6 @@ const (
 	defaultLightCommandConcurrency = 8
 	heavyCommandQueueSize          = 64
 	maxDegradedInterval            = 5 * time.Minute
-	gpuBandwidthCacheTTL           = 1 * time.Hour
 )
 
 var jitterRNG = rand.New(rand.NewSource(time.Now().UnixNano()))
@@ -62,10 +60,6 @@ func runStart(cmd *cobra.Command, args []string) {
 	}
 
 	outcomes := newOutcomeBuffer()
-	stageKeys, err := stagecrypto.EnsureStageKeys()
-	if err != nil {
-		log.Printf("stage key initialization failed: %v", err)
-	}
 
 	// Create runtime manager and executor
 	runtimeManager := runtimeagent.NewManager()
@@ -76,32 +70,15 @@ func runStart(cmd *cobra.Command, args []string) {
 		sendInProgressAck(cl, payload)
 	}, outcomes.Add)
 
-	relayClient, err := relay.New(relay.Config{
-		ServerURL: cfg.ServerURL,
-		RelayURL:  cfg.RelayURL,
-		Token:     cfg.Token,
-		MachineID: cfg.MachineID,
-		Insecure:  cfg.Insecure,
-	}, runtimeManager)
-	if err != nil {
-		log.Printf("relay initialization failed: %v", err)
-	}
-
 	// Set up signal handling
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
-	if relayClient != nil {
-		go relayClient.Run(ctx)
-	}
-	connectivityDetector := newConnectivityDetector()
-	connectivityDetector.SetCloudflareTunnelHostname(cfg.CloudflareTunnelHostname)
 	dispatcher := newCommandDispatcher(ctx, executor, cl, defaultLightCommandConcurrency)
 
 	// Run initial check-in
 	startedAt := time.Now()
 	consecutiveFailures := 0
-	bandwidthCache := make(map[string]gpuBandwidthCacheEntry)
-	cycle := runCheckIn(ctx, cfg, cl, runtimeManager, trainerManager, toolManager, executor, outcomes, dispatcher, relayClient, connectivityDetector, bandwidthCache, startedAt, consecutiveFailures == 0, stageKeys)
+	cycle := runCheckIn(ctx, cfg, cl, runtimeManager, trainerManager, toolManager, executor, outcomes, dispatcher, startedAt, consecutiveFailures == 0)
 	if cycle.success {
 		consecutiveFailures = 0
 	} else {
@@ -116,7 +93,7 @@ func runStart(cmd *cobra.Command, args []string) {
 			log.Println("Shutting down agent...")
 			return
 		case <-timer.C:
-			cycle = runCheckIn(ctx, cfg, cl, runtimeManager, trainerManager, toolManager, executor, outcomes, dispatcher, relayClient, connectivityDetector, bandwidthCache, startedAt, consecutiveFailures == 0, stageKeys)
+			cycle = runCheckIn(ctx, cfg, cl, runtimeManager, trainerManager, toolManager, executor, outcomes, dispatcher, startedAt, consecutiveFailures == 0)
 			if cycle.success {
 				consecutiveFailures = 0
 			} else {
@@ -144,12 +121,6 @@ func loadConfig(cmd *cobra.Command) config.Config {
 	flagsCfg := config.Config{}
 	if cmd.Flags().Changed("server") {
 		flagsCfg.ServerURL = serverURL
-	}
-	if cmd.Flags().Changed("relay-url") {
-		flagsCfg.RelayURL = relayURL
-	}
-	if cmd.Flags().Changed("cloudflare-tunnel-hostname") {
-		flagsCfg.CloudflareTunnelHostname = cloudflareTunnelHostname
 	}
 	if cmd.Flags().Changed("token") {
 		flagsCfg.Token = token
@@ -188,8 +159,6 @@ func loadConfig(cmd *cobra.Command) config.Config {
 	}
 
 	shouldPersist := cmd.Flags().Changed("server") ||
-		cmd.Flags().Changed("relay-url") ||
-		cmd.Flags().Changed("cloudflare-tunnel-hostname") ||
 		cmd.Flags().Changed("token") ||
 		cmd.Flags().Changed("machine") ||
 		cmd.Flags().Changed("interval") ||
@@ -208,12 +177,6 @@ func loadConfig(cmd *cobra.Command) config.Config {
 type outcomeBuffer struct {
 	mu     sync.Mutex
 	events []types.OutcomeEvent
-}
-
-type gpuBandwidthCacheEntry struct {
-	value      float64
-	source     string
-	measuredAt time.Time
 }
 
 func newOutcomeBuffer() *outcomeBuffer {
@@ -409,34 +372,17 @@ func runCheckIn(
 	executor *commands.Executor,
 	outcomes *outcomeBuffer,
 	dispatcher *commandDispatcher,
-	relayClient *relay.Client,
-	connectivityDetector *ConnectivityDetector,
-	bandwidthCache map[string]gpuBandwidthCacheEntry,
 	startedAt time.Time,
 	allowFollowup bool,
-	stageKeys stagecrypto.StageKeys,
 ) checkinCycleResult {
 	flushFailedAcks(cl)
 	cachedDesired := loadCachedDesiredConfig()
 
 	report := discovery.Collect()
 	for idx := range report.GPUs {
-		cacheKey := strings.ToLower(strings.TrimSpace(report.GPUVendor)) + "::" + strings.ToLower(strings.TrimSpace(report.GPUs[idx].Name))
-		if cached, ok := bandwidthCache[cacheKey]; ok && time.Since(cached.measuredAt) < gpuBandwidthCacheTTL {
-			report.GPUs[idx].MemoryBandwidthGBps = cached.value
-			report.GPUs[idx].BandwidthSource = cached.source
-			continue
-		}
 		bandwidth, source := toolManager.MeasureGPUBandwidth(report.GPUVendor, report.GPUs[idx].Name)
 		report.GPUs[idx].MemoryBandwidthGBps = bandwidth
 		report.GPUs[idx].BandwidthSource = source
-		if cacheKey != "::" && (bandwidth > 0 || strings.TrimSpace(source) != "") {
-			bandwidthCache[cacheKey] = gpuBandwidthCacheEntry{
-				value:      bandwidth,
-				source:     source,
-				measuredAt: time.Now(),
-			}
-		}
 	}
 	installedTools := toolManager.InstalledTools(report.GPUVendor)
 	installedRuntimeNames := runtimeManager.InstalledRuntimes()
@@ -444,7 +390,6 @@ func runCheckIn(
 	readyRuntimeNames := runtimeManager.ReadyRuntimes()
 	runtimeStatuses := buildRuntimeStatuses(installedRuntimeNames, readyRuntimeNames)
 	installedModels := toInstalledModels(runtimeManager)
-	deployedMantles := toDeployedMantles(installedModels, probeRuntimeEndpointHealth(runtimeManager.ReadyRuntimes()))
 	hasActiveWork := hasActiveOperations(runtimeStatuses, installedModels, trainerManager.HasActiveJobs())
 	runtimeStatus := types.RuntimeNotInstalled
 	runtimeType := types.RuntimeType("")
@@ -486,23 +431,18 @@ func runCheckIn(
 		InstalledTrainers:      trainerManager.InstalledTrainers(),
 		InstalledTools:         installedTools,
 		InstalledModels:        installedModels,
-		DeployedMantles:        deployedMantles,
 		InstalledHarnesses:     toInstalledHarnesses(cachedDesired),
 		InstalledOrchestrators: toInstalledOrchestrators(cachedDesired),
 		OutcomeEvents:          pendingOutcomes,
 		Uptime:                 int64(time.Since(startedAt).Seconds()),
 		LoadAvg:                readLoadAvg(),
 	}
-	if connectivityDetector != nil {
-		payload.Connectivity = connectivityDetector.Detect(ctx, runtimeType, relayClient)
-	}
 	if origin := configOrigin(cfg); origin != nil {
 		payload.Origin = origin
 	}
-	if strings.TrimSpace(stageKeys.EncryptionPublicKey) != "" && strings.TrimSpace(stageKeys.SigningPublicKey) != "" {
-		payload.StageEncryptionKey = stageKeys.EncryptionPublicKey
-		payload.StageSigningKey = stageKeys.SigningPublicKey
-		payload.StageKeyFingerprint = stageKeys.Fingerprint
+	if cfg.AllowModelSharing {
+		payload.TransferAddresses = transfer.RankedTransferAddresses()
+		payload.TransferPort = transfer.TransferPort
 	}
 
 	resp, err := client.Retry(ctx, 3, func() (types.CheckinResponse, error) {
@@ -715,7 +655,7 @@ type checkinCycleResult struct {
 func nextCheckinInterval(idleInterval time.Duration, active bool) time.Duration {
 	interval := idleInterval
 	if active {
-		const activeInterval = 15 * time.Second
+	const activeInterval = 15 * time.Second
 		if idleInterval > activeInterval {
 			interval = activeInterval
 		}

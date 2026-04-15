@@ -175,7 +175,7 @@ type GPUBandwidthMatrixEntry struct {
 }
 
 type GPUInterconnectReport struct {
-	Edges             []GPUInterconnectEdge     `json:"edges,omitempty"`
+	Edges             []GPUInterconnectEdge    `json:"edges,omitempty"`
 	BandwidthMatrix   []GPUBandwidthMatrixEntry `json:"bandwidthMatrix,omitempty"`
 	MeasurementSource string                    `json:"measurementSource,omitempty"`
 	MeasuredAt        string                    `json:"measuredAt,omitempty"`
@@ -264,14 +264,51 @@ type DeployedMantle struct {
 }
 
 type MachineConnectivity struct {
-	Kind           string `json:"kind"`
-	Address        string `json:"address,omitempty"`
-	Port           int    `json:"port,omitempty"`
-	TLSEnabled     bool   `json:"tlsEnabled,omitempty"`
-	TailscaleIP    string `json:"tailscaleIp,omitempty"`
-	TunnelHostname string `json:"tunnelHostname,omitempty"`
-	RelayConnected bool   `json:"relayConnected,omitempty"`
-	RelayLatencyMs int64  `json:"relayLatencyMs,omitempty"`
+	Kind             string `json:"kind"`
+	Address          string `json:"address,omitempty"`
+	Port             int    `json:"port,omitempty"`
+	TLSEnabled       bool   `json:"tlsEnabled,omitempty"`
+	TailscaleIP      string `json:"tailscaleIp,omitempty"`
+	TunnelHostname   string `json:"tunnelHostname,omitempty"`
+	RelayConnected   bool   `json:"relayConnected,omitempty"`
+	RelayLatencyMs   int64  `json:"relayLatencyMs,omitempty"`
+	TransferPort     int    `json:"transferPort,omitempty"`
+	TransferEnabled  bool   `json:"transferEnabled,omitempty"`
+}
+
+// PeerHint describes a peer machine that can serve a specific model file
+// over the LAN transfer protocol.
+type PeerHint struct {
+	MachineID      string   `json:"machineId"`
+	Addresses      []string `json:"addresses"`
+	TransferPort   int      `json:"transferPort"`
+	Digest         string   `json:"digest,omitempty"`
+	ModelSizeBytes int64    `json:"modelSizeBytes,omitempty"`
+}
+
+// TransferManifestEntry describes a single model available from a transfer server.
+type TransferManifestEntry struct {
+	ModelID        string `json:"modelId"`
+	Runtime        string `json:"runtime"`
+	Digest         string `json:"digest"`
+	ModelSizeBytes int64  `json:"modelSizeBytes"`
+	Ready          bool   `json:"ready"`
+}
+
+// TransferManifest is returned by GET /v1/transfer/manifest.
+type TransferManifest struct {
+	MachineID string                  `json:"machineId"`
+	Models    []TransferManifestEntry `json:"models"`
+}
+
+// TransferResult is returned by a successful peer pull.
+type TransferResult struct {
+	// Digest is the verified sha256 hex digest.
+	Digest          string `json:"digest"`
+	// Bytes is the total bytes received.
+	Bytes           int64  `json:"bytes"`
+	// SourceMachineID is the peer that served the file.
+	SourceMachineID string `json:"sourceMachineId"`
 }
 
 type CheckinRequest struct {
@@ -310,20 +347,28 @@ type CheckinRequest struct {
 	OutcomeEvents          []OutcomeEvent                 `json:"outcomeEvents,omitempty"`
 	Uptime                 int64                          `json:"uptime,omitempty"`
 	LoadAvg                []float64                      `json:"loadAvg,omitempty"`
+	AllowModelSharing      bool                           `json:"allowModelSharing,omitempty"`
+	// TransferAddresses is the list of private IPv4 addresses on which the
+	// machine's transfer server is reachable, ranked by link speed descending
+	// (fastest fabric first). Only set when AllowModelSharing is true.
+	TransferAddresses      []string                       `json:"transferAddresses,omitempty"`
+	// TransferPort is the port the transfer server is listening on.
+	// Only set when AllowModelSharing is true.
+	TransferPort           int                            `json:"transferPort,omitempty"`
 }
 
 type StageContinuation struct {
-	NextStageKind            string `json:"nextStageKind"`
-	NextTargetMachineID      string `json:"nextTargetMachineId"`
-	NextRouteKind            string `json:"nextRouteKind"`
-	NextTargetEncryptionKey  string `json:"nextTargetEncryptionKey"`
-	NextTargetSigningKey     string `json:"nextTargetSigningKey"`
+	NextStageKind           string `json:"nextStageKind"`
+	NextTargetMachineID     string `json:"nextTargetMachineId"`
+	NextRouteKind           string `json:"nextRouteKind"`
+	NextTargetEncryptionKey string `json:"nextTargetEncryptionKey"`
+	NextTargetSigningKey    string `json:"nextTargetSigningKey"`
 	NextTargetKeyFingerprint string `json:"nextTargetKeyFingerprint"`
 }
 
 type StageBilling struct {
-	OrgID             string `json:"orgId"`
-	APIKeyID          string `json:"apiKeyId"`
+	OrgID            string `json:"orgId"`
+	APIKeyID         string `json:"apiKeyId"`
 	MantleFingerprint string `json:"mantleFingerprint"`
 }
 
@@ -360,32 +405,32 @@ type StageEnvelope struct {
 }
 
 type OutcomeEvent struct {
-	PlanID                string                 `json:"planId,omitempty"`
-	TaskID                string                 `json:"taskId,omitempty"`
-	MantleFingerprint     string                 `json:"mantleFingerprint,omitempty"`
-	BaseFingerprint       string                 `json:"baseFingerprint,omitempty"`
-	EventType             string                 `json:"eventType"`
-	EvidenceKind          string                 `json:"evidenceKind,omitempty"`
-	Workload              string                 `json:"workload,omitempty"`
-	GradedByServer        bool                   `json:"gradedByServer,omitempty"`
-	EvalPromptID          string                 `json:"evalPromptId,omitempty"`
-	EvalOutput            string                 `json:"evalOutput,omitempty"`
-	EvalSessionToken      string                 `json:"evalSessionToken,omitempty"`
-	SessionIssuedAtMs     int64                  `json:"sessionIssuedAtMs,omitempty"`
-	BenchmarkSuiteID      string                 `json:"benchmarkSuiteId,omitempty"`
-	BenchmarkSuiteVersion string                 `json:"benchmarkSuiteVersion,omitempty"`
-	RuntimeImage          string                 `json:"runtimeImage,omitempty"`
-	DurationMs            int64                  `json:"durationMs,omitempty"`
-	TokenUsage            *OutcomeTokenUsage     `json:"tokenUsage,omitempty"`
+	PlanID                string             `json:"planId,omitempty"`
+	TaskID                string             `json:"taskId,omitempty"`
+	MantleFingerprint     string             `json:"mantleFingerprint,omitempty"`
+	BaseFingerprint       string             `json:"baseFingerprint,omitempty"`
+	EventType             string             `json:"eventType"`
+	EvidenceKind          string             `json:"evidenceKind,omitempty"`
+	Workload              string             `json:"workload,omitempty"`
+	GradedByServer        bool               `json:"gradedByServer,omitempty"`
+	EvalPromptID          string             `json:"evalPromptId,omitempty"`
+	EvalOutput            string             `json:"evalOutput,omitempty"`
+	EvalSessionToken      string             `json:"evalSessionToken,omitempty"`
+	SessionIssuedAtMs     int64              `json:"sessionIssuedAtMs,omitempty"`
+	BenchmarkSuiteID      string             `json:"benchmarkSuiteId,omitempty"`
+	BenchmarkSuiteVersion string             `json:"benchmarkSuiteVersion,omitempty"`
+	RuntimeImage          string             `json:"runtimeImage,omitempty"`
+	DurationMs            int64              `json:"durationMs,omitempty"`
+	TokenUsage            *OutcomeTokenUsage `json:"tokenUsage,omitempty"`
 	BenchmarkMetrics      *ModelBenchmarkMetrics `json:"benchmarkMetrics,omitempty"`
-	QualityScore          *float64               `json:"qualityScore,omitempty"`
-	CostUSD               *float64               `json:"costUsd,omitempty"`
-	ClusterNodeCount      int                    `json:"clusterNodeCount,omitempty"`
-	ClusterTopology       string                 `json:"clusterTopology,omitempty"`
-	ExitCode              int                    `json:"exitCode,omitempty"`
-	CrashSignature        string                 `json:"crashSignature,omitempty"`
-	Detail                string                 `json:"detail,omitempty"`
-	Timestamp             string                 `json:"timestamp"`
+	QualityScore          *float64           `json:"qualityScore,omitempty"`
+	CostUSD               *float64           `json:"costUsd,omitempty"`
+	ClusterNodeCount      int                `json:"clusterNodeCount,omitempty"`
+	ClusterTopology       string             `json:"clusterTopology,omitempty"`
+	ExitCode              int                `json:"exitCode,omitempty"`
+	CrashSignature        string             `json:"crashSignature,omitempty"`
+	Detail                string             `json:"detail,omitempty"`
+	Timestamp             string             `json:"timestamp"`
 }
 
 type OutcomeTokenUsage struct {
@@ -458,6 +503,9 @@ type CheckinResponse struct {
 	DesiredConfig   DesiredConfig      `json:"desiredConfig"`
 	Recommendations *RecommendResponse `json:"recommendations,omitempty"`
 	Commands        []AgentCommand     `json:"commands"`
+	// TransferSecret is an org-scoped HMAC key used to sign and verify
+	// peer transfer tokens. Rotated periodically by the server.
+	TransferSecret  string             `json:"transferSecret,omitempty"`
 }
 
 type RecommendContext struct {
@@ -542,17 +590,17 @@ type RecommendQuery struct {
 }
 
 type ExploreQuery struct {
-	Runtime             string                    `json:"runtime,omitempty"`
-	ModelID             string                    `json:"modelId,omitempty"`
-	Workload            string                    `json:"workload,omitempty"`
-	Priority            string                    `json:"priority,omitempty"`
-	ModelType           string                    `json:"modelType,omitempty"`
-	Harness             string                    `json:"harness,omitempty"`
-	Orchestrator        string                    `json:"orchestrator,omitempty"`
-	MaxAttempts         int                       `json:"maxAttempts,omitempty"`
-	Capabilities        *ExploreCapabilities      `json:"capabilities,omitempty"`
-	ModelMetadata       map[string]map[string]any `json:"modelMetadata,omitempty"`
-	ExcludeFingerprints []string                  `json:"excludeFingerprints,omitempty"`
+	Runtime      string               `json:"runtime,omitempty"`
+	ModelID      string               `json:"modelId,omitempty"`
+	Workload     string               `json:"workload,omitempty"`
+	Priority     string               `json:"priority,omitempty"`
+	ModelType    string               `json:"modelType,omitempty"`
+	Harness      string               `json:"harness,omitempty"`
+	Orchestrator string               `json:"orchestrator,omitempty"`
+	MaxAttempts  int                  `json:"maxAttempts,omitempty"`
+	Capabilities *ExploreCapabilities `json:"capabilities,omitempty"`
+	ModelMetadata map[string]map[string]any `json:"modelMetadata,omitempty"`
+	ExcludeFingerprints []string      `json:"excludeFingerprints,omitempty"`
 }
 
 type ExploreCapabilities struct {
@@ -574,11 +622,11 @@ type ExploreSelection struct {
 }
 
 type ExplorePlan struct {
-	ID                string `json:"id"`
-	Status            string `json:"status"`
-	Confidence        string `json:"confidence"`
-	BaseFingerprint   string `json:"baseFingerprint"`
-	MantleFingerprint string `json:"mantleFingerprint"`
+	ID                string   `json:"id"`
+	Status            string   `json:"status"`
+	Confidence        string   `json:"confidence"`
+	BaseFingerprint   string   `json:"baseFingerprint"`
+	MantleFingerprint string   `json:"mantleFingerprint"`
 	Compatibility     struct {
 		Allowed  bool     `json:"allowed"`
 		Blockers []string `json:"blockers"`
@@ -601,11 +649,11 @@ type ExplorePlan struct {
 		InstallMode  string            `json:"installMode,omitempty"`
 		HealthChecks []string          `json:"healthChecks,omitempty"`
 	} `json:"runtimePlan"`
-	CreatedAt  string `json:"createdAt"`
-	AppliedAt  string `json:"appliedAt,omitempty"`
+	CreatedAt string `json:"createdAt"`
+	AppliedAt string `json:"appliedAt,omitempty"`
 	VerifiedAt string `json:"verifiedAt,omitempty"`
-	FailedAt   string `json:"failedAt,omitempty"`
-	ScoredAt   string `json:"scoredAt,omitempty"`
+	FailedAt string `json:"failedAt,omitempty"`
+	ScoredAt string `json:"scoredAt,omitempty"`
 }
 
 type ExploreResponse struct {
@@ -639,23 +687,23 @@ type EvidenceBreakdown struct {
 }
 
 type ScoreResponse struct {
-	MantleFingerprint string            `json:"mantleFingerprint"`
-	Overall           float64           `json:"overall"`
-	ProfileID         string            `json:"profileId"`
-	FormulaVersion    int               `json:"formulaVersion"`
-	ConfidenceTier    string            `json:"confidenceTier"`
-	EvidenceSignals   int               `json:"evidenceSignals"`
-	EvidenceCount     int               `json:"evidenceCount"`
+	MantleFingerprint string  `json:"mantleFingerprint"`
+	Overall           float64 `json:"overall"`
+	ProfileID         string  `json:"profileId"`
+	FormulaVersion    int     `json:"formulaVersion"`
+	ConfidenceTier    string  `json:"confidenceTier"`
+	EvidenceSignals   int     `json:"evidenceSignals"`
+	EvidenceCount     int     `json:"evidenceCount"`
 	EvidenceBreakdown EvidenceBreakdown `json:"evidenceBreakdown"`
-	RawSignals        ScoreRawSignals   `json:"rawSignals"`
-	UpdatedAt         string            `json:"updatedAt"`
+	RawSignals        ScoreRawSignals `json:"rawSignals"`
+	UpdatedAt         string  `json:"updatedAt"`
 }
 
 type EvalChallengeSessionStartResponse struct {
-	SessionID             string                `json:"sessionId"`
-	BenchmarkSuiteID      string                `json:"benchmarkSuiteId"`
-	BenchmarkSuiteVersion string                `json:"benchmarkSuiteVersion"`
-	NextPromptID          string                `json:"nextPromptId,omitempty"`
+	SessionID             string `json:"sessionId"`
+	BenchmarkSuiteID      string `json:"benchmarkSuiteId"`
+	BenchmarkSuiteVersion string `json:"benchmarkSuiteVersion"`
+	NextPromptID          string `json:"nextPromptId,omitempty"`
 	Prompts               []EvalChallengePrompt `json:"prompts,omitempty"`
 }
 
@@ -674,18 +722,18 @@ type EvalChallengePrompt struct {
 }
 
 type EvalChallengeResponseResult struct {
-	SessionID    string `json:"sessionId"`
-	Done         bool   `json:"done"`
+	SessionID   string `json:"sessionId"`
+	Done        bool   `json:"done"`
 	NextPromptID string `json:"nextPromptId,omitempty"`
-	ScoreCount   int    `json:"scoreCount,omitempty"`
+	ScoreCount  int    `json:"scoreCount,omitempty"`
 }
 
 type EvalChallengeStatus struct {
-	SessionID    string `json:"sessionId"`
-	Done         bool   `json:"done"`
-	Cursor       int    `json:"cursor"`
-	TotalPrompts int    `json:"totalPrompts"`
-	ScoreCount   int    `json:"scoreCount,omitempty"`
+	SessionID   string `json:"sessionId"`
+	Done        bool   `json:"done"`
+	Cursor      int    `json:"cursor"`
+	TotalPrompts int   `json:"totalPrompts"`
+	ScoreCount  int    `json:"scoreCount,omitempty"`
 }
 
 type ModelFeatureFlags struct {
@@ -700,10 +748,10 @@ type ModelTarget struct {
 }
 
 type DesiredToolTarget struct {
-	Tool           ToolType `json:"tool"`
-	TargetVersion  string   `json:"targetVersion,omitempty"`
-	PackageVariant string   `json:"packageVariant,omitempty"`
-	InstallHint    string   `json:"installHint,omitempty"`
+	Tool          ToolType `json:"tool"`
+	TargetVersion string   `json:"targetVersion,omitempty"`
+	PackageVariant string  `json:"packageVariant,omitempty"`
+	InstallHint   string   `json:"installHint,omitempty"`
 }
 
 type DesiredConfig struct {

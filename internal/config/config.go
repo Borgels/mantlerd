@@ -11,29 +11,34 @@ import (
 )
 
 type Config struct {
-	ServerURL        string                 `json:"serverUrl"`
-	RelayURL         string                 `json:"relayUrl,omitempty"`
-	CloudflareTunnelHostname string         `json:"cloudflareTunnelHostname,omitempty"`
-	Token            string                 `json:"token"`
-	MachineID        string                 `json:"machineId"`
-	Interval         time.Duration          `json:"interval"`
-	Insecure         bool                   `json:"insecure"`
-	LogLevel         string                 `json:"logLevel"`
-	CloudProvisioned bool                   `json:"cloudProvisioned"`
-	Origin           map[string]interface{} `json:"origin,omitempty"`
+	ServerURL                string                 `json:"serverUrl"`
+	RelayURL                 string                 `json:"relayUrl,omitempty"`
+	CloudflareTunnelHostname string                 `json:"cloudflareTunnelHostname,omitempty"`
+	Token                    string                 `json:"token"`
+	MachineID                string                 `json:"machineId"`
+	Interval                 time.Duration          `json:"interval"`
+	Insecure                 bool                   `json:"insecure"`
+	LogLevel                 string                 `json:"logLevel"`
+	CloudProvisioned         bool                   `json:"cloudProvisioned"`
+	Origin                   map[string]interface{} `json:"origin,omitempty"`
+	// AllowModelSharing enables the LAN peer-to-peer model transfer server.
+	// When true, this machine can serve locally cached model files to other
+	// machines in the same org. Disabled by default.
+	AllowModelSharing        bool                   `json:"allowModelSharing,omitempty"`
 }
 
 type FileConfig struct {
-	ServerURL        string                 `json:"serverUrl"`
-	RelayURL         string                 `json:"relayUrl,omitempty"`
-	CloudflareTunnelHostname string         `json:"cloudflareTunnelHostname,omitempty"`
-	Token            string                 `json:"token"`
-	MachineID        string                 `json:"machineId"`
-	IntervalMS       int64                  `json:"intervalMs"`
-	Insecure         bool                   `json:"insecure"`
-	LogLevel         string                 `json:"logLevel"`
-	CloudProvisioned bool                   `json:"cloudProvisioned"`
-	Origin           map[string]interface{} `json:"origin,omitempty"`
+	ServerURL                string                 `json:"serverUrl"`
+	RelayURL                 string                 `json:"relayUrl,omitempty"`
+	CloudflareTunnelHostname string                 `json:"cloudflareTunnelHostname,omitempty"`
+	Token                    string                 `json:"token"`
+	MachineID                string                 `json:"machineId"`
+	IntervalMS               int64                  `json:"intervalMs"`
+	Insecure                 bool                   `json:"insecure"`
+	LogLevel                 string                 `json:"logLevel"`
+	CloudProvisioned         bool                   `json:"cloudProvisioned"`
+	Origin                   map[string]interface{} `json:"origin,omitempty"`
+	AllowModelSharing        bool                   `json:"allowModelSharing,omitempty"`
 }
 
 func DefaultConfigPath() string {
@@ -73,16 +78,17 @@ func Load(path string) (Config, error) {
 		return Config{}, fmt.Errorf("parse config: %w", err)
 	}
 	return Config{
-		ServerURL:        raw.ServerURL,
-		RelayURL:         raw.RelayURL,
+		ServerURL:                raw.ServerURL,
+		RelayURL:                 raw.RelayURL,
 		CloudflareTunnelHostname: raw.CloudflareTunnelHostname,
-		Token:            raw.Token,
-		MachineID:        raw.MachineID,
-		Interval:         time.Duration(raw.IntervalMS) * time.Millisecond,
-		Insecure:         raw.Insecure,
-		LogLevel:         raw.LogLevel,
-		CloudProvisioned: raw.CloudProvisioned,
-		Origin:           raw.Origin,
+		Token:                    raw.Token,
+		MachineID:                raw.MachineID,
+		Interval:                 time.Duration(raw.IntervalMS) * time.Millisecond,
+		Insecure:                 raw.Insecure,
+		LogLevel:                 raw.LogLevel,
+		CloudProvisioned:         raw.CloudProvisioned,
+		Origin:                   raw.Origin,
+		AllowModelSharing:        raw.AllowModelSharing,
 	}, nil
 }
 
@@ -100,16 +106,17 @@ func Save(path string, cfg Config) error {
 	}
 
 	raw := FileConfig{
-		ServerURL:        cfg.ServerURL,
-		RelayURL:         cfg.RelayURL,
+		ServerURL:                cfg.ServerURL,
+		RelayURL:                 cfg.RelayURL,
 		CloudflareTunnelHostname: cfg.CloudflareTunnelHostname,
-		Token:            cfg.Token,
-		MachineID:        cfg.MachineID,
-		IntervalMS:       cfg.Interval.Milliseconds(),
-		Insecure:         cfg.Insecure,
-		LogLevel:         cfg.LogLevel,
-		CloudProvisioned: cfg.CloudProvisioned,
-		Origin:           cfg.Origin,
+		Token:                    cfg.Token,
+		MachineID:                cfg.MachineID,
+		IntervalMS:               cfg.Interval.Milliseconds(),
+		Insecure:                 cfg.Insecure,
+		LogLevel:                 cfg.LogLevel,
+		CloudProvisioned:         cfg.CloudProvisioned,
+		Origin:                   cfg.Origin,
+		AllowModelSharing:        cfg.AllowModelSharing,
 	}
 	content, err := json.MarshalIndent(raw, "", "  ")
 	if err != nil {
@@ -154,6 +161,9 @@ func Merge(fileCfg Config, flagsCfg Config) Config {
 	}
 	if flagsCfg.Origin != nil {
 		merged.Origin = flagsCfg.Origin
+	}
+	if flagsCfg.AllowModelSharing {
+		merged.AllowModelSharing = true
 	}
 	return merged
 }

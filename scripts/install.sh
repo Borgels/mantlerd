@@ -570,6 +570,8 @@ EOF"
       fi
 
       $SUDO install -d -m 0755 "$CONFIG_DIR"
+      $SUDO install -d -m 2775 -o root -g "$AGENT_GROUP" /etc/mantler/runtimes
+      $SUDO install -d -m 2775 -o root -g "$AGENT_GROUP" /etc/mantler/runtimes/vllm-models
       if [ ! -f "$VLLM_CONFIG_PATH" ]; then
         $SUDO sh -c "cat > \"$VLLM_CONFIG_PATH\" <<EOF
 {

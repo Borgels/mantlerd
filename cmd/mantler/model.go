@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -202,14 +203,34 @@ func runModelPull(cmd *cobra.Command, args []string) {
 	fmt.Printf("Pulling model: %s\n", modelID)
 	fmt.Printf("Runtime: %s\n", targetRuntime)
 	fmt.Println("This may take a few minutes...")
+	fmt.Println()
 
-	// Pull the model
-	if err := manager.EnsureModelWithRuntime(modelID, targetRuntime, nil); err != nil {
+	lastStatus := ""
+	reportProgress := func(progress runtime.PullProgress) {
+		status := strings.TrimSpace(progress.Status)
+		if status == "" || status == lastStatus {
+			return
+		}
+		lastStatus = status
+		if progress.Total > 0 {
+			fmt.Printf("  → %s (%.1f%%)\n", status, progress.Percent)
+			return
+		}
+		fmt.Printf("  → %s\n", status)
+	}
+
+	if err := manager.PrepareModelWithRuntimeProgressCtx(context.Background(), modelID, targetRuntime, nil, reportProgress); err != nil {
 		fmt.Fprintf(os.Stderr, "Error pulling model: %v\n", err)
 		os.Exit(1)
 	}
 
-	fmt.Printf("✓ Model %s pulled successfully to %s\n", modelID, targetRuntime)
+	fmt.Println("  → starting runtime with pulled model")
+	if err := manager.StartModelWithRuntime(modelID, targetRuntime, nil); err != nil {
+		fmt.Fprintf(os.Stderr, "Error starting model after pull: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("\n✓ Model %s pulled successfully to %s\n", modelID, targetRuntime)
 }
 
 func runModelRemove(cmd *cobra.Command, args []string) {

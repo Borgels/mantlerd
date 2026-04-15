@@ -24,6 +24,8 @@ const (
 	vllmConfigPath            = "/etc/mantler/vllm.json"
 	vllmEnvPath               = "/etc/mantler/vllm.env"
 	vllmDockerEnvPath         = "/etc/mantler/vllm-docker.env"
+	vllmPreparedModelsDirPath = "/etc/mantler/runtimes/vllm-models"
+	vllmPreparedModelsLegacy  = "/var/lib/mantler/models/vllm"
 	vllmUnitPath              = "/etc/systemd/system/vllm.service"
 	vllmVenvPath              = "/opt/mantler/vllm-venv"
 	vllmPythonPath            = "/opt/mantler/vllm-venv/bin/python3"
@@ -239,13 +241,41 @@ func (d *vllmDriver) PrepareModelWithFlags(modelID string, flags *types.ModelFea
 	return d.PrepareModelWithFlagsCtx(context.Background(), modelID, flags)
 }
 
+func (d *vllmDriver) PrepareModelWithFlagsCtxAndProgress(
+	ctx context.Context,
+	modelID string,
+	_ *types.ModelFeatureFlags,
+	onProgress func(PullProgress),
+) error {
+	trimmedModel := strings.TrimSpace(modelID)
+	if trimmedModel == "" {
+		return fmt.Errorf("model ID is required")
+	}
+	if onProgress != nil {
+		onProgress(PullProgress{Status: "resolving model"})
+	}
+	if err := d.downloadModelSnapshotCtxWithProgress(ctx, trimmedModel, onProgress); err != nil {
+		return err
+	}
+	if onProgress != nil {
+		onProgress(PullProgress{Status: "finalizing model"})
+	}
+	if err := d.markPreparedModel(trimmedModel); err != nil {
+		return err
+	}
+	if onProgress != nil {
+		onProgress(PullProgress{Status: "prepared", Percent: 100})
+	}
+	return nil
+}
+
 // PrepareModelWithFlagsCtx downloads model weights with cancellation support.
 func (d *vllmDriver) PrepareModelWithFlagsCtx(ctx context.Context, modelID string, _ *types.ModelFeatureFlags) error {
 	trimmedModel := strings.TrimSpace(modelID)
 	if trimmedModel == "" {
 		return fmt.Errorf("model ID is required")
 	}
-	if err := d.downloadModelSnapshotCtx(ctx, trimmedModel); err != nil {
+	if err := d.downloadModelSnapshotCtxWithProgress(ctx, trimmedModel, nil); err != nil {
 		return err
 	}
 	return d.markPreparedModel(trimmedModel)
@@ -256,7 +286,12 @@ func (d *vllmDriver) StartModelWithFlags(modelID string, _ *types.ModelFeatureFl
 	if trimmedModel == "" {
 		return fmt.Errorf("model ID is required")
 	}
-	if err := d.PrepareModelWithFlags(trimmedModel, nil); err != nil {
+	if !d.HasModel(trimmedModel) {
+		if err := d.PrepareModelWithFlags(trimmedModel, nil); err != nil {
+			return err
+		}
+	}
+	if err := d.markPreparedModel(trimmedModel); err != nil {
 		return err
 	}
 	containerImage := d.effectiveContainerImage()
@@ -1503,7 +1538,14 @@ func (d *vllmDriver) shouldUseContainer() bool {
 }
 
 func vllmPreparedModelsDir() string {
-	return "/var/lib/mantler/models/vllm"
+	if env := strings.TrimSpace(os.Getenv("MANTLER_VLLM_PREPARED_MODELS_DIR")); env != "" {
+		return env
+	}
+	return vllmPreparedModelsDirPath
+}
+
+func vllmPreparedModelsLegacyDir() string {
+	return vllmPreparedModelsLegacy
 }
 
 func safeModelPathSegment(modelID string) string {
@@ -1512,24 +1554,34 @@ func safeModelPathSegment(modelID string) string {
 }
 
 func (d *vllmDriver) preparedModels() []string {
-	dir := vllmPreparedModelsDir()
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil
+	dirs := []string{vllmPreparedModelsDir()}
+	legacy := vllmPreparedModelsLegacyDir()
+	if legacy != "" && legacy != dirs[0] {
+		dirs = append(dirs, legacy)
 	}
-	models := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		if entry.IsDir() {
+	set := map[string]struct{}{}
+	for _, dir := range dirs {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
 			continue
 		}
-		raw, readErr := os.ReadFile(filepath.Join(dir, entry.Name()))
-		if readErr != nil {
-			continue
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+			raw, readErr := os.ReadFile(filepath.Join(dir, entry.Name()))
+			if readErr != nil {
+				continue
+			}
+			modelID := strings.TrimSpace(string(raw))
+			if modelID != "" {
+				set[modelID] = struct{}{}
+			}
 		}
-		modelID := strings.TrimSpace(string(raw))
-		if modelID != "" {
-			models = append(models, modelID)
-		}
+	}
+	models := make([]string, 0, len(set))
+	for modelID := range set {
+		models = append(models, modelID)
 	}
 	sort.Strings(models)
 	return models
@@ -1541,7 +1593,7 @@ func (d *vllmDriver) markPreparedModel(modelID string) error {
 		return nil
 	}
 	dir := vllmPreparedModelsDir()
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o775); err != nil {
 		return err
 	}
 	path := filepath.Join(dir, safeModelPathSegment(trimmed)+".model")
@@ -1553,9 +1605,15 @@ func (d *vllmDriver) unmarkPreparedModel(modelID string) error {
 	if trimmed == "" {
 		return nil
 	}
-	path := filepath.Join(vllmPreparedModelsDir(), safeModelPathSegment(trimmed)+".model")
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return err
+	paths := []string{filepath.Join(vllmPreparedModelsDir(), safeModelPathSegment(trimmed)+".model")}
+	legacy := vllmPreparedModelsLegacyDir()
+	if legacy != "" && legacy != vllmPreparedModelsDir() {
+		paths = append(paths, filepath.Join(legacy, safeModelPathSegment(trimmed)+".model"))
+	}
+	for _, path := range paths {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
 	}
 	return nil
 }
@@ -1566,9 +1624,20 @@ func (d *vllmDriver) downloadModelSnapshot(modelID string) error {
 
 // downloadModelSnapshotCtx downloads HuggingFace model weights with cancellation support.
 func (d *vllmDriver) downloadModelSnapshotCtx(ctx context.Context, modelID string) error {
+	return d.downloadModelSnapshotCtxWithProgress(ctx, modelID, nil)
+}
+
+func (d *vllmDriver) downloadModelSnapshotCtxWithProgress(
+	ctx context.Context,
+	modelID string,
+	onProgress func(PullProgress),
+) error {
 	modelID = strings.TrimSpace(modelID)
 	if modelID == "" {
 		return fmt.Errorf("model ID is required")
+	}
+	if onProgress != nil {
+		onProgress(PullProgress{Status: "downloading snapshot"})
 	}
 	pythonCandidates := []string{vllmPythonPath, "python3"}
 	script := "from huggingface_hub import snapshot_download; snapshot_download(repo_id='" + strings.ReplaceAll(modelID, "'", "\\'") + "', cache_dir='/root/.cache/huggingface', resume_download=True)"

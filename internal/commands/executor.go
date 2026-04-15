@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -31,6 +32,13 @@ import (
 // ErrCommandCancelled is returned when a command is cancelled via CancelCommand.
 var ErrCommandCancelled = errors.New("command cancelled")
 
+// transferPuller is the interface used by the executor to attempt a peer transfer.
+// Defined as an interface to keep the commands package free of a hard import
+// on the transfer package.
+type transferPuller interface {
+	PullFromPeers(ctx context.Context, modelID, runtime string, peers []types.PeerHint, progress func(received, total int64)) (*types.TransferResult, error)
+}
+
 type Executor struct {
 	runtimeManager *agentruntime.Manager
 	trainerManager *agenttrainer.Manager
@@ -39,6 +47,7 @@ type Executor struct {
 	processStarted time.Time
 	progress       func(payload types.AckRequest)
 	outcome        func(event types.OutcomeEvent)
+	transferPuller transferPuller // optional; nil when model sharing is disabled
 
 	// Active command cancellation support
 	activeCancelMu sync.Mutex
@@ -98,6 +107,12 @@ func NewExecutor(
 		activeCancel:    make(map[string]context.CancelFunc),
 		activeManifests: make(map[string]*types.ResourceManifest),
 	}
+}
+
+// SetTransferPuller sets an optional peer transfer client. When set and model
+// sharing is enabled, pull_model will attempt to pull from LAN peers first.
+func (e *Executor) SetTransferPuller(tp transferPuller) {
+	e.transferPuller = tp
 }
 
 func (e *Executor) emitOutcome(event types.OutcomeEvent) {
@@ -328,44 +343,81 @@ func (e *Executor) ExecuteWithContext(ctx context.Context, command types.AgentCo
 		if err := applyRuntimeProfileOverrides(command.Params, runtimeName); err != nil {
 			return ExecutionResult{}, err
 		}
-		if err := e.runtimeManager.PrepareModelWithRuntimeProgressCtx(
-			cmdCtx,
-			modelID,
-			runtimeName,
-			flags,
-			func(progress agentruntime.PullProgress) {
-				if e.progress == nil {
-					return
-				}
-				payload := map[string]any{
-					"progress": map[string]any{
-						"status": progress.Status,
-					},
-				}
-				if progress.Total > 0 {
-					payload["progress"].(map[string]any)["percent"] = progress.Percent
-				}
-				if progress.Completed > 0 {
-					payload["progress"].(map[string]any)["completed"] = progress.Completed
-				}
-				if progress.Total > 0 {
-					payload["progress"].(map[string]any)["total"] = progress.Total
-				}
-				raw, marshalErr := json.Marshal(payload)
-				if marshalErr != nil {
-					return
-				}
-				e.progress(types.AckRequest{
-					CommandID: command.ID,
-					Status:    "in_progress",
-					Details:   string(raw),
-				})
-			},
-		); err != nil {
-			if errors.Is(err, context.Canceled) {
-				return ExecutionResult{}, ErrCommandCancelled
+
+		// emitPullProgress sends progress events in the same format as the
+		// existing Ollama/HF pull path.
+		emitPullProgress := func(status string, percent float64, completed, total int64) {
+			if e.progress == nil {
+				return
 			}
-			return ExecutionResult{}, err
+			payload := map[string]any{
+				"progress": map[string]any{
+					"status": status,
+				},
+			}
+			if percent > 0 {
+				payload["progress"].(map[string]any)["percent"] = percent
+			}
+			if completed > 0 {
+				payload["progress"].(map[string]any)["completed"] = completed
+			}
+			if total > 0 {
+				payload["progress"].(map[string]any)["total"] = total
+			}
+			raw, marshalErr := json.Marshal(payload)
+			if marshalErr != nil {
+				return
+			}
+			e.progress(types.AckRequest{
+				CommandID: command.ID,
+				Status:    "in_progress",
+				Details:   string(raw),
+			})
+		}
+
+		// Attempt peer transfer before falling back to HF/Ollama upstream.
+		peerTransferred := false
+		if e.transferPuller != nil {
+			peers := peerHintsParam(command.Params)
+			if len(peers) > 0 {
+				emitPullProgress("Checking local network for "+modelID, 0, 0, 0)
+				result, err := e.transferPuller.PullFromPeers(
+					cmdCtx,
+					modelID,
+					runtimeName,
+					peers,
+					func(received, total int64) {
+						var pct float64
+						if total > 0 {
+							pct = float64(received) / float64(total) * 100
+						}
+						emitPullProgress("Transferring from peer", pct, received, total)
+					},
+				)
+				if err != nil && !errors.Is(err, context.Canceled) {
+					log.Printf("[transfer] peer pull for %q failed: %v — falling back to upstream", modelID, err)
+				} else if result != nil {
+					log.Printf("[transfer] peer pull for %q succeeded from %s (%d bytes)", modelID, result.SourceMachineID, result.Bytes)
+					peerTransferred = true
+				}
+			}
+		}
+
+		if !peerTransferred {
+			if err := e.runtimeManager.PrepareModelWithRuntimeProgressCtx(
+				cmdCtx,
+				modelID,
+				runtimeName,
+				flags,
+				func(progress agentruntime.PullProgress) {
+					emitPullProgress(progress.Status, progress.Percent, int64(progress.Completed), int64(progress.Total))
+				},
+			); err != nil {
+				if errors.Is(err, context.Canceled) {
+					return ExecutionResult{}, ErrCommandCancelled
+				}
+				return ExecutionResult{}, err
+			}
 		}
 		return ExecutionResult{}, nil
 	case "start_model":
@@ -810,6 +862,27 @@ func optionalStringParam(params map[string]interface{}, key string) string {
 		return ""
 	}
 	return strings.TrimSpace(value)
+}
+
+// peerHintsParam extracts peer transfer hints from command params.
+// The hints are stored as a JSON-serialisable []types.PeerHint that arrives
+// as []interface{} after JSON round-trip.
+func peerHintsParam(params map[string]interface{}) []types.PeerHint {
+	raw, ok := params["peerHints"]
+	if !ok {
+		return nil
+	}
+	// Re-encode and decode to handle the map[string]interface{} representation
+	// that results from a JSON unmarshal into params.
+	b, err := json.Marshal(raw)
+	if err != nil {
+		return nil
+	}
+	var hints []types.PeerHint
+	if err := json.Unmarshal(b, &hints); err != nil {
+		return nil
+	}
+	return hints
 }
 
 func optionalStringArrayParam(params map[string]interface{}, key string) []string {
