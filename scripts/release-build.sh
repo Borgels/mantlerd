@@ -34,3 +34,12 @@ build_target linux amd64
 build_target linux arm64
 build_target darwin amd64
 build_target darwin arm64
+
+# Combined checksums file with bare filenames (fallback for installers that can't find per-binary .sha256 files).
+CHECKSUMS_FILE="${DIST_DIR}/checksums.txt"
+rm -f "$CHECKSUMS_FILE"
+for f in "${DIST_DIR}/mantlerd-"*; do
+  case "$f" in *.sha256) continue ;; esac
+  hash="$(cat "${f}.sha256")"
+  printf '%s  %s\n' "$hash" "$(basename "$f")" >> "$CHECKSUMS_FILE"
+done

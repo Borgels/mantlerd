@@ -91,5 +91,6 @@ jobs:
             dist/mantlerd-darwin-amd64.sha256
             dist/mantlerd-darwin-arm64
             dist/mantlerd-darwin-arm64.sha256
+            dist/checksums.txt
           draft: false
           prerelease: false

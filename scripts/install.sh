@@ -349,6 +349,7 @@ ARTIFACT_FALLBACK_URL=""
 CHECKSUM_FALLBACK_URL=""
 ARTIFACT_API_URL=""
 CHECKSUM_API_URL=""
+RESOLVED_BASE=""
 
 if [ "$VERSION" = "latest" ]; then
   LATEST_RELEASE_JSON="$(curl --fail --show-error --location --retry 3 --retry-delay 1 --retry-connrefused \
@@ -416,8 +417,35 @@ SHA_TMP="${TMP_DIR}/${ASSET_NAME}.sha256"
 download_with_fallback "$BIN_TMP" "$ARTIFACT_API_URL" "$ARTIFACT_URL" "$ARTIFACT_FALLBACK_URL" \
   || fatal "Failed to download ${ASSET_NAME} from GitHub release assets."
 
-download_with_fallback "$SHA_TMP" "$CHECKSUM_API_URL" "$CHECKSUM_URL" "$CHECKSUM_FALLBACK_URL" \
-  || fatal "Failed to download checksum for ${ASSET_NAME}."
+if ! download_with_fallback "$SHA_TMP" "$CHECKSUM_API_URL" "$CHECKSUM_URL" "$CHECKSUM_FALLBACK_URL"; then
+  log "Individual .sha256 not found; trying checksums.txt fallback."
+  CHECKSUMS_TXT_TMP="${TMP_DIR}/checksums.txt"
+  FOUND_IN_CHECKSUMS=""
+  # Build a deduplicated list of base URLs to try for checksums.txt.
+  # RELEASE_BASE and RESOLVED_BASE are already directory-style URLs; ARTIFACT_FALLBACK_URL
+  # is a full file URL so strip the filename component.
+  CT_BASES="${RELEASE_BASE} ${RESOLVED_BASE} ${ARTIFACT_FALLBACK_URL%/*}"
+  SEEN_CT=""
+  for ct_base in $CT_BASES; do
+    [ -n "$ct_base" ] || continue
+    ct_url="${ct_base}/checksums.txt"
+    # Skip if this URL matches one we already tried.
+    case "$SEEN_CT" in *"$ct_url"*) continue ;; esac
+    SEEN_CT="${SEEN_CT} ${ct_url}"
+    log "Trying ${ct_url}"
+    if curl --fail --show-error --location --retry 3 --retry-delay 1 --retry-connrefused \
+        --output "$CHECKSUMS_TXT_TMP" "$ct_url" 2>/dev/null; then
+      FOUND_HASH="$(grep -F "${ASSET_NAME}" "$CHECKSUMS_TXT_TMP" | awk '{print $1}' | head -n 1)"
+      if [ -n "$FOUND_HASH" ]; then
+        printf '%s\n' "$FOUND_HASH" > "$SHA_TMP"
+        FOUND_IN_CHECKSUMS="true"
+        log "Found checksum for ${ASSET_NAME} in checksums.txt"
+        break
+      fi
+    fi
+  done
+  [ "$FOUND_IN_CHECKSUMS" = "true" ] || fatal "Failed to download checksum for ${ASSET_NAME}."
+fi
 
 SHA_EXPECTED="$(awk '{print $1}' "$SHA_TMP" | head -n 1)"
 [ -n "$SHA_EXPECTED" ] || fatal "Checksum file is empty or invalid"
@@ -579,7 +607,8 @@ EOF"
   \"port\": ${VLLM_PORT}
 }
 EOF"
-        $SUDO chmod 600 "$VLLM_CONFIG_PATH"
+        $SUDO chown root:"$AGENT_GROUP" "$VLLM_CONFIG_PATH"
+        $SUDO chmod 664 "$VLLM_CONFIG_PATH"
       fi
 
       $SUDO sh -c "cat > \"$VLLM_ENV_PATH\" <<EOF
@@ -601,7 +630,8 @@ EOF"
         VLLM_ESCAPED_HF_HUB_TOKEN="$(printf '%s' "$VLLM_HF_HUB_TOKEN" | sed 's/\\/\\\\/g; s/"/\\"/g')"
         $SUDO sh -c "printf '%s\n' \"HUGGING_FACE_HUB_TOKEN=\\\"${VLLM_ESCAPED_HF_HUB_TOKEN}\\\"\" >> \"$VLLM_ENV_PATH\""
       fi
-      $SUDO chmod 600 "$VLLM_ENV_PATH"
+      $SUDO chown root:"$AGENT_GROUP" "$VLLM_ENV_PATH"
+      $SUDO chmod 660 "$VLLM_ENV_PATH"
 
       $SUDO sh -c "cat > \"$VLLM_UNIT_PATH\" <<EOF
 [Unit]
@@ -623,6 +653,14 @@ EOF"
       $SUDO chmod 0644 "$VLLM_UNIT_PATH"
       $SUDO systemctl daemon-reload
       $SUDO systemctl enable vllm >/dev/null || true
+
+      # Allow mantler group members to control the vllm service without sudo
+      # password so that `mantler model pull/start/stop` work as non-root.
+      SUDOERS_FILE="/etc/sudoers.d/mantler-vllm"
+      $SUDO sh -c "cat > \"$SUDOERS_FILE\" <<'SUDOEOF'
+%mantler ALL=(root) NOPASSWD: /bin/systemctl enable vllm, /bin/systemctl disable vllm, /bin/systemctl start vllm, /bin/systemctl stop vllm, /bin/systemctl restart vllm, /bin/systemctl reset-failed vllm, /bin/systemctl daemon-reload
+SUDOEOF"
+      $SUDO chmod 440 "$SUDOERS_FILE"
 
       VLLM_EFFECTIVE_MODE="$VLLM_RUNTIME_MODE"
       if [ "$VLLM_EFFECTIVE_MODE" = "auto" ]; then
@@ -658,11 +696,13 @@ EOF"
               VLLM_LIB_PATHS="$($SUDO "$VLLM_PYTHON" -c 'import glob, os, site; paths=[]; [paths.append(p) for b in site.getsitepackages() for pat in ("nvidia/*/lib","torch/lib") for p in glob.glob(os.path.join(b, pat)) if os.path.isdir(p)]; seen=set(); ordered=[]; [ordered.append(p) for p in paths if not (p in seen or seen.add(p))]; print(":".join(ordered))' 2>/dev/null || true)"
               if [ -n "$VLLM_LIB_PATHS" ]; then
                 $SUDO sh -c "awk 'BEGIN{written=0} /^VLLM_LD_LIBRARY_PATH=/{print \"VLLM_LD_LIBRARY_PATH=${VLLM_LIB_PATHS}\"; written=1; next} {print} END{if(!written) print \"VLLM_LD_LIBRARY_PATH=${VLLM_LIB_PATHS}\"}' \"$VLLM_ENV_PATH\" > \"$VLLM_ENV_PATH.tmp\" && mv \"$VLLM_ENV_PATH.tmp\" \"$VLLM_ENV_PATH\""
-                $SUDO chmod 600 "$VLLM_ENV_PATH"
+                $SUDO chown root:"$AGENT_GROUP" "$VLLM_ENV_PATH"
+      $SUDO chmod 660 "$VLLM_ENV_PATH"
               fi
               if [ "${VLLM_TRUST_REMOTE_CODE}" = "true" ]; then
                 $SUDO sh -c "awk 'BEGIN{written=0} /^VLLM_TRUST_REMOTE_CODE=/{print \"VLLM_TRUST_REMOTE_CODE=true\"; written=1; next} {print} END{if(!written) print \"VLLM_TRUST_REMOTE_CODE=true\"}' \"$VLLM_ENV_PATH\" > \"$VLLM_ENV_PATH.tmp\" && mv \"$VLLM_ENV_PATH.tmp\" \"$VLLM_ENV_PATH\""
-                $SUDO chmod 600 "$VLLM_ENV_PATH"
+                $SUDO chown root:"$AGENT_GROUP" "$VLLM_ENV_PATH"
+      $SUDO chmod 660 "$VLLM_ENV_PATH"
               fi
               log "vLLM preinstall complete."
             fi
