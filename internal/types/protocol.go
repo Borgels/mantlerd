@@ -255,6 +255,25 @@ type AutoShutdownConfig struct {
 	MaxHours    float64 `json:"maxHours,omitempty"`
 }
 
+type DeployedMantle struct {
+	MantleFingerprint string `json:"mantleFingerprint"`
+	BaseFingerprint   string `json:"baseFingerprint,omitempty"`
+	Status            string `json:"status,omitempty"`
+	EndpointPath      string `json:"endpointPath,omitempty"`
+	EndpointHealth    string `json:"endpointHealth,omitempty"`
+}
+
+type MachineConnectivity struct {
+	Kind           string `json:"kind"`
+	Address        string `json:"address,omitempty"`
+	Port           int    `json:"port,omitempty"`
+	TLSEnabled     bool   `json:"tlsEnabled,omitempty"`
+	TailscaleIP    string `json:"tailscaleIp,omitempty"`
+	TunnelHostname string `json:"tunnelHostname,omitempty"`
+	RelayConnected bool   `json:"relayConnected,omitempty"`
+	RelayLatencyMs int64  `json:"relayLatencyMs,omitempty"`
+}
+
 type CheckinRequest struct {
 	MachineID              string                         `json:"machineId"`
 	Hostname               string                         `json:"hostname,omitempty"`
@@ -281,11 +300,63 @@ type CheckinRequest struct {
 	InstalledTrainers      []InstalledTrainer             `json:"installedTrainers,omitempty"`
 	InstalledTools         []InstalledTool                `json:"installedTools,omitempty"`
 	InstalledModels        []InstalledModel               `json:"installedModels,omitempty"`
+	DeployedMantles        []DeployedMantle               `json:"deployedMantles,omitempty"`
 	InstalledHarnesses     []InstalledHarness             `json:"installedHarnesses,omitempty"`
 	InstalledOrchestrators []InstalledOrchestrator        `json:"installedOrchestrators,omitempty"`
+	Connectivity           *MachineConnectivity           `json:"connectivity,omitempty"`
+	StageEncryptionKey     string                         `json:"stageEncryptionKey,omitempty"`
+	StageSigningKey        string                         `json:"stageSigningKey,omitempty"`
+	StageKeyFingerprint    string                         `json:"stageKeyFingerprint,omitempty"`
 	OutcomeEvents          []OutcomeEvent                 `json:"outcomeEvents,omitempty"`
 	Uptime                 int64                          `json:"uptime,omitempty"`
 	LoadAvg                []float64                      `json:"loadAvg,omitempty"`
+}
+
+type StageContinuation struct {
+	NextStageKind            string `json:"nextStageKind"`
+	NextTargetMachineID      string `json:"nextTargetMachineId"`
+	NextRouteKind            string `json:"nextRouteKind"`
+	NextTargetEncryptionKey  string `json:"nextTargetEncryptionKey"`
+	NextTargetSigningKey     string `json:"nextTargetSigningKey"`
+	NextTargetKeyFingerprint string `json:"nextTargetKeyFingerprint"`
+}
+
+type StageBilling struct {
+	OrgID             string `json:"orgId"`
+	APIKeyID          string `json:"apiKeyId"`
+	MantleFingerprint string `json:"mantleFingerprint"`
+}
+
+type StageIntegrity struct {
+	StageID               string `json:"stageId"`
+	StageKind             string `json:"stageKind"`
+	ContractVersion       string `json:"contractVersion"`
+	ModelID               string `json:"modelId"`
+	RuntimeID             string `json:"runtimeId"`
+	InputHash             string `json:"inputHash"`
+	OutputHash            string `json:"outputHash"`
+	InputTokens           int    `json:"inputTokens"`
+	OutputTokens          int    `json:"outputTokens"`
+	DurationMs            int64  `json:"durationMs"`
+	Timestamp             string `json:"timestamp"`
+	MachineKeyFingerprint string `json:"machineKeyFingerprint"`
+	Signature             string `json:"signature"`
+}
+
+type StageEnvelope struct {
+	Version              string             `json:"version"`
+	RequestID            string             `json:"requestId"`
+	StageID              string             `json:"stageId"`
+	StageKind            string             `json:"stageKind"`
+	TargetMachineID      string             `json:"targetMachineId"`
+	RouteKind            string             `json:"routeKind"`
+	EncryptedPayload     string             `json:"encryptedPayload"`
+	Nonce                string             `json:"nonce"`
+	EphemeralPublicKey   string             `json:"ephemeralPublicKey"`
+	PriorStageSigningKey string             `json:"priorStageSigningKey,omitempty"`
+	PriorIntegrity       *StageIntegrity    `json:"priorIntegrity,omitempty"`
+	Continuation         *StageContinuation `json:"continuation,omitempty"`
+	Billing              StageBilling       `json:"billing"`
 }
 
 type OutcomeEvent struct {

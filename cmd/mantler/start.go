@@ -63,7 +63,6 @@ func runStart(cmd *cobra.Command, args []string) {
 
 	outcomes := newOutcomeBuffer()
 	stageKeys, err := stagecrypto.EnsureStageKeys()
-	stageKeysReady := err == nil
 	if err != nil {
 		log.Printf("stage key initialization failed: %v", err)
 	}
@@ -500,7 +499,7 @@ func runCheckIn(
 	if origin := configOrigin(cfg); origin != nil {
 		payload.Origin = origin
 	}
-	if stageKeysReady {
+	if strings.TrimSpace(stageKeys.EncryptionPublicKey) != "" && strings.TrimSpace(stageKeys.SigningPublicKey) != "" {
 		payload.StageEncryptionKey = stageKeys.EncryptionPublicKey
 		payload.StageSigningKey = stageKeys.SigningPublicKey
 		payload.StageKeyFingerprint = stageKeys.Fingerprint

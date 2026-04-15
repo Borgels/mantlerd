@@ -31,6 +31,8 @@ func (h *Handler) handleCompress(
 	if err != nil {
 		return nil, errors.New("compression_contract_violation")
 	}
+	runtimeName := resolveRuntimeName(input)
+	modelID := resolveModelID(input)
 	payload, err := json.Marshal(compressed)
 	if err != nil {
 		return nil, errors.New("compression_contract_violation")
@@ -54,11 +56,11 @@ func (h *Handler) handleCompress(
 		startedAt,
 	)
 	return map[string]any{
-		"encryptedPayload":  encryptedPayload,
-		"nonce":             nonce,
+		"encryptedPayload":   encryptedPayload,
+		"nonce":              nonce,
 		"ephemeralPublicKey": ephemeralPublicKey,
-		"integrity":         integrity,
-		"continuation":      envelope.Continuation,
+		"integrity":          integrity,
+		"continuation":       envelope.Continuation,
 	}, nil
 }
 
@@ -107,7 +109,7 @@ func compressViaLocalRuntime(ctx context.Context, input map[string]any) (map[str
 	}
 	if decoded["toolState"] == nil {
 		decoded["toolState"] = map[string]any{
-			"activeTools": []any{},
+			"activeTools":  []any{},
 			"pendingCalls": []any{},
 		}
 	}
