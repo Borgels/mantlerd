@@ -15,11 +15,13 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Borgels/mantlerd/internal/audit"
 	"github.com/Borgels/mantlerd/internal/client"
 	"github.com/Borgels/mantlerd/internal/commands"
 	"github.com/Borgels/mantlerd/internal/config"
 	"github.com/Borgels/mantlerd/internal/discovery"
 	"github.com/Borgels/mantlerd/internal/localsocket"
+	"github.com/Borgels/mantlerd/internal/policy"
 	runtimeagent "github.com/Borgels/mantlerd/internal/runtime"
 	"github.com/Borgels/mantlerd/internal/transfer"
 	agenttools "github.com/Borgels/mantlerd/internal/tools"
@@ -77,13 +79,15 @@ func runStart(cmd *cobra.Command, args []string) {
 
 	// Start the local Unix control socket so CLI commands can delegate to the
 	// daemon instead of running with their own (potentially unprivileged) context.
-	if sockSrv, err := localsocket.NewServer(runtimeManager); err != nil {
+	if cfg.DisableLocalSocket {
+		log.Printf("localsocket: disabled by config (disableLocalSocket=true)")
+	} else if sockSrv, err := localsocket.NewServer(runtimeManager); err != nil {
 		log.Printf("localsocket: disabled (%v)", err)
 	} else {
 		go sockSrv.Serve(ctx)
 	}
 
-	dispatcher := newCommandDispatcher(ctx, executor, cl, defaultLightCommandConcurrency)
+	dispatcher := newCommandDispatcher(ctx, executor, cl, cfg, defaultLightCommandConcurrency)
 
 	// Run initial check-in
 	startedAt := time.Now()
@@ -199,6 +203,7 @@ type commandDispatcher struct {
 	ctx            context.Context
 	executor       *commands.Executor
 	client         *client.Client
+	cfg            config.Config
 	heavyQueue     chan types.AgentCommand
 	lightSemaphore chan struct{}
 	activeCount    atomic.Int64
@@ -208,6 +213,7 @@ func newCommandDispatcher(
 	ctx context.Context,
 	executor *commands.Executor,
 	cl *client.Client,
+	cfg config.Config,
 	lightConcurrency int,
 ) *commandDispatcher {
 	if lightConcurrency < 1 {
@@ -217,6 +223,7 @@ func newCommandDispatcher(
 		ctx:            ctx,
 		executor:       executor,
 		client:         cl,
+		cfg:            cfg,
 		heavyQueue:     make(chan types.AgentCommand, heavyCommandQueueSize),
 		lightSemaphore: make(chan struct{}, lightConcurrency),
 	}
@@ -268,7 +275,16 @@ func (d *commandDispatcher) runLight(command types.AgentCommand) {
 
 func (d *commandDispatcher) execute(command types.AgentCommand) {
 	defer d.activeCount.Add(-1)
+	start := time.Now()
 	result, err := d.executor.ExecuteWithContext(d.ctx, command)
+
+	ev := audit.Event{
+		CommandID:   command.ID,
+		CommandType: command.Type,
+		ServerURL:   d.cfg.ServerURL,
+		Destructive: policy.IsDestructive(command.Type),
+	}
+
 	status := "success"
 	if err != nil {
 		status = "failed"
@@ -276,9 +292,15 @@ func (d *commandDispatcher) execute(command types.AgentCommand) {
 			result.Details = err.Error()
 		}
 		log.Printf("command %s (%s) failed: %v", command.ID, command.Type, err)
+		ev.Outcome = "failed"
+		ev.Reason = err.Error()
 	} else {
 		log.Printf("command %s (%s) completed", command.ID, command.Type)
+		ev.Outcome = "success"
 	}
+	ev.DurationMs = time.Since(start).Milliseconds()
+	audit.Default().Log(ev)
+
 	ackErr := ackCommandWithRetry(d.ctx, d.client, types.AckRequest{
 		CommandID:     command.ID,
 		Status:        status,

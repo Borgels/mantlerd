@@ -2,7 +2,9 @@ package commands
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,6 +25,7 @@ import (
 
 	"github.com/Borgels/mantlerd/internal/config"
 	agenteval "github.com/Borgels/mantlerd/internal/eval"
+	"github.com/Borgels/mantlerd/internal/policy"
 	agentruntime "github.com/Borgels/mantlerd/internal/runtime"
 	agenttools "github.com/Borgels/mantlerd/internal/tools"
 	agenttrainer "github.com/Borgels/mantlerd/internal/trainer"
@@ -207,6 +210,15 @@ func (e *Executor) Execute(command types.AgentCommand) (ExecutionResult, error) 
 
 // ExecuteWithContext runs a command with cancellation support.
 func (e *Executor) ExecuteWithContext(ctx context.Context, command types.AgentCommand) (ExecutionResult, error) {
+	// Capability policy check — evaluated before any side effects.
+	if ok, reason := policy.Allowed(
+		policy.TrustMode(e.cfg.TrustMode),
+		command.Type,
+		e.cfg.AllowedCommands,
+	); !ok {
+		return ExecutionResult{Details: reason}, fmt.Errorf("command denied by local policy: %s", reason)
+	}
+
 	// Create a cancellable context for this command
 	cmdCtx, cancel := context.WithCancel(ctx)
 	e.registerCancel(command.ID, cancel)
@@ -708,7 +720,11 @@ func (e *Executor) ExecuteWithContext(ctx context.Context, command types.AgentCo
 		version := "latest"
 		if rawVersion, ok := command.Params["version"]; ok {
 			if parsedVersion, ok := rawVersion.(string); ok && strings.TrimSpace(parsedVersion) != "" {
-				version = strings.TrimSpace(parsedVersion)
+				v := strings.TrimSpace(parsedVersion)
+				if v != "latest" && !isValidVersionTag(v) {
+					return ExecutionResult{}, fmt.Errorf("update_agent: invalid version %q: must be 'latest' or a v-prefixed semver tag (e.g. v1.2.3)", v)
+				}
+				version = v
 			}
 		}
 		details, err := e.startAgentUpdate(version)
@@ -718,6 +734,12 @@ func (e *Executor) ExecuteWithContext(ctx context.Context, command types.AgentCo
 		return ExecutionResult{Details: details}, nil
 	case "self_shutdown":
 		delaySeconds := intParam(command.Params, "delaySeconds", 10)
+		if delaySeconds < 0 {
+			delaySeconds = 0
+		}
+		if delaySeconds > 3600 {
+			return ExecutionResult{}, fmt.Errorf("self_shutdown: delaySeconds %d exceeds maximum of 3600", delaySeconds)
+		}
 		halt := optionalBoolParam(command.Params, "haltMachine", true)
 		if err := scheduleSelfShutdown(delaySeconds, halt); err != nil {
 			return ExecutionResult{}, err
@@ -1826,45 +1848,220 @@ func persistVLLMEnvOverrides(mode string, image string) error {
 	return nil
 }
 
+// startAgentUpdate downloads a verified release binary and replaces the
+// running executable in-place.  It replicates the same checksum-verification
+// flow used by `mantler update apply` rather than piping a remote shell
+// script, so the update path cannot be used to execute arbitrary code.
 func (e *Executor) startAgentUpdate(version string) (string, error) {
-	installer := "https://raw.githubusercontent.com/Borgels/mantlerd/master/scripts/install.sh"
-	commandParts := []string{
-		"curl", "-fsSL", shellQuote(installer), "|", "sh", "-s", "--",
-		"--token", "\"$MANTLER_TOKEN\"",
-		"--machine", shellQuote(e.cfg.MachineID),
-		"--server", shellQuote(e.cfg.ServerURL),
-		"--version", shellQuote(version),
-	}
-	if e.cfg.Insecure {
-		commandParts = append(commandParts, "--insecure")
-	}
+	const repoOwner = "Borgels"
+	const repoName  = "mantlerd"
 
-	commandLine := strings.Join(commandParts, " ")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "sh", "-c", commandLine)
-	cmd.Env = append(
-		os.Environ(),
-		"MANTLERD_SELF_UPDATE=true",
-		"CLAWCONTROL_AGENT_SELF_UPDATE=true",
-		"MANTLER_TOKEN="+e.cfg.Token,
-	)
-	output, err := cmd.CombinedOutput()
-	details := strings.TrimSpace(string(output))
-	if details == "" {
-		details = fmt.Sprintf("Agent update completed (target version: %s)", version)
+	// Resolve "latest" to a concrete version tag.
+	resolvedVersion := strings.TrimSpace(version)
+	if resolvedVersion == "" || strings.EqualFold(resolvedVersion, "latest") {
+		latest, err := fetchLatestReleaseTag(ctx, repoOwner, repoName)
+		if err != nil {
+			return "", fmt.Errorf("resolve latest release: %w", err)
+		}
+		resolvedVersion = latest
 	}
+	if !strings.HasPrefix(resolvedVersion, "v") {
+		resolvedVersion = "v" + resolvedVersion
+	}
+
+	// Determine asset name for this platform.
+	osName, archName, err := releaseAssetNames()
 	if err != nil {
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return details, fmt.Errorf("agent update timed out after 5m")
-		}
-		if isSignalTermination(err) {
-			return "Agent service restart triggered during update. Update likely applied; waiting for service to check in again.", nil
-		}
-		return details, fmt.Errorf("agent update failed: %w", err)
+		return "", fmt.Errorf("unsupported platform for self-update: %w", err)
 	}
+	assetName    := fmt.Sprintf("mantlerd-%s-%s", osName, archName)
+	assetURL     := fmt.Sprintf("https://github.com/%s/%s/releases/download/%s/%s", repoOwner, repoName, resolvedVersion, assetName)
+	checksumURL  := fmt.Sprintf("https://github.com/%s/%s/releases/download/%s/checksums.txt", repoOwner, repoName, resolvedVersion)
+
+	// Download checksum file first.
+	expectedChecksum, err := fetchReleaseChecksum(ctx, checksumURL, assetName)
+	if err != nil {
+		return "", fmt.Errorf("fetch release checksum: %w", err)
+	}
+
+	// Determine the path of the currently running binary.
+	exePath, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("resolve executable path: %w", err)
+	}
+	if resolved, err2 := filepath.EvalSymlinks(exePath); err2 == nil {
+		exePath = resolved
+	}
+
+	// Download the new binary to a temp file next to the target.
+	tmpFile, err := os.CreateTemp(filepath.Dir(exePath), ".mantlerd-update-*")
+	if err != nil {
+		return "", fmt.Errorf("create temp file for update: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	tmpFile.Close()
+	defer os.Remove(tmpPath)
+
+	if err := downloadURLToFile(ctx, assetURL, tmpPath); err != nil {
+		return "", fmt.Errorf("download release binary: %w", err)
+	}
+	if err := os.Chmod(tmpPath, 0o755); err != nil {
+		return "", fmt.Errorf("chmod downloaded binary: %w", err)
+	}
+
+	// Verify checksum.
+	actualChecksum, err := fileSHA256Hex(tmpPath)
+	if err != nil {
+		return "", fmt.Errorf("compute downloaded binary checksum: %w", err)
+	}
+	if !strings.EqualFold(actualChecksum, expectedChecksum) {
+		return "", fmt.Errorf("checksum mismatch for %s: expected %s got %s", assetName, expectedChecksum, actualChecksum)
+	}
+
+	// Replace the running binary.
+	backupPath := exePath + ".bak"
+	_ = os.Remove(backupPath)
+	if err := os.Rename(exePath, backupPath); err != nil {
+		return "", fmt.Errorf("backup current binary: %w", err)
+	}
+	if err := os.Rename(tmpPath, exePath); err != nil {
+		_ = os.Rename(backupPath, exePath)
+		return "", fmt.Errorf("install updated binary: %w", err)
+	}
+	_ = os.Remove(backupPath)
+
+	details := fmt.Sprintf("Agent updated to %s (checksum verified). Restart the service to apply.", resolvedVersion)
+	log.Printf("agent self-update: %s", details)
 	return details, nil
+}
+
+type githubReleaseTag struct {
+	TagName string `json:"tag_name"`
+}
+
+func fetchLatestReleaseTag(ctx context.Context, owner, repo string) (string, error) {
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", owner, repo)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("User-Agent", "mantlerd-self-update")
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return "", fmt.Errorf("GitHub API error %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var rel githubReleaseTag
+	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(rel.TagName) == "" {
+		return "", fmt.Errorf("empty tag_name in latest release response")
+	}
+	return rel.TagName, nil
+}
+
+func fetchReleaseChecksum(ctx context.Context, checksumURL, assetName string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, checksumURL, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("User-Agent", "mantlerd-self-update")
+	client := &http.Client{Timeout: 20 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return "", fmt.Errorf("checksum download failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 65536))
+	if err != nil {
+		return "", fmt.Errorf("read checksum response: %w", err)
+	}
+	for _, line := range strings.Split(string(body), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		if filepath.Base(fields[1]) == assetName {
+			return strings.TrimSpace(fields[0]), nil
+		}
+	}
+	return "", fmt.Errorf("checksum for %q not found in checksums.txt", assetName)
+}
+
+func downloadURLToFile(ctx context.Context, rawURL, destPath string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("User-Agent", "mantlerd-self-update")
+	client := &http.Client{Timeout: 5 * time.Minute}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return fmt.Errorf("download failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	out, err := os.Create(destPath)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	_, err = io.Copy(out, resp.Body)
+	return err
+}
+
+func fileSHA256Hex(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// releaseAssetNames returns (osName, archName) matching the release binary
+// naming convention: mantlerd-{os}-{arch}.
+func releaseAssetNames() (string, string, error) {
+	var osName string
+	switch stdruntime.GOOS {
+	case "linux":
+		osName = "linux"
+	case "darwin":
+		osName = "darwin"
+	default:
+		return "", "", fmt.Errorf("unsupported OS: %s", stdruntime.GOOS)
+	}
+	var archName string
+	switch stdruntime.GOARCH {
+	case "amd64":
+		archName = "amd64"
+	case "arm64":
+		archName = "arm64"
+	default:
+		return "", "", fmt.Errorf("unsupported arch: %s", stdruntime.GOARCH)
+	}
+	return osName, archName, nil
 }
 
 func isSignalTermination(err error) bool {
@@ -2269,4 +2466,33 @@ func codexAuthConfigured(hasCredentialRefs bool) bool {
 		return false
 	}
 	return strings.TrimSpace(string(content)) != ""
+}
+
+// isValidVersionTag returns true when v is a v-prefixed semantic version tag
+// like "v1.2.3" or "v0.4.0-beta.1".  Used to validate update_agent params.
+func isValidVersionTag(v string) bool {
+	if !strings.HasPrefix(v, "v") && !strings.HasPrefix(v, "V") {
+		return false
+	}
+	trimmed := strings.TrimPrefix(strings.TrimPrefix(v, "v"), "V")
+	if trimmed == "" {
+		return false
+	}
+	parts := strings.SplitN(trimmed, "-", 2)
+	core := parts[0]
+	nums := strings.Split(core, ".")
+	if len(nums) < 2 || len(nums) > 3 {
+		return false
+	}
+	for _, n := range nums {
+		if n == "" {
+			return false
+		}
+		for _, c := range n {
+			if c < '0' || c > '9' {
+				return false
+			}
+		}
+	}
+	return true
 }

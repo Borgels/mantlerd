@@ -10,6 +10,20 @@ import (
 	"time"
 )
 
+// TrustMode controls which remote commands the agent will execute.
+//
+//   - "managed"    (default) – all command types allowed; existing behaviour.
+//   - "restricted" – commands in the destructive category are silently denied
+//     unless they are also present in AllowedCommands.
+//
+// See internal/policy for the canonical list of destructive commands.
+type TrustMode string
+
+const (
+	TrustModeManaged    TrustMode = "managed"
+	TrustModeRestricted TrustMode = "restricted"
+)
+
 type Config struct {
 	ServerURL                string                 `json:"serverUrl"`
 	RelayURL                 string                 `json:"relayUrl,omitempty"`
@@ -24,7 +38,28 @@ type Config struct {
 	// AllowModelSharing enables the LAN peer-to-peer model transfer server.
 	// When true, this machine can serve locally cached model files to other
 	// machines in the same org. Disabled by default.
-	AllowModelSharing        bool                   `json:"allowModelSharing,omitempty"`
+	AllowModelSharing bool `json:"allowModelSharing,omitempty"`
+
+	// TrustMode sets the local capability policy enforced against remote commands.
+	// Defaults to "managed" (all commands allowed) for backward compatibility.
+	// Set to "restricted" to block destructive commands unless explicitly allowed.
+	TrustMode TrustMode `json:"trustMode,omitempty"`
+
+	// AllowedCommands is an explicit allowlist used in "restricted" trust mode.
+	// Command types listed here are permitted even if they fall into the
+	// destructive category. Ignored when TrustMode is "managed".
+	AllowedCommands []string `json:"allowedCommands,omitempty"`
+
+	// DisableRelayProxy disables the localhost HTTP proxy over the relay
+	// WebSocket entirely. When true, proxy_request messages from the server
+	// are rejected. Pipeline stage requests are unaffected.
+	DisableRelayProxy bool `json:"disableRelayProxy,omitempty"`
+
+	// DisableLocalSocket disables the Unix domain socket control API entirely.
+	// When true the daemon starts without creating the socket, so local CLI
+	// commands that normally delegate to the daemon will fall back to direct
+	// (potentially unprivileged) execution.
+	DisableLocalSocket bool `json:"disableLocalSocket,omitempty"`
 }
 
 type FileConfig struct {
@@ -39,6 +74,10 @@ type FileConfig struct {
 	CloudProvisioned         bool                   `json:"cloudProvisioned"`
 	Origin                   map[string]interface{} `json:"origin,omitempty"`
 	AllowModelSharing        bool                   `json:"allowModelSharing,omitempty"`
+	TrustMode                TrustMode              `json:"trustMode,omitempty"`
+	AllowedCommands          []string               `json:"allowedCommands,omitempty"`
+	DisableRelayProxy        bool                   `json:"disableRelayProxy,omitempty"`
+	DisableLocalSocket       bool                   `json:"disableLocalSocket,omitempty"`
 }
 
 // CredentialPath returns the path to the agent config injected via systemd
@@ -110,6 +149,10 @@ func Load(path string) (Config, error) {
 		CloudProvisioned:         raw.CloudProvisioned,
 		Origin:                   raw.Origin,
 		AllowModelSharing:        raw.AllowModelSharing,
+		TrustMode:                raw.TrustMode,
+		AllowedCommands:          raw.AllowedCommands,
+		DisableRelayProxy:        raw.DisableRelayProxy,
+		DisableLocalSocket:       raw.DisableLocalSocket,
 	}, nil
 }
 
@@ -138,6 +181,10 @@ func Save(path string, cfg Config) error {
 		CloudProvisioned:         cfg.CloudProvisioned,
 		Origin:                   cfg.Origin,
 		AllowModelSharing:        cfg.AllowModelSharing,
+		TrustMode:                cfg.TrustMode,
+		AllowedCommands:          cfg.AllowedCommands,
+		DisableRelayProxy:        cfg.DisableRelayProxy,
+		DisableLocalSocket:       cfg.DisableLocalSocket,
 	}
 	content, err := json.MarshalIndent(raw, "", "  ")
 	if err != nil {
@@ -185,6 +232,18 @@ func Merge(fileCfg Config, flagsCfg Config) Config {
 	}
 	if flagsCfg.AllowModelSharing {
 		merged.AllowModelSharing = true
+	}
+	if flagsCfg.TrustMode != "" {
+		merged.TrustMode = flagsCfg.TrustMode
+	}
+	if len(flagsCfg.AllowedCommands) > 0 {
+		merged.AllowedCommands = flagsCfg.AllowedCommands
+	}
+	if flagsCfg.DisableRelayProxy {
+		merged.DisableRelayProxy = true
+	}
+	if flagsCfg.DisableLocalSocket {
+		merged.DisableLocalSocket = true
 	}
 	return merged
 }

@@ -46,6 +46,9 @@ func (e *Executor) runOrchestratorExec(command types.AgentCommand) (ExecutionRes
 	defer cancel()
 
 	cmdName := params.Command
+	if err := validateOrchestratorCommand(cmdName); err != nil {
+		return ExecutionResult{}, err
+	}
 	cmdArgs := append([]string{}, params.Args...)
 	if cmdName == "" {
 		switch params.OrchestratorType {
@@ -605,6 +608,20 @@ func parseOrchestratorExecParams(params map[string]interface{}) (orchestratorExe
 	return result, nil
 }
 
+// allowedOrchestratorCommands is the set of safe command names that the
+// server may ask the agent to invoke as an orchestrator.  Any command name
+// that resolves to a binary outside this set is rejected before execution.
+var allowedOrchestratorCommands = map[string]struct{}{
+	"crewai": {}, "langgraph": {}, "autogen": {}, "ag2": {},
+	"semantic-kernel": {}, "semantic_kernel": {}, "haystack": {}, "mastra": {},
+}
+
+// positionalArgSafeRE matches simple strings: alphanumerics, dots, hyphens,
+// underscores, forward slashes (for relative paths inside allowed working
+// dirs), and equals signs (flag value syntax).
+// Anything not matching is treated as potentially unsafe.
+var positionalArgUnsafeChars = []string{";", "&&", "||", "|", "`", "$", "<", ">", "\n", "\r"}
+
 func validateOrchestratorArgs(orchestratorType string, args []string) error {
 	allowedFlagPrefixes := map[string][]string{
 		"crewai":          {"--help", "--version", "--verbose", "--quiet", "--config", "--port", "--host"},
@@ -620,21 +637,44 @@ func validateOrchestratorArgs(orchestratorType string, args []string) error {
 	allowed := allowedFlagPrefixes[normalizedType]
 	for _, arg := range args {
 		trimmed := strings.TrimSpace(arg)
-		if trimmed == "" || !strings.HasPrefix(trimmed, "-") {
+		if trimmed == "" {
 			continue
 		}
-		permitted := false
-		for _, prefix := range allowed {
-			if strings.HasPrefix(trimmed, prefix) {
-				permitted = true
-				break
+		// Validate flags against the allowlist.
+		if strings.HasPrefix(trimmed, "-") {
+			permitted := false
+			for _, prefix := range allowed {
+				if strings.HasPrefix(trimmed, prefix) {
+					permitted = true
+					break
+				}
 			}
+			if !permitted {
+				return fmt.Errorf("orchestrator argument %q is not allowed for type %s", arg, orchestratorType)
+			}
+			continue
 		}
-		if !permitted {
-			return fmt.Errorf("orchestrator argument %q is not allowed for type %s", arg, orchestratorType)
+		// Positional args: reject shell metacharacters.
+		for _, unsafe := range positionalArgUnsafeChars {
+			if strings.Contains(trimmed, unsafe) {
+				return fmt.Errorf("orchestrator positional argument contains unsafe character sequence %q", unsafe)
+			}
 		}
 	}
 	return nil
+}
+
+// validateOrchestratorCommand rejects server-supplied command names that are
+// not in the known-safe orchestrator binary list.
+func validateOrchestratorCommand(commandName string) error {
+	normalised := strings.ToLower(strings.TrimSpace(commandName))
+	if normalised == "" {
+		return nil // empty means default for the type, resolved internally
+	}
+	if _, ok := allowedOrchestratorCommands[normalised]; ok {
+		return nil
+	}
+	return fmt.Errorf("orchestrator command %q is not in the allowed command list", commandName)
 }
 
 func sanitizeOrchestratorWorkingDir(path string) (string, error) {
