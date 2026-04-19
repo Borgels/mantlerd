@@ -19,7 +19,7 @@ jobs:
     steps:
       - name: Resolve target release
         id: release
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             const tag = context.eventName === "workflow_dispatch"
@@ -49,7 +49,7 @@ jobs:
 
       - name: Validate required release assets
         if: steps.release.outputs.skip != 'true'
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             const releaseId = Number("${{ steps.release.outputs.release_id }}");
