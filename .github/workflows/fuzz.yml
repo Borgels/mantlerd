@@ -18,3 +18,4 @@ jobs:
         with:
           go-version-file: go.mod
       - run: go test ./internal/pipeline -fuzz=FuzzEncryptStagePayload -fuzztime=30s
+      - run: go test ./internal/pipeline -fuzz=FuzzEncryptDecryptStagePayloadRoundTrip -fuzztime=30s
