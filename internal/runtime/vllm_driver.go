@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -298,7 +299,7 @@ func (d *vllmDriver) StartModelWithFlags(modelID string, _ *types.ModelFeatureFl
 	if incompatibility := d.knownModelImageIncompatibility(trimmedModel, containerImage); incompatibility != "" {
 		d.disarmConfiguredModel()
 		d.stopVLLMServiceForKnownIncompatibility()
-		return fmt.Errorf(incompatibility)
+		return errors.New(incompatibility)
 	}
 	if err := d.writeConfig(vllmConfig{Model: trimmedModel, Port: 8000}); err != nil {
 		return err
@@ -870,7 +871,7 @@ func (d *vllmDriver) startOrRestartService(modelID string, port int, force bool)
 	if incompatibility := d.knownModelImageIncompatibility(safeModelID, containerImage); incompatibility != "" {
 		d.disarmConfiguredModel()
 		d.stopVLLMServiceForKnownIncompatibility()
-		return fmt.Errorf(incompatibility)
+		return errors.New(incompatibility)
 	}
 	if d.shouldUseContainer() {
 		// Runtime control actions should not force image upgrades implicitly.
