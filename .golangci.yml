@@ -1,3 +1,7 @@
+run:
+  timeout: 5m
+  go: "1.22"
+
 linters:
   enable:
     - errcheck
@@ -6,6 +10,24 @@ linters:
     - ineffassign
     - staticcheck
     - unused
+    - gofumpt
+    - goimports
+    - revive
+    - misspell
+    - unconvert
+    - prealloc
+    - bodyclose
+
+linters-settings:
+  revive:
+    rules:
+      - name: var-naming
+      - name: package-comments
+      - name: exported
+      - name: if-return
 
 issues:
   exclude-use-default: false
+  exclude-rules:
+    - path: _test\\.go
+      linters: [errcheck, unused]
