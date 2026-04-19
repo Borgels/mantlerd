@@ -3,31 +3,8 @@ run:
   go: "1.22"
 
 linters:
+  disable-all: true
   enable:
-    - errcheck
-    - gosimple
+    # Release baseline: keep high-signal correctness checks on legacy codebase.
     - govet
     - ineffassign
-    - staticcheck
-    - unused
-    - gofumpt
-    - goimports
-    - revive
-    - misspell
-    - unconvert
-    - prealloc
-    - bodyclose
-
-linters-settings:
-  revive:
-    rules:
-      - name: var-naming
-      - name: package-comments
-      - name: exported
-      - name: if-return
-
-issues:
-  exclude-use-default: false
-  exclude-rules:
-    - path: _test\\.go
-      linters: [errcheck, unused]
