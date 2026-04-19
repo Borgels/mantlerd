@@ -1,0 +1,22 @@
+name: SBOM
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  sbom:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: anchore/sbom-action@v0
+        with:
+          format: cyclonedx-json
+          artifact-name: sbom.cdx.json
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: sbom.cdx.json

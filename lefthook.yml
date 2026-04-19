@@ -11,4 +11,4 @@ pre-commit:
 commit-msg:
   commands:
     commitlint:
-      run: npx --yes @commitlint/cli --extends=@commitlint/config-conventional --edit {1}
+      run: npx --yes @commitlint/cli --extends=@commitlint/config-conventional --edit .git/COMMIT_EDITMSG

@@ -1,0 +1,5 @@
+[files]
+extend-exclude = ["pnpm-lock.yaml", "package-lock.json", "go.sum", "*.min.*", ".next/**"]
+
+[default]
+extend-ignore-identifiers-re = ["\\b[0-9a-f]{7,40}\\b"]
