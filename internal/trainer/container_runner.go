@@ -86,20 +86,18 @@ func (r *containerRunner) RunTraining(
 		"bash", "-lc", spec.TrainCmd(req),
 	}
 	if hostDatasetPath := normalizeHostPath(req.Dataset); hostDatasetPath != "" {
-		args = append(
-			[]string{
-				"run",
-				"--rm",
-				"--name", containerName,
-				"--gpus", "all",
-				"-v", fmt.Sprintf("%s:/output", outputDir),
-				"-v", fmt.Sprintf("%s:/dataset", hostDatasetPath),
-				"-e", "DATASET=/dataset",
-				"-e", "PYTHONUNBUFFERED=1",
-				spec.Image,
-				"bash", "-lc", spec.TrainCmd(req),
-			},
-		)
+		args = []string{
+			"run",
+			"--rm",
+			"--name", containerName,
+			"--gpus", "all",
+			"-v", fmt.Sprintf("%s:/output", outputDir),
+			"-v", fmt.Sprintf("%s:/dataset", hostDatasetPath),
+			"-e", "DATASET=/dataset",
+			"-e", "PYTHONUNBUFFERED=1",
+			spec.Image,
+			"bash", "-lc", spec.TrainCmd(req),
+		}
 	}
 
 	cmd := exec.CommandContext(ctx, containerBin, args...)

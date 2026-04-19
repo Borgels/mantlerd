@@ -1,8 +1,41 @@
 # mantlerd
 
+[![CI](https://github.com/Borgels/mantlerd/actions/workflows/ci.yml/badge.svg)](https://github.com/Borgels/mantlerd/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 Mantler machine daemon for runtime and model orchestration.
 
 The daemon runs on each worker machine, checks in with Mantler, executes typed commands, and reports runtime/model state back to the control plane.
+
+## Documentation
+
+- [Docs home](https://docs.mantler.ai)
+- [Machine install](https://docs.mantler.ai/machines/install)
+- [Machine configuration](https://docs.mantler.ai/machines/configuration)
+- [Machine security](https://docs.mantler.ai/machines/security)
+- [Machine CLI](https://docs.mantler.ai/machines/cli)
+
+## Architecture: public agent and private control plane
+
+`mantlerd` is the **open-source edge half** of the Mantler system. The other half — the Mantler control plane — is a separate, private server that is not part of this repository.
+
+```
+┌─────────────────────────────┐        ┌───────────────────────────────────┐
+│  Worker machine (this repo) │        │  Mantler control plane (private)  │
+│                             │        │                                   │
+│  mantlerd daemon            │◄──────►│  /api/agent/checkin               │
+│   - runtime orchestration   │  HTTPS │  /api/agent/ack                   │
+│   - model management        │        │  /api/recommendations             │
+│   - strategy pipeline exec  │        │  /api/agent/relay/ws (WebSocket)  │
+│   - local hardware access   │        │                                   │
+└─────────────────────────────┘        └───────────────────────────────────┘
+```
+
+**Why this repo is public:** `mantlerd` runs on your machine with elevated privileges. Transparency matters. You can read every check-in payload, command type, and execution path in this codebase. The agent connects to any HTTP(S) endpoint you configure — you are not required to use Mantler's hosted service.
+
+**What lives in the private repo:** the control-plane server implementation, fleet management, recommendation and scoring data, hosted relay, and product UI. None of that code ships in this agent.
+
+See [SECURITY.md](SECURITY.md) for details on what the control plane is and is not allowed to ask the agent to do, and how to verify releases.
 
 ## Overview
 
@@ -130,3 +163,7 @@ mantler model list
 make build
 make release
 ```
+
+## License
+
+[MIT](LICENSE) — Copyright (c) 2026 Borgels Olsen Holding ApS

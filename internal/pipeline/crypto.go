@@ -5,11 +5,13 @@ import (
 	"crypto/cipher"
 	"crypto/ecdh"
 	"crypto/ed25519"
-	"crypto/hkdf"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
+	"io"
+
+	"golang.org/x/crypto/hkdf"
 )
 
 const stageHKDFInfo = "mantler-stage-v1"
@@ -104,7 +106,12 @@ func encryptStagePayload(plaintext []byte, requestID string, targetPublicKeyBase
 }
 
 func deriveAESKey(sharedSecret []byte, requestID string) ([]byte, error) {
-	return hkdf.Key(sha256.New, sharedSecret, []byte(requestID), stageHKDFInfo, 32)
+	reader := hkdf.New(sha256.New, sharedSecret, []byte(requestID), []byte(stageHKDFInfo))
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(reader, key); err != nil {
+		return nil, err
+	}
+	return key, nil
 }
 
 func signIntegrityPayload(payload []byte, privateKey ed25519.PrivateKey) string {
