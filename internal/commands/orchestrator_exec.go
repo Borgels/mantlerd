@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -157,7 +158,7 @@ func (e *Executor) runOrchestratorExec(command types.AgentCommand) (ExecutionRes
 				Detail:            detail,
 				Timestamp:         time.Now().UTC().Format(time.RFC3339),
 			})
-			return ExecutionResult{Details: detail}, fmt.Errorf(detail)
+			return ExecutionResult{Details: detail}, errors.New(detail)
 		}
 		e.emitOutcome(types.OutcomeEvent{
 			PlanID:            params.CompatibilityPlanID,
