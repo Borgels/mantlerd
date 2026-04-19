@@ -13,6 +13,8 @@ on:
 
 permissions:
   contents: write
+  id-token: write    # required for SLSA provenance signing
+  attestations: write
 
 jobs:
   test-macos:
@@ -76,6 +78,15 @@ jobs:
         run: |
           chmod +x scripts/release-build.sh
           scripts/release-build.sh "${{ steps.version.outputs.value }}"
+
+      - name: Generate SLSA provenance attestation
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/mantlerd-linux-amd64
+            dist/mantlerd-linux-arm64
+            dist/mantlerd-darwin-amd64
+            dist/mantlerd-darwin-arm64
 
       - name: Upload release assets
         uses: softprops/action-gh-release@v2
