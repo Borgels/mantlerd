@@ -13,6 +13,10 @@ run:
 tidy:
 	go mod tidy
 
+.PHONY: hooks
+hooks:
+	lefthook install
+
 .PHONY: release
 release:
 	chmod +x scripts/release-build.sh

@@ -162,6 +162,7 @@ mantler model list
 ```bash
 make build
 make release
+make hooks
 ```
 
 ## License

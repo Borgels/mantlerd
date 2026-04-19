@@ -1,0 +1,14 @@
+pre-commit:
+  parallel: true
+  commands:
+    gofumpt:
+      glob: "*.go"
+      run: gofumpt -w {staged_files}
+    vet:
+      run: go vet ./...
+    golangci:
+      run: golangci-lint run --new-from-rev=HEAD~1
+commit-msg:
+  commands:
+    commitlint:
+      run: npx --yes @commitlint/cli --extends=@commitlint/config-conventional --edit {1}
