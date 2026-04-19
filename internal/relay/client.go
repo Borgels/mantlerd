@@ -33,11 +33,37 @@ type RuntimeInventory interface {
 }
 
 type Config struct {
-	ServerURL string
-	RelayURL  string
-	Token     string
-	MachineID string
-	Insecure  bool
+	ServerURL         string
+	RelayURL          string
+	Token             string
+	MachineID         string
+	Insecure          bool
+	DisableRelayProxy bool
+}
+
+// allowedProxyMethods is the set of HTTP methods that the relay proxy will
+// forward to local runtime backends.
+var allowedProxyMethods = map[string]struct{}{
+	"GET": {}, "POST": {}, "PUT": {}, "PATCH": {}, "DELETE": {}, "HEAD": {}, "OPTIONS": {},
+}
+
+// allowedProxyPathPrefixes is the set of URL path prefixes that the relay
+// proxy will forward.  Any path not matching one of these is rejected.
+var allowedProxyPathPrefixes = []string{
+	"/v1/",      // OpenAI-compatible inference APIs
+	"/api/",     // Ollama REST API
+	"/health",   // runtime health checks
+	"/metrics",  // runtime metrics endpoints
+}
+
+// blockedProxyHeaders are stripped from proxied requests before forwarding
+// to prevent the server from injecting auth or session state into local services.
+var blockedProxyHeaders = map[string]struct{}{
+	"authorization": {},
+	"cookie":        {},
+	"set-cookie":    {},
+	"x-forwarded-for": {},
+	"x-real-ip":     {},
 }
 
 type Client struct {
@@ -241,6 +267,13 @@ func (c *Client) readAndHandle(ctx context.Context, conn *websocket.Conn) error 
 		}
 		return nil
 	case "proxy_request":
+		if c.cfg.DisableRelayProxy {
+			var req proxyRequest
+			if err := json.Unmarshal(msg.Payload, &req); err == nil && strings.TrimSpace(req.RequestID) != "" {
+				_ = c.sendProxyError(conn, req.RequestID, fmt.Errorf("relay proxy is disabled on this agent"))
+			}
+			return nil
+		}
 		var req proxyRequest
 		if err := json.Unmarshal(msg.Payload, &req); err != nil {
 			return nil
@@ -342,10 +375,22 @@ func (c *Client) handleProxyRequest(ctx context.Context, conn *websocket.Conn, r
 		_ = c.sendProxyError(conn, req.RequestID, err)
 		return
 	}
-	method := strings.TrimSpace(req.Method)
+
+	method := strings.ToUpper(strings.TrimSpace(req.Method))
 	if method == "" {
 		method = http.MethodPost
 	}
+	if _, ok := allowedProxyMethods[method]; !ok {
+		_ = c.sendProxyError(conn, req.RequestID, fmt.Errorf("proxy method %q not allowed", method))
+		return
+	}
+
+	// Validate that the resolved path matches an allowed prefix.
+	if err := validateProxyPath(localURL); err != nil {
+		_ = c.sendProxyError(conn, req.RequestID, err)
+		return
+	}
+
 	var body io.Reader
 	if strings.TrimSpace(req.BodyBase64) != "" {
 		decoded, decodeErr := base64.StdEncoding.DecodeString(req.BodyBase64)
@@ -363,7 +408,11 @@ func (c *Client) handleProxyRequest(ctx context.Context, conn *websocket.Conn, r
 	}
 	for key, value := range req.Headers {
 		lowerKey := strings.ToLower(strings.TrimSpace(key))
+		// Strip hop-by-hop headers and blocked sensitive headers.
 		if lowerKey == "host" || lowerKey == "content-length" || lowerKey == "connection" {
+			continue
+		}
+		if _, blocked := blockedProxyHeaders[lowerKey]; blocked {
 			continue
 		}
 		upstreamReq.Header.Set(key, value)
@@ -457,6 +506,22 @@ func (c *Client) localURLForRequest(req proxyRequest) (string, error) {
 	port := runtimeport.Resolve(runtimeName)
 	targetURL := fmt.Sprintf("http://127.0.0.1:%d%s", port, path)
 	return targetURL, nil
+}
+
+// validateProxyPath ensures the full target URL has a path that starts with
+// one of the known runtime API prefixes.
+func validateProxyPath(rawURL string) error {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("invalid proxy target url: %w", err)
+	}
+	path := parsed.Path
+	for _, prefix := range allowedProxyPathPrefixes {
+		if strings.HasPrefix(path, prefix) {
+			return nil
+		}
+	}
+	return fmt.Errorf("proxy path %q is not in the allowed prefix list", path)
 }
 
 func resolveRelayURL(serverURL string, explicitRelayURL string) (string, error) {

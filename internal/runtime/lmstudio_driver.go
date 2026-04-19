@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Borgels/mantlerd/internal/discovery"
 	"github.com/Borgels/mantlerd/internal/types"
 )
 
@@ -76,12 +77,18 @@ func (d *llamaCppDriver) Install() error {
 	}
 
 	if !d.IsInstalled() {
-		assetURL, err := resolveLlamaCppReleaseAssetURL(cfg.Backend)
-		if err != nil {
-			return fmt.Errorf("resolve llama.cpp release asset: %w", err)
-		}
-		if err := installLlamaCppFromAsset(assetURL); err != nil {
-			return err
+		if discovery.IsDGXSpark() {
+			if err := buildLlamaCppFromSourceForDGXSpark(); err != nil {
+				return err
+			}
+		} else {
+			assetURL, err := resolveLlamaCppReleaseAssetURL(cfg.Backend)
+			if err != nil {
+				return fmt.Errorf("resolve llama.cpp release asset: %w", err)
+			}
+			if err := installLlamaCppFromAsset(assetURL); err != nil {
+				return err
+			}
 		}
 		if err := verifyLlamaCppBinary(); err != nil {
 			_ = os.Remove(llamaCppBinaryPath)
@@ -95,10 +102,10 @@ func (d *llamaCppDriver) Install() error {
 	if err := d.ensureServiceUnit(cfg); err != nil {
 		return err
 	}
-	if err := runSystemctl( "enable", "llamacpp"); err != nil {
+	if err := runSystemctl("enable", "llamacpp"); err != nil {
 		return fmt.Errorf("enable llamacpp service: %w", err)
 	}
-	if err := runSystemctl( "restart", "llamacpp"); err != nil {
+	if err := runSystemctl("restart", "llamacpp"); err != nil {
 		return fmt.Errorf("restart llamacpp service: %w", err)
 	}
 	if err := d.waitForReady(llamaCppReadyTimeout); err != nil {
@@ -115,10 +122,10 @@ func (d *llamaCppDriver) Install() error {
 }
 
 func (d *llamaCppDriver) Uninstall() error {
-	_ = runSystemctl( "stop", "llamacpp")
-	_ = runSystemctl( "disable", "llamacpp")
+	_ = runSystemctl("stop", "llamacpp")
+	_ = runSystemctl("disable", "llamacpp")
 	_ = os.Remove(llamaCppServiceUnitPath)
-	_ = runSystemctl( "daemon-reload")
+	_ = runSystemctl("daemon-reload")
 	_ = os.RemoveAll(llamaCppInstallDir)
 	_ = os.Remove(llamaCppConfigPath)
 	return nil
@@ -179,7 +186,7 @@ func (d *llamaCppDriver) PrepareModelWithFlags(modelID string, _ *types.ModelFea
 	if err := d.ensureServiceUnit(cfg); err != nil {
 		return err
 	}
-	if err := runSystemctl( "restart", "llamacpp"); err != nil {
+	if err := runSystemctl("restart", "llamacpp"); err != nil {
 		return fmt.Errorf("restart llamacpp service: %w", err)
 	}
 	return d.waitForReady(llamaCppReadyTimeout)
@@ -191,7 +198,7 @@ func (d *llamaCppDriver) StartModelWithFlags(modelID string, flags *types.ModelF
 
 func (d *llamaCppDriver) StopModel(modelID string) error {
 	_ = modelID
-	return runSystemctl( "stop", "llamacpp")
+	return runSystemctl("stop", "llamacpp")
 }
 
 func (d *llamaCppDriver) ListModels() []string {
@@ -226,7 +233,7 @@ func (d *llamaCppDriver) RemoveModel(modelID string) error {
 			return err
 		}
 	}
-	return runSystemctl( "restart", "llamacpp")
+	return runSystemctl("restart", "llamacpp")
 }
 
 func (d *llamaCppDriver) BenchmarkModel(
@@ -343,7 +350,7 @@ func (d *llamaCppDriver) RestartRuntime() error {
 	if err := d.ensureServiceUnit(cfg); err != nil {
 		return err
 	}
-	if err := runSystemctl( "restart", "llamacpp"); err != nil {
+	if err := runSystemctl("restart", "llamacpp"); err != nil {
 		return fmt.Errorf("restart llamacpp service: %w", err)
 	}
 	return d.waitForReady(llamaCppReadyTimeout)
@@ -856,6 +863,68 @@ func installLlamaCppFromAsset(assetURL string) error {
 		return err
 	}
 	if err := copyLlamaCppArtifacts(filepath.Dir(binary), llamaCppInstallDir); err != nil {
+		return err
+	}
+	return nil
+}
+
+func runCommandInDir(dir string, name string, args ...string) error {
+	cmd := exec.Command(name, args...)
+	cmd.Dir = dir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%s %s failed: %w (%s)", name, strings.Join(args, " "), err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
+func buildLlamaCppFromSourceForDGXSpark() error {
+	requiredTools := []string{"git", "cmake", "make", "nvcc"}
+	for _, tool := range requiredTools {
+		if _, err := exec.LookPath(tool); err != nil {
+			return fmt.Errorf("building llama.cpp for DGX Spark requires %s in PATH", tool)
+		}
+	}
+
+	tmpDir, err := os.MkdirTemp("", "llamacpp-dgx-build-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmpDir)
+
+	sourceDir := filepath.Join(tmpDir, "llama.cpp")
+	if err := runCommand("git", "clone", "--depth", "1", "https://github.com/ggml-org/llama.cpp", sourceDir); err != nil {
+		return fmt.Errorf("clone llama.cpp: %w", err)
+	}
+	buildDir := filepath.Join(sourceDir, "build")
+	if err := os.MkdirAll(buildDir, 0o755); err != nil {
+		return err
+	}
+	if err := runCommandInDir(
+		buildDir,
+		"cmake",
+		"..",
+		"-DGGML_CUDA=ON",
+		"-DCMAKE_CUDA_ARCHITECTURES=121",
+		"-DLLAMA_CURL=OFF",
+	); err != nil {
+		return fmt.Errorf("configure llama.cpp: %w", err)
+	}
+	if err := runCommandInDir(buildDir, "make", "-j8"); err != nil {
+		return fmt.Errorf("build llama.cpp: %w", err)
+	}
+
+	binDir := filepath.Join(buildDir, "bin")
+	binaryPath := filepath.Join(binDir, "llama-server")
+	if _, err := os.Stat(binaryPath); err != nil {
+		return fmt.Errorf("llama.cpp build did not produce llama-server: %w", err)
+	}
+
+	_ = os.RemoveAll(llamaCppInstallDir)
+	if err := os.MkdirAll(llamaCppInstallDir, 0o755); err != nil {
+		return err
+	}
+	if err := copyLlamaCppArtifacts(binDir, llamaCppInstallDir); err != nil {
 		return err
 	}
 	return nil

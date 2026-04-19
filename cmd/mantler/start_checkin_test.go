@@ -81,7 +81,7 @@ func TestRunCheckInFollowUpDoesNotResendOutcomeEvents(t *testing.T) {
 	trainerManager := trainer.NewManager()
 	toolManager := agenttools.NewManager()
 	executor := commands.NewExecutor(runtimeManager, trainerManager, toolManager, cfg, nil, nil)
-	dispatcher := newCommandDispatcher(context.Background(), executor, cl, defaultLightCommandConcurrency)
+	dispatcher := newCommandDispatcher(context.Background(), executor, cl, cfg, defaultLightCommandConcurrency)
 	outcomes := &outcomeBuffer{}
 	outcomes.Add(types.OutcomeEvent{
 		EventType: "task_success",

@@ -88,6 +88,15 @@ func DetectUnifiedMemory() *bool {
 	return &unified
 }
 
+// IsDGXSpark returns true when the host matches DGX Spark characteristics.
+func IsDGXSpark() bool {
+	if normalizeArch(runtime.GOARCH) != "arm64" {
+		return false
+	}
+	unified := DetectUnifiedMemory()
+	return unified != nil && *unified
+}
+
 func Collect() HardwareReport {
 	hostname, _ := os.Hostname()
 	addresses := collectAddresses()

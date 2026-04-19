@@ -132,10 +132,10 @@ func (d *vllmDriver) Install() error {
 }
 
 func (d *vllmDriver) Uninstall() error {
-	_ = runSystemctl( "stop", "vllm")
-	_ = runSystemctl( "disable", "vllm")
+	_ = runSystemctl("stop", "vllm")
+	_ = runSystemctl("disable", "vllm")
 	_ = os.Remove(vllmUnitPath)
-	_ = runSystemctl( "daemon-reload")
+	_ = runSystemctl("daemon-reload")
 	if d.shouldUseContainer() {
 		_ = exec.Command("docker", "rm", "-f", vllmContainerName).Run()
 		image := d.containerImage()
@@ -170,8 +170,8 @@ func (d *vllmDriver) IsReady() bool {
 	if configuredModel, known := d.configuredModelState(); known {
 		if strings.TrimSpace(configuredModel) == "" {
 			// Installed runtime with no configured model is considered idle-ready.
-			_ = runSystemctl( "stop", "vllm")
-			_ = runSystemctl( "reset-failed", "vllm")
+			_ = runSystemctl("stop", "vllm")
+			_ = runSystemctl("reset-failed", "vllm")
 			return true
 		}
 		if incompatibility := d.knownModelImageIncompatibility(configuredModel, d.effectiveContainerImage()); incompatibility != "" {
@@ -314,8 +314,8 @@ func (d *vllmDriver) StopModel(modelID string) error {
 	if configuredModel, known := d.configuredModelState(); known && strings.EqualFold(strings.TrimSpace(configuredModel), modelID) {
 		d.disarmConfiguredModel()
 	}
-	_ = runSystemctl( "stop", "vllm")
-	_ = runSystemctl( "reset-failed", "vllm")
+	_ = runSystemctl("stop", "vllm")
+	_ = runSystemctl("reset-failed", "vllm")
 	return nil
 }
 
@@ -679,7 +679,7 @@ func (d *vllmDriver) RestartRuntime() error {
 			if incompatibility := d.knownModelImageIncompatibility(cfg.Model, d.effectiveContainerImage()); incompatibility != "" {
 				d.disarmConfiguredModel()
 				d.stopVLLMServiceForKnownIncompatibility()
-				_ = runSystemctl( "reset-failed", "vllm")
+				_ = runSystemctl("reset-failed", "vllm")
 				return nil
 			}
 			port := cfg.Port
@@ -689,19 +689,19 @@ func (d *vllmDriver) RestartRuntime() error {
 			return d.startOrRestartService(cfg.Model, port, true)
 		}
 		// No configured model: keep runtime idle instead of crash-looping a blank service.
-		_ = runSystemctl( "stop", "vllm")
-		_ = runSystemctl( "reset-failed", "vllm")
+		_ = runSystemctl("stop", "vllm")
+		_ = runSystemctl("reset-failed", "vllm")
 		return nil
 	}
 	if os.IsNotExist(cfgErr) {
-		_ = runSystemctl( "stop", "vllm")
-		_ = runSystemctl( "reset-failed", "vllm")
+		_ = runSystemctl("stop", "vllm")
+		_ = runSystemctl("reset-failed", "vllm")
 		return nil
 	}
-	if err := runSystemctl( "restart", "vllm"); err == nil {
+	if err := runSystemctl("restart", "vllm"); err == nil {
 		return nil
 	}
-	return runSystemctl( "restart", "mantler-runtime")
+	return runSystemctl("restart", "mantler-runtime")
 }
 
 func (d *vllmDriver) baseURL() string {
@@ -931,10 +931,19 @@ func (d *vllmDriver) startOrRestartService(modelID string, port int, force bool)
 		return err
 	}
 	if err := d.waitForAPIReady(vllmRapidFailureWindow); err != nil {
+		if serviceLikelyOutOfMemory("vllm", err) {
+			if flushErr := flushUMAPageCache(); flushErr == nil {
+				if restartErr := runSystemctl("restart", "vllm"); restartErr == nil {
+					if retryErr := d.waitForAPIReady(vllmRapidFailureWindow); retryErr == nil {
+						return nil
+					}
+				}
+			}
+		}
 		diagnostics := d.vllmDiagnosticsTail()
 		if d.shouldAutoEnableTrustRemoteCode(diagnostics) {
 			if trustErr := d.enableTrustRemoteCodeInEnv(); trustErr == nil {
-				if restartErr := runSystemctl( "restart", "vllm"); restartErr == nil {
+				if restartErr := runSystemctl("restart", "vllm"); restartErr == nil {
 					if readyErr := d.waitForAPIReady(vllmReadyTimeout); readyErr == nil {
 						return nil
 					}
@@ -999,10 +1008,10 @@ func (d *vllmDriver) knownModelImageIncompatibility(modelID string, containerIma
 }
 
 func (d *vllmDriver) stopVLLMServiceForKnownIncompatibility() {
-	if err := runSystemctl( "stop", "vllm"); err != nil {
+	if err := runSystemctl("stop", "vllm"); err != nil {
 		return
 	}
-	_ = runSystemctl( "reset-failed", "vllm")
+	_ = runSystemctl("reset-failed", "vllm")
 }
 
 func (d *vllmDriver) serviceIsInactive() bool {

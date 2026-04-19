@@ -52,7 +52,7 @@ func runCheckin(cmd *cobra.Command, args []string) {
 	executor := commands.NewExecutor(runtimeManager, trainerManager, toolManager, cfg, func(payload types.AckRequest) {
 		sendInProgressAck(cl, payload)
 	}, outcomes.Add)
-	dispatcher := newCommandDispatcher(context.Background(), executor, cl, defaultLightCommandConcurrency)
+	dispatcher := newCommandDispatcher(context.Background(), executor, cl, cfg, defaultLightCommandConcurrency)
 
 	// Run check-in
 	cycle := runCheckIn(

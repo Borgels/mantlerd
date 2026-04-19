@@ -7,6 +7,8 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+
+	"github.com/Borgels/mantlerd/internal/discovery"
 )
 
 const modelFailReasonInsufficientMemory = "insufficient_memory"
@@ -144,4 +146,14 @@ func isServiceListeningOnNonLoopback(port int) (bool, error) {
 func isLoopbackSocketAddress(value string) bool {
 	value = strings.TrimSpace(value)
 	return strings.HasPrefix(value, "127.0.0.1:") || strings.HasPrefix(value, "[::1]:")
+}
+
+func flushUMAPageCache() error {
+	if runtime.GOOS != "linux" || !discovery.IsDGXSpark() {
+		return nil
+	}
+	if os.Geteuid() == 0 {
+		return runCommand("sh", "-c", "sync; echo 3 > /proc/sys/vm/drop_caches")
+	}
+	return runCommand("sudo", "-n", "sh", "-c", "sync; echo 3 > /proc/sys/vm/drop_caches")
 }
