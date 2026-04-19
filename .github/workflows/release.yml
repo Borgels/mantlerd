@@ -78,7 +78,7 @@ jobs:
           scripts/release-build.sh "${{ steps.version.outputs.value }}"
 
       - name: Upload release assets
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.release_tag.outputs.value }}
           name: ${{ steps.version.outputs.value }}
